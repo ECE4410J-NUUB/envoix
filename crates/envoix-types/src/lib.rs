@@ -2,10 +2,12 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Wire protocol version used by the v0 walking skeleton.
 pub const PROTOCOL_VERSION: u32 = 0;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct TransferId(pub String);
 
 impl TransferId {
@@ -20,7 +22,7 @@ impl fmt::Display for TransferId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct FileId(pub String);
 
 impl FileId {
@@ -29,22 +31,22 @@ impl FileId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize)]
 pub struct ChunkId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize)]
 pub struct ChunkSize(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize)]
 pub struct ByteCount(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum TransferDirection {
     Send,
     Receive,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum ConnectionMode {
     TcpIpv6,
     QuicDirect,
@@ -52,7 +54,7 @@ pub enum ConnectionMode {
     ServerFallback,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum PeerRole {
     Sender,
     Receiver,
