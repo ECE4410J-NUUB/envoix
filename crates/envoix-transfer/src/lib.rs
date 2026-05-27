@@ -1,7 +1,6 @@
 //! File-transfer state machine.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_crypto::CryptoProvider;
 use envoix_error::CoreError;
@@ -9,7 +8,9 @@ use envoix_protocol::{Chunk, Complete, FileHeader, FileHeaderAck, Frame, Hello, 
 use envoix_storage::LocalFileStorage;
 use envoix_transport::FrameConnection;
 use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
+use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uuid::Uuid;
 
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -150,6 +151,13 @@ where
                 total_bytes,
             });
         }
+        
+        if offset != total_bytes {
+            return Err(CoreError::Transfer(format!(
+                "unexpected end of file: expected to read {} bytes but only read {}",
+                total_bytes, offset
+            )));
+        }
 
         connection
             .send_frame(Frame::Complete(Complete {
@@ -179,6 +187,13 @@ where
 
         let header = expect_file_header(connection.recv_frame().await?)?;
         let final_path = output_dir.join(&header.file_name);
+        // fail early if the final file already exists
+        if fs::try_exists(&final_path).await? {
+            return Err(CoreError::Storage(format!(
+                "destination already exists: {}",
+                final_path.display()
+            )));
+        }
         let (temp_path, mut file) =
             LocalFileStorage::create_temp_destination(&output_dir, &header.file_name).await?;
 
@@ -207,6 +222,12 @@ where
                         chunk.index,
                         &chunk.bytes,
                     )?;
+                    if decrypted.len() as u64 + expected_offset > header.file_size {
+                        return Err(CoreError::Transfer(format!(
+                            "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
+                            chunk.offset, decrypted.len(), header.file_size
+                        )));
+                    }
                     file.write_all(&decrypted).await?;
 
                     expected_index += 1;
@@ -218,6 +239,12 @@ where
                     });
                 }
                 Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
+                    if expected_offset != header.file_size {
+                        return Err(CoreError::Transfer(format!(
+                            "transfer complete but expected offset {expected_offset} does not match file size {}",
+                            header.file_size
+                        )));
+                    }
                     file.flush().await?;
                     drop(file);
                     LocalFileStorage::finalize_temp_file(&temp_path, &final_path).await?;
@@ -309,11 +336,7 @@ fn validate_chunk(
 }
 
 fn new_transfer_id() -> TransferId {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    TransferId::new(format!("transfer-{nanos}"))
+    TransferId::new(format!("transfer-{}", Uuid::now_v7()))
 }
 
 #[cfg(test)]
@@ -322,6 +345,7 @@ mod tests {
     use async_trait::async_trait;
     use envoix_crypto::InsecureNoopCryptoProvider;
     use tokio::sync::mpsc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
     async fn transfers_file_over_frame_connection() {

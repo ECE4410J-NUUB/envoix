@@ -20,7 +20,14 @@ impl TransportDialer for TcpIpv6Dialer {
         &self,
         candidate: ConnectionCandidate,
     ) -> Result<Box<dyn FrameConnection>, TransportError> {
-        let ConnectionCandidate::TcpIpv6 { addr } = candidate;
+        let addr = match candidate {
+            ConnectionCandidate::TcpIpv6 { addr } => addr,
+            // other => {
+            //     return Err(CoreError::Transport(format!(
+            //         "TcpIpv6Dialer only supports TcpIpv6 candidate, got unexpected candidate: {other:?}"
+            //     )));
+            // }
+        };
         if !addr.is_ipv6() {
             return Err(CoreError::Transport(format!(
                 "expected IPv6 address, got {addr}"

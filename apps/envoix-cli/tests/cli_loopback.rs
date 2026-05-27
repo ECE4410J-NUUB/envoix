@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::net::TcpListener;
+use std::net::{TcpListener};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -14,7 +14,8 @@ fn cli_transfers_file_over_ipv6_loopback() {
     fs::create_dir_all(&source_dir).unwrap();
 
     let source_path = source_dir.join("hello.txt");
-    fs::write(&source_path, b"hello from the cli").unwrap();
+    let source_text = b"hello from the cli";
+    fs::write(&source_path, source_text).unwrap();
 
     let listen_addr = free_ipv6_loopback_addr();
     let mut receiver = Command::new(env!("CARGO_BIN_EXE_envoix"))
@@ -28,6 +29,8 @@ fn cli_transfers_file_over_ipv6_loopback() {
         .spawn()
         .unwrap();
 
+    // TODO: should use other approaches other than fixed time sleep.
+    // but this is not easy to solve.
     thread::sleep(Duration::from_millis(200));
 
     let send_output = Command::new(env!("CARGO_BIN_EXE_envoix"))
@@ -60,7 +63,7 @@ fn cli_transfers_file_over_ipv6_loopback() {
 
     assert_eq!(
         fs::read(output_dir.join("hello.txt")).unwrap(),
-        b"hello from the cli"
+        source_text
     );
 
     fs::remove_dir_all(root).unwrap();

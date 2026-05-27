@@ -71,7 +71,8 @@ mod tests {
         let (temp_path, mut file) = LocalFileStorage::create_temp_destination(&dir, "hello.txt")
             .await
             .unwrap();
-        file.write_all(b"hello").await.unwrap();
+        let text = b"hello";
+        file.write_all(text).await.unwrap();
         file.flush().await.unwrap();
         drop(file);
 
@@ -79,7 +80,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(fs::read(&final_path).await.unwrap(), b"hello");
+        assert_eq!(fs::read(&final_path).await.unwrap(), text);
         fs::remove_dir_all(&dir).await.unwrap();
     }
 
