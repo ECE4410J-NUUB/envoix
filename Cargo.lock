@@ -30,7 +30,9 @@ dependencies = [
 name = "envoix-client"
 version = "0.1.0"
 dependencies = [
+ "envoix-error",
  "envoix-session",
+ "tokio",
 ]
 
 [[package]]
@@ -73,7 +75,9 @@ version = "0.1.0"
 dependencies = [
  "envoix-crypto",
  "envoix-discovery",
+ "envoix-error",
  "envoix-transfer",
+ "envoix-transport",
  "envoix-transport-tcp",
 ]
 
