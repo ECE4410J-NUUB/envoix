@@ -1,0 +1,11 @@
+[package]
+name = "envoix-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+envoix-crypto.workspace = true
+envoix-discovery.workspace = true
+envoix-transfer.workspace = true
+envoix-transport-tcp.workspace = true

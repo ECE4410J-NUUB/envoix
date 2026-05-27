@@ -1,0 +1,12 @@
+[package]
+name = "envoix-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+envoix-crypto.workspace = true
+envoix-error.workspace = true
+envoix-storage.workspace = true
+envoix-transport.workspace = true
+envoix-types.workspace = true

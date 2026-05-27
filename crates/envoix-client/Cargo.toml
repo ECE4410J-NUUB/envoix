@@ -1,0 +1,8 @@
+[package]
+name = "envoix-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+envoix-session.workspace = true

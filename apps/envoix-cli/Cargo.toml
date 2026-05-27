@@ -1,0 +1,12 @@
+[package]
+name = "envoix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "envoix"
+path = "src/main.rs"
+
+[dependencies]
+envoix-client.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "envoix-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+envoix-error.workspace = true
+envoix-protocol.workspace = true

@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "apps/envoix-cli",
+    "crates/envoix-client",
+    "crates/envoix-session",
+    "crates/envoix-transfer",
+    "crates/envoix-transport",
+    "crates/envoix-transport-tcp",
+    "crates/envoix-protocol",
+    "crates/envoix-discovery",
+    "crates/envoix-storage",
+    "crates/envoix-crypto",
+    "crates/envoix-types",
+    "crates/envoix-error",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+envoix-client = { path = "crates/envoix-client" }
+envoix-session = { path = "crates/envoix-session" }
+envoix-transfer = { path = "crates/envoix-transfer" }
+envoix-transport = { path = "crates/envoix-transport" }
+envoix-transport-tcp = { path = "crates/envoix-transport-tcp" }
+envoix-protocol = { path = "crates/envoix-protocol" }
+envoix-discovery = { path = "crates/envoix-discovery" }
+envoix-storage = { path = "crates/envoix-storage" }
+envoix-crypto = { path = "crates/envoix-crypto" }
+envoix-types = { path = "crates/envoix-types" }
+envoix-error = { path = "crates/envoix-error" }
