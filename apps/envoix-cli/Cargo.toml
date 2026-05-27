@@ -9,4 +9,6 @@ name = "envoix"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
 envoix-client.workspace = true
+tokio.workspace = true

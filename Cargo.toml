@@ -32,3 +32,9 @@ envoix-storage = { path = "crates/envoix-storage" }
 envoix-crypto = { path = "crates/envoix-crypto" }
 envoix-types = { path = "crates/envoix-types" }
 envoix-error = { path = "crates/envoix-error" }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }

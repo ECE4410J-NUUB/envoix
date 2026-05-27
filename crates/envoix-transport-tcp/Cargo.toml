@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+envoix-error.workspace = true
 envoix-protocol.workspace = true
 envoix-transport.workspace = true
+tokio.workspace = true
