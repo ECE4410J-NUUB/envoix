@@ -151,7 +151,7 @@ where
                 total_bytes,
             });
         }
-        
+
         if offset != total_bytes {
             return Err(CoreError::Transfer(format!(
                 "unexpected end of file: expected to read {} bytes but only read {}",
@@ -225,7 +225,9 @@ where
                     if decrypted.len() as u64 + expected_offset > header.file_size {
                         return Err(CoreError::Transfer(format!(
                             "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
-                            chunk.offset, decrypted.len(), header.file_size
+                            chunk.offset,
+                            decrypted.len(),
+                            header.file_size
                         )));
                     }
                     file.write_all(&decrypted).await?;
@@ -344,8 +346,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use envoix_crypto::InsecureNoopCryptoProvider;
-    use tokio::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn transfers_file_over_frame_connection() {

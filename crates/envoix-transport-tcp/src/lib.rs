@@ -1,4 +1,4 @@
-//! IPv6 TCP transport implementation.
+//! TCP transport implementation.
 
 use std::net::SocketAddr;
 
@@ -20,20 +20,7 @@ impl TransportDialer for TcpIpv6Dialer {
         &self,
         candidate: ConnectionCandidate,
     ) -> Result<Box<dyn FrameConnection>, TransportError> {
-        let addr = match candidate {
-            ConnectionCandidate::TcpIpv6 { addr } => addr,
-            // other => {
-            //     return Err(CoreError::Transport(format!(
-            //         "TcpIpv6Dialer only supports TcpIpv6 candidate, got unexpected candidate: {other:?}"
-            //     )));
-            // }
-        };
-        if !addr.is_ipv6() {
-            return Err(CoreError::Transport(format!(
-                "expected IPv6 address, got {addr}"
-            )));
-        }
-
+        let ConnectionCandidate::TcpIpv6 { addr } = candidate;
         let stream = TcpStream::connect(addr).await?;
         Ok(Box::new(TcpFrameConnection::new(stream)))
     }
@@ -46,12 +33,6 @@ pub struct TcpIpv6Listener {
 
 impl TcpIpv6Listener {
     pub async fn bind(addr: SocketAddr) -> Result<Self, TransportError> {
-        if !addr.is_ipv6() {
-            return Err(CoreError::Transport(format!(
-                "expected IPv6 address, got {addr}"
-            )));
-        }
-
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener })
     }
@@ -102,10 +83,17 @@ mod tests {
     use envoix_protocol::{Frame, Ready};
 
     #[tokio::test]
-    async fn tcp_transport_exchanges_frames() {
-        let listener = TcpIpv6Listener::bind("[::1]:0".parse().unwrap())
-            .await
-            .unwrap();
+    async fn tcp_transport_exchanges_frames_over_ipv6() {
+        assert_tcp_transport_exchanges_frames("[::1]:0".parse().unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_exchanges_frames_over_ipv4() {
+        assert_tcp_transport_exchanges_frames("127.0.0.1:0".parse().unwrap()).await;
+    }
+
+    async fn assert_tcp_transport_exchanges_frames(bind_addr: SocketAddr) {
+        let listener = TcpIpv6Listener::bind(bind_addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let receiver = tokio::spawn(async move {

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::net::{TcpListener};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -61,10 +61,7 @@ fn cli_transfers_file_over_ipv6_loopback() {
         panic!("receiver failed\nstderr:\n{}", read_stderr(receiver));
     }
 
-    assert_eq!(
-        fs::read(output_dir.join("hello.txt")).unwrap(),
-        source_text
-    );
+    assert_eq!(fs::read(output_dir.join("hello.txt")).unwrap(), source_text);
 
     fs::remove_dir_all(root).unwrap();
 }
