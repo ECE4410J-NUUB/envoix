@@ -7,14 +7,18 @@ Minimal CLI-first secure file transfer walking skeleton for VE441.
 Run the receiver:
 
 ```bash
-cargo run -p envoix-cli -- receive --listen "[::1]:9000" --output ./received --token "shared-token-123"
+cargo run -p envoix-cli -- receive --output ./received --token "shared-token-123" --ip-version ipv4
 ```
 
-In another terminal, send one file:
+The receiver prints the address and OS-assigned port it is listening on. In
+another terminal, send one file to that port using the receiver's reachable IP:
 
 ```bash
-cargo run -p envoix-cli -- send --peer "[::1]:9000" --token "shared-token-123" ./hello.txt
+cargo run -p envoix-cli -- send --peer "127.0.0.1:<printed-port>" --token "shared-token-123" ./hello.txt
 ```
+
+Use `--ip-version ipv6` on `receive` when the receiver should bind an IPv6
+socket instead.
 
 The receiver writes the file into the output directory using the original file name.
 If a transfer is interrupted before completion, restart both commands with the same

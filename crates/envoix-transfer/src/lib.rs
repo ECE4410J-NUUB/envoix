@@ -234,6 +234,9 @@ impl TransferEngine {
 
         let header = expect_file_header(connection.recv_frame().await?)?;
         let final_path = output_dir.join(&header.file_name);
+        // file exists
+        // either this is a different file -> abort
+        // or this is the same file -> skip to complete phase
         if fs::try_exists(&final_path).await? {
             let final_hash = hash_file(&final_path).await?;
             if final_hash != header.file_hash {
@@ -275,7 +278,7 @@ impl TransferEngine {
             });
         }
 
-        let state = load_or_create_resume_state(&output_dir, &header).await?;
+        let mut state = load_or_create_resume_state(&output_dir, &header).await?;
         let temp_path = LocalFileStorage::resumable_temp_path(
             &output_dir,
             &state.file_name,
@@ -287,10 +290,19 @@ impl TransferEngine {
             Err(error) => return Err(CoreError::from(error)),
         };
         if temp_len != state.bytes_received {
-            return Err(CoreError::Storage(format!(
-                "resume temp length {temp_len} does not match recorded length {}",
+            if temp_len > state.file_size {
+                return Err(CoreError::Storage(format!(
+                    "resume temp length {temp_len} exceeds recorded file size {}",
+                    state.file_size
+                )));
+            }
+            log::warn!(
+                "resume temp length {temp_len} does not match recorded length {}; trusting temp file",
                 state.bytes_received
-            )));
+            );
+            state.bytes_received = temp_len;
+            state.next_chunk_index = next_chunk_index(temp_len, state.chunk_size);
+            LocalFileStorage::write_resume_state(&output_dir, &state).await?;
         }
         let (temp_path, mut file) =
             LocalFileStorage::open_resumable_destination(&output_dir, &state).await?;
@@ -740,6 +752,65 @@ mod tests {
                 .unwrap()
         );
         assert!(fs::try_exists(temp_path).await.unwrap());
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumes_from_temp_file_when_sidecar_offset_is_stale() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_path = source_dir.join("stale-sidecar.txt");
+        let source_bytes = b"abcdefghij";
+        tokio::fs::write(&source_path, source_bytes).await.unwrap();
+
+        let file_hash = blake3::hash(source_bytes).to_hex().to_string();
+        let transfer_id = transfer_id_for_hash(&file_hash);
+        let state = TransferResumeState {
+            transfer_id: transfer_id.clone(),
+            file_name: "stale-sidecar.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            expected_file_hash: file_hash,
+            bytes_received: 0,
+            next_chunk_index: 0,
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "stale-sidecar.txt", &transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abcde").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        let send_summary = TransferEngine::new(5)
+            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+            .await
+            .unwrap();
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(send_summary.bytes_transferred, 10);
+        assert_eq!(receive_summary.bytes_transferred, 10);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("stale-sidecar.txt"))
+                .await
+                .unwrap(),
+            source_bytes
+        );
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

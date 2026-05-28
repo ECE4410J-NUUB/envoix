@@ -57,7 +57,22 @@ pub async fn receive_file(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
+    receive_file_with_bound_addr(listen_addr, output_dir, config, events, |_| {}).await
+}
+
+/// Receives one file and reports the concrete bound address before accepting.
+pub async fn receive_file_with_bound_addr<F>(
+    listen_addr: SocketAddr,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    on_bound_addr: F,
+) -> Result<TransferSummary, SessionError>
+where
+    F: FnOnce(SocketAddr) + Send,
+{
     let listener = QuicListener::bind(listen_addr)?;
+    on_bound_addr(listener.local_addr()?);
     let mut connection = listener.accept().await?;
     let engine = TransferEngine::new(config.chunk_size);
 

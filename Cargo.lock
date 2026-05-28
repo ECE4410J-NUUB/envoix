@@ -437,6 +437,7 @@ dependencies = [
  "envoix-storage",
  "envoix-transport",
  "envoix-types",
+ "log",
  "tokio",
 ]
 

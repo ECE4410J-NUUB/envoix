@@ -1,8 +1,7 @@
 //! QUIC transport implementation.
 //!
 //! This crate intentionally uses generated self-signed certificates and an
-//! insecure no-auth client verifier. It matches the current unauthenticated
-//! skeleton and must not be treated as production transport security.
+//! insecure no-auth client verifier. The p2p auth relies on the handshake.  
 
 use std::net::SocketAddr;
 use std::sync::Arc;

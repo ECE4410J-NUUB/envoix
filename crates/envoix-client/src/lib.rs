@@ -8,7 +8,7 @@ use envoix_error::CoreError;
 pub use envoix_session::{
     EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
 };
-use envoix_session::{SessionConfig, receive_file, send_file_manual};
+use envoix_session::{SessionConfig, receive_file, receive_file_with_bound_addr, send_file_manual};
 
 /// Error type exposed by the public client facade.
 pub type PublicError = CoreError;
@@ -90,6 +90,27 @@ impl EnvoixClient {
             request.output_dir,
             self.session_config(),
             events,
+        )
+        .await
+    }
+
+    /// Receives one file and reports the concrete bound address before accepting.
+    pub async fn receive_file_with_bound_addr<F>(
+        &self,
+        request: ReceiveFileRequest,
+        events: Box<dyn EventSink>,
+        on_bound_addr: F,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(SocketAddr) + Send,
+    {
+        self.validate_config()?;
+        receive_file_with_bound_addr(
+            request.listen_addr,
+            request.output_dir,
+            self.session_config(),
+            events,
+            on_bound_addr,
         )
         .await
     }

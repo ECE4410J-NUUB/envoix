@@ -2,14 +2,22 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, EnvoixClient, EventSink, PairingConfig, ReceiveFileRequest,
     SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, TransferDirection, TransferEvent,
 };
 
+const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
+const IPV6_RECEIVE_ADDR: &str = "[::]:0";
+
 #[derive(Debug, Parser)]
-#[command(name = "envoix", version, about = "Secure file transfer CLI")]
+#[command(
+    name = "envoix",
+    version,
+    about = "Secure file transfer CLI",
+    after_help = "Typical flow:\n  1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.\n  2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -17,21 +25,35 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Send one file to a receiver address printed by `envoix receive`.
     Send {
+        /// Receiver address, using the port printed by `envoix receive`.
         #[arg(long)]
         peer: SocketAddr,
+        /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
+        /// File to send.
         file: PathBuf,
     },
+    /// Receive one file into an output directory.
     Receive {
-        #[arg(long)]
-        listen: SocketAddr,
+        /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
+        /// Address family to bind for receiving.
+        #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
+        ip_version: IpVersion,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IpVersion {
+    Ipv4,
+    Ipv6,
 }
 
 #[tokio::main]
@@ -64,18 +86,19 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             );
         }
         Command::Receive {
-            listen,
             output,
             token,
+            ip_version,
         } => {
             let client = client_for_token(token)?;
             let summary = client
-                .receive_file(
+                .receive_file_with_bound_addr(
                     ReceiveFileRequest {
-                        listen_addr: listen,
+                        listen_addr: receive_addr_for(ip_version),
                         output_dir: output,
                     },
                     Box::new(ConsoleEventSink),
+                    |addr| eprintln!("listening on {addr}"),
                 )
                 .await?;
             eprintln!(
@@ -86,6 +109,14 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     }
 
     Ok(())
+}
+
+fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
+    let addr = match ip_version {
+        IpVersion::Ipv4 => IPV4_RECEIVE_ADDR,
+        IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
+    };
+    addr.parse().expect("default receive address is valid")
 }
 
 fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
@@ -163,8 +194,6 @@ mod tests {
         let cli = Cli::try_parse_from([
             "envoix",
             "receive",
-            "--listen",
-            "[::1]:9000",
             "--output",
             "received",
             "--token",
@@ -175,12 +204,35 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Receive {
-                listen,
                 output,
-                token
-            } if listen == "[::1]:9000".parse().unwrap()
-                && output == std::path::Path::new("received")
+                token,
+                ip_version
+            } if output == std::path::Path::new("received")
                 && token == "abcdefghijkl"
+                && ip_version == IpVersion::Ipv4
+        ));
+    }
+
+    #[test]
+    fn parses_receive_ipv6() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "received",
+            "--token",
+            "abcdefghijkl",
+            "--ip-version",
+            "ipv6",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                ip_version: IpVersion::Ipv6,
+                ..
+            }
         ));
     }
 
