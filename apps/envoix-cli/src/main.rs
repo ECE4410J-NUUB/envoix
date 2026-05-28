@@ -1,6 +1,9 @@
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use envoix_client::{
@@ -77,7 +80,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         peer_addr: peer,
                         file_path: file,
                     },
-                    Box::new(ConsoleEventSink),
+                    Box::new(ConsoleEventSink::new()),
                 )
                 .await?;
             eprintln!(
@@ -97,7 +100,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         listen_addr: receive_addr_for(ip_version),
                         output_dir: output,
                     },
-                    Box::new(ConsoleEventSink),
+                    Box::new(ConsoleEventSink::new()),
                     |addr| eprintln!("listening on {addr}"),
                 )
                 .await?;
@@ -126,8 +129,24 @@ fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::Public
     )))
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ConsoleEventSink;
+#[derive(Debug, Default)]
+struct ConsoleEventSink {
+    progress: Mutex<Option<ProgressState>>,
+}
+
+impl ConsoleEventSink {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug)]
+struct ProgressState {
+    file_name: String,
+    direction: TransferDirection,
+    total_bytes: u64,
+    started_at: Instant,
+}
 
 impl EventSink for ConsoleEventSink {
     fn on_event(&self, event: TransferEvent) {
@@ -138,25 +157,127 @@ impl EventSink for ConsoleEventSink {
                 total_bytes,
                 ..
             } => {
-                let verb = match direction {
-                    TransferDirection::Send => "sending",
-                    TransferDirection::Receive => "receiving",
+                let state = ProgressState {
+                    file_name,
+                    direction,
+                    total_bytes,
+                    started_at: Instant::now(),
                 };
-                eprintln!("{verb} {file_name} ({total_bytes} bytes)");
+                render_progress_line(&state, 0, false);
+                *self.progress.lock().unwrap() = Some(state);
             }
             TransferEvent::Progress {
-                bytes_transferred,
-                total_bytes,
-                ..
+                bytes_transferred, ..
             } => {
-                eprintln!("progress {bytes_transferred}/{total_bytes} bytes");
+                if let Some(state) = self.progress.lock().unwrap().as_ref() {
+                    render_progress_line(state, bytes_transferred, false);
+                }
             }
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
-                eprintln!("completed {bytes_transferred} bytes");
+                let state = self.progress.lock().unwrap().take();
+                if let Some(state) = state {
+                    render_progress_line(&state, bytes_transferred, true);
+                } else {
+                    eprintln!("completed {bytes_transferred} bytes");
+                }
             }
         }
+    }
+}
+
+fn render_progress_line(state: &ProgressState, bytes_transferred: u64, done: bool) {
+    let percent = bytes_transferred
+        .saturating_mul(100)
+        .checked_div(state.total_bytes)
+        .unwrap_or(100);
+    let elapsed = state.started_at.elapsed();
+    let bytes_per_second = if elapsed.is_zero() {
+        0.0
+    } else {
+        bytes_transferred as f64 / elapsed.as_secs_f64()
+    };
+    let eta = eta(bytes_transferred, state.total_bytes, bytes_per_second);
+    let verb = match state.direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let line = format!(
+        "{:<24} {:>4}% {:>9}/{:<9} {:>10}/s {:>5}",
+        format!("{verb} {}", display_file_name(&state.file_name)),
+        percent.min(100),
+        format_bytes(bytes_transferred),
+        format_bytes(state.total_bytes),
+        format_bytes(bytes_per_second as u64),
+        eta,
+    );
+
+    let mut stderr = io::stderr().lock();
+    if done {
+        let _ = writeln!(stderr, "\r{line:<80}");
+    } else {
+        let _ = write!(stderr, "\r{line:<80}");
+        let _ = stderr.flush();
+    }
+}
+
+fn display_file_name(file_name: &str) -> String {
+    const MAX_LEN: usize = 19;
+
+    if file_name.chars().count() <= MAX_LEN {
+        return file_name.to_owned();
+    }
+
+    let suffix: String = file_name
+        .chars()
+        .rev()
+        .take(MAX_LEN - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("~{suffix}")
+}
+
+fn eta(bytes_transferred: u64, total_bytes: u64, bytes_per_second: f64) -> String {
+    if bytes_transferred >= total_bytes {
+        return "00:00".into();
+    }
+    if bytes_transferred == 0 || bytes_per_second <= 0.0 {
+        return "--:--".into();
+    }
+
+    let remaining = total_bytes - bytes_transferred;
+    format_duration(Duration::from_secs_f64(remaining as f64 / bytes_per_second))
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+
+    let mut value = bytes as f64;
+    let mut unit = UNITS[0];
+    for next_unit in UNITS.iter().skip(1) {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next_unit;
+    }
+
+    if unit == "B" {
+        format!("{bytes}B")
+    } else if value < 10.0 {
+        format!("{value:.1}{unit}")
+    } else {
+        format!("{value:.0}{unit}")
     }
 }
 
