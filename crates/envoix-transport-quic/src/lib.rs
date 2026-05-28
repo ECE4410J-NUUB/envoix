@@ -53,7 +53,7 @@ impl TransportDialer for QuicDialer {
 
         Ok(Box::new(QuicFrameConnection {
             _endpoint: endpoint,
-            _connection: connection,
+            connection,
             send,
             recv,
         }))
@@ -100,7 +100,7 @@ impl TransportListener for QuicListener {
 
         Ok(Box::new(QuicFrameConnection {
             _endpoint: self.endpoint.clone(),
-            _connection: connection,
+            connection,
             send,
             recv,
         }))
@@ -110,7 +110,7 @@ impl TransportListener for QuicListener {
 #[derive(Debug)]
 struct QuicFrameConnection {
     _endpoint: Endpoint,
-    _connection: quinn::Connection,
+    connection: quinn::Connection,
     send: SendStream,
     recv: RecvStream,
 }
@@ -123,6 +123,18 @@ impl FrameConnection for QuicFrameConnection {
 
     async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
         read_frame(&mut self.recv).await
+    }
+
+    fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<[u8; 32], TransportError> {
+        let mut output = [0_u8; 32];
+        self.connection
+            .export_keying_material(&mut output, label, context)
+            .map_err(|error| CoreError::Transport(format!("{error:?}")))?;
+        Ok(output)
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {

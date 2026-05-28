@@ -25,6 +25,17 @@ pub trait FrameConnection: Send {
     /// Receives one protocol frame.
     async fn recv_frame(&mut self) -> Result<Frame, TransportError>;
 
+    /// Exports 32 bytes of transport channel-binding material.
+    fn export_keying_material(
+        &self,
+        _label: &[u8],
+        _context: &[u8],
+    ) -> Result<[u8; 32], TransportError> {
+        Err(CoreError::Transport(
+            "transport channel binding is unavailable".into(),
+        ))
+    }
+
     /// Closes the underlying transport connection.
     async fn close(&mut self) -> Result<(), TransportError>;
 }

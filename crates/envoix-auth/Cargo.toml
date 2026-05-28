@@ -6,3 +6,14 @@ license.workspace = true
 
 [dependencies]
 envoix-error.workspace = true
+envoix-protocol.workspace = true
+envoix-transport.workspace = true
+envoix-types.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+spake2.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

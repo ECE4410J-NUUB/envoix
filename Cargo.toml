@@ -35,10 +35,14 @@ envoix-error = { path = "crates/envoix-error" }
 async-trait = "0.1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+hmac = "0.12"
 quinn = "0.11"
 rcgen = "0.13"
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
