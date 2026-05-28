@@ -30,11 +30,7 @@ impl TransportDialer for QuicDialer {
         &self,
         candidate: ConnectionCandidate,
     ) -> Result<Box<dyn FrameConnection>, TransportError> {
-        let ConnectionCandidate::Quic { addr } = candidate else {
-            return Err(CoreError::Transport(format!(
-                "QUIC dialer cannot dial candidate: {candidate:?}"
-            )));
-        };
+        let ConnectionCandidate::Quic { addr } = candidate;
 
         let bind_addr = if addr.is_ipv4() {
             "0.0.0.0:0".parse().unwrap()

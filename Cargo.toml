@@ -5,7 +5,6 @@ members = [
     "crates/envoix-session",
     "crates/envoix-transfer",
     "crates/envoix-transport",
-    "crates/envoix-transport-tcp",
     "crates/envoix-transport-quic",
     "crates/envoix-protocol",
     "crates/envoix-discovery",
@@ -25,7 +24,6 @@ envoix-client = { path = "crates/envoix-client" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-transfer = { path = "crates/envoix-transfer" }
 envoix-transport = { path = "crates/envoix-transport" }
-envoix-transport-tcp = { path = "crates/envoix-transport-tcp" }
 envoix-transport-quic = { path = "crates/envoix-transport-quic" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-discovery = { path = "crates/envoix-discovery" }

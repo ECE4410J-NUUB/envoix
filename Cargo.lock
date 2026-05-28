@@ -329,7 +329,6 @@ dependencies = [
  "envoix-transfer",
  "envoix-transport",
  "envoix-transport-quic",
- "envoix-transport-tcp",
  "envoix-types",
 ]
 
@@ -378,17 +377,6 @@ dependencies = [
  "quinn",
  "rcgen",
  "rustls",
- "tokio",
-]
-
-[[package]]
-name = "envoix-transport-tcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "envoix-error",
- "envoix-protocol",
- "envoix-transport",
  "tokio",
 ]
 

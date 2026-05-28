@@ -24,7 +24,7 @@ impl ManualPeerDiscovery {
 
 impl DiscoveryProvider for ManualPeerDiscovery {
     fn discover(&self) -> Result<Vec<ConnectionCandidate>, DiscoveryError> {
-        Ok(vec![ConnectionCandidate::Tcp {
+        Ok(vec![ConnectionCandidate::Quic {
             addr: self.peer_addr,
         }])
     }
@@ -41,7 +41,7 @@ mod tests {
 
         assert_eq!(
             discovery.discover().unwrap(),
-            vec![ConnectionCandidate::Tcp { addr }]
+            vec![ConnectionCandidate::Quic { addr }]
         );
     }
 }

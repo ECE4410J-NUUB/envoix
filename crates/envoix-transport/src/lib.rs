@@ -12,8 +12,6 @@ pub type TransportError = CoreError;
 /// Address and transport type selected for a connection attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ConnectionCandidate {
-    /// Plain TCP connection to the given socket address.
-    Tcp { addr: SocketAddr },
     /// QUIC connection to the given socket address.
     Quic { addr: SocketAddr },
 }

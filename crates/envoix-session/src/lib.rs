@@ -10,7 +10,6 @@ pub use envoix_transfer::{
 };
 use envoix_transport::{ConnectionCandidate, TransportDialer, TransportListener};
 use envoix_transport_quic::{QuicDialer, QuicListener};
-use envoix_transport_tcp::{TcpIpv6Dialer, TcpIpv6Listener};
 pub use envoix_types::TransferDirection;
 
 /// Error type returned by session orchestration.
@@ -21,49 +20,27 @@ pub type SessionError = CoreError;
 pub struct SessionConfig {
     /// Maximum chunk payload size sent by the transfer engine.
     pub chunk_size: usize,
-    /// Transport used for the peer connection.
-    pub protocol: TransportProtocol,
-}
-
-/// Transport selected for a send or receive session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransportProtocol {
-    /// QUIC over UDP. This is the default for new sessions.
-    Quic,
-    /// Plain TCP fallback.
-    Tcp,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             chunk_size: DEFAULT_CHUNK_SIZE,
-            protocol: TransportProtocol::Quic,
         }
     }
 }
 
 /// Sends one file to a manually supplied peer address.
-pub async fn send_file_manual_ipv6(
+pub async fn send_file_manual(
     peer_addr: SocketAddr,
     file_path: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection = match config.protocol {
-        TransportProtocol::Quic => {
-            let dialer = QuicDialer;
-            dialer
-                .dial(ConnectionCandidate::Quic { addr: peer_addr })
-                .await?
-        }
-        TransportProtocol::Tcp => {
-            let dialer = TcpIpv6Dialer;
-            dialer
-                .dial(ConnectionCandidate::Tcp { addr: peer_addr })
-                .await?
-        }
-    };
+    let dialer = QuicDialer;
+    let mut connection = dialer
+        .dial(ConnectionCandidate::Quic { addr: peer_addr })
+        .await?;
     let engine = TransferEngine::new(config.chunk_size);
 
     let summary = engine
@@ -74,22 +51,14 @@ pub async fn send_file_manual_ipv6(
 }
 
 /// Receives one file on a manually supplied listen address.
-pub async fn receive_file_ipv6(
+pub async fn receive_file(
     listen_addr: SocketAddr,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection = match config.protocol {
-        TransportProtocol::Quic => {
-            let listener = QuicListener::bind(listen_addr)?;
-            listener.accept().await?
-        }
-        TransportProtocol::Tcp => {
-            let listener = TcpIpv6Listener::bind(listen_addr).await?;
-            listener.accept().await?
-        }
-    };
+    let listener = QuicListener::bind(listen_addr)?;
+    let mut connection = listener.accept().await?;
     let engine = TransferEngine::new(config.chunk_size);
 
     let summary = engine

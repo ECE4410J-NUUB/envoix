@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use envoix_error::CoreError;
 pub use envoix_session::{
-    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary, TransportProtocol,
+    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
 };
-use envoix_session::{SessionConfig, receive_file_ipv6, send_file_manual_ipv6};
+use envoix_session::{SessionConfig, receive_file, send_file_manual};
 
 /// Error type exposed by the public client facade.
 pub type PublicError = CoreError;
@@ -17,15 +17,12 @@ pub type PublicError = CoreError;
 pub struct ClientConfig {
     /// Maximum chunk payload size used for transfers.
     pub chunk_size: usize,
-    /// Transport used for send and receive requests.
-    pub protocol: TransportProtocol,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
-            protocol: TransportProtocol::Quic,
         }
     }
 }
@@ -67,7 +64,7 @@ impl EnvoixClient {
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
-        send_file_manual_ipv6(
+        send_file_manual(
             request.peer_addr,
             request.file_path,
             self.session_config(),
@@ -83,7 +80,7 @@ impl EnvoixClient {
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
-        receive_file_ipv6(
+        receive_file(
             request.listen_addr,
             request.output_dir,
             self.session_config(),
@@ -105,7 +102,6 @@ impl EnvoixClient {
     fn session_config(&self) -> SessionConfig {
         SessionConfig {
             chunk_size: self.config.chunk_size,
-            protocol: self.config.protocol,
         }
     }
 }
@@ -122,10 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_zero_chunk_size() {
-        let client = EnvoixClient::new(ClientConfig {
-            chunk_size: 0,
-            ..ClientConfig::default()
-        });
+        let client = EnvoixClient::new(ClientConfig { chunk_size: 0 });
 
         let error = client
             .send_file(

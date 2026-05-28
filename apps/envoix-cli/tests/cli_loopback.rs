@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::net::{TcpListener, UdpSocket};
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -8,15 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn cli_transfers_file_over_default_quic_loopback() {
-    run_cli_loopback(None, free_udp_loopback_addr());
+    run_cli_loopback(free_udp_loopback_addr());
 }
 
-#[test]
-fn cli_transfers_file_over_tcp_loopback() {
-    run_cli_loopback(Some("tcp"), free_tcp_loopback_addr());
-}
-
-fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
+fn run_cli_loopback(listen_addr: std::net::SocketAddr) {
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -33,9 +28,6 @@ fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
         .arg(listen_addr.to_string())
         .arg("--output")
         .arg(&output_dir);
-    if let Some(protocol) = protocol {
-        receiver_command.arg("--protocol").arg(protocol);
-    }
     let mut receiver = receiver_command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -46,7 +38,7 @@ fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
     // still retries connection-refused failures below.
     thread::sleep(Duration::from_millis(500));
 
-    let send_output = run_send_with_retries(protocol, listen_addr, &source_path);
+    let send_output = run_send_with_retries(listen_addr, &source_path);
 
     if !send_output.status.success() {
         let _ = receiver.kill();
@@ -73,15 +65,11 @@ fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn run_send_with_retries(
-    protocol: Option<&str>,
-    listen_addr: std::net::SocketAddr,
-    source_path: &Path,
-) -> Output {
+fn run_send_with_retries(listen_addr: std::net::SocketAddr, source_path: &Path) -> Output {
     let deadline = Instant::now() + Duration::from_secs(3);
 
     loop {
-        let output = run_send_once(protocol, listen_addr, source_path);
+        let output = run_send_once(listen_addr, source_path);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() || !stderr.contains("Connection refused") {
             return output;
@@ -93,25 +81,13 @@ fn run_send_with_retries(
     }
 }
 
-fn run_send_once(
-    protocol: Option<&str>,
-    listen_addr: std::net::SocketAddr,
-    source_path: &Path,
-) -> Output {
+fn run_send_once(listen_addr: std::net::SocketAddr, source_path: &Path) -> Output {
     let mut send_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
     send_command
         .arg("send")
         .arg("--peer")
         .arg(listen_addr.to_string());
-    if let Some(protocol) = protocol {
-        send_command.arg("--protocol").arg(protocol);
-    }
     send_command.arg(source_path).output().unwrap()
-}
-
-fn free_tcp_loopback_addr() -> std::net::SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap()
 }
 
 fn free_udp_loopback_addr() -> std::net::SocketAddr {

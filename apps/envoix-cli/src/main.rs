@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use envoix_client::{
     ClientConfig, EnvoixClient, EventSink, ReceiveFileRequest, SendFileRequest, TransferDirection,
-    TransferEvent, TransportProtocol,
+    TransferEvent,
 };
 
 #[derive(Debug, Parser)]
@@ -20,8 +20,6 @@ enum Command {
     Send {
         #[arg(long)]
         peer: SocketAddr,
-        #[arg(long, value_enum, default_value = "quic")]
-        protocol: ProtocolArg,
         file: PathBuf,
     },
     Receive {
@@ -29,24 +27,7 @@ enum Command {
         listen: SocketAddr,
         #[arg(long)]
         output: PathBuf,
-        #[arg(long, value_enum, default_value = "quic")]
-        protocol: ProtocolArg,
     },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum ProtocolArg {
-    Quic,
-    Tcp,
-}
-
-impl From<ProtocolArg> for TransportProtocol {
-    fn from(value: ProtocolArg) -> Self {
-        match value {
-            ProtocolArg::Quic => Self::Quic,
-            ProtocolArg::Tcp => Self::Tcp,
-        }
-    }
 }
 
 #[tokio::main]
@@ -62,12 +43,8 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
-        Command::Send {
-            peer,
-            protocol,
-            file,
-        } => {
-            let client = client_for_protocol(protocol);
+        Command::Send { peer, file } => {
+            let client = EnvoixClient::new(ClientConfig::default());
             let summary = client
                 .send_file(
                     SendFileRequest {
@@ -82,12 +59,8 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 summary.bytes_transferred, summary.file_name
             );
         }
-        Command::Receive {
-            listen,
-            output,
-            protocol,
-        } => {
-            let client = client_for_protocol(protocol);
+        Command::Receive { listen, output } => {
+            let client = EnvoixClient::new(ClientConfig::default());
             let summary = client
                 .receive_file(
                     ReceiveFileRequest {
@@ -105,13 +78,6 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     }
 
     Ok(())
-}
-
-fn client_for_protocol(protocol: ProtocolArg) -> EnvoixClient {
-    EnvoixClient::new(ClientConfig {
-        protocol: protocol.into(),
-        ..ClientConfig::default()
-    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,7 +127,6 @@ mod tests {
             cli.command,
             Command::Send {
                 peer,
-                protocol: ProtocolArg::Quic,
                 file
             } if peer == "[::1]:9000".parse().unwrap() && file == std::path::Path::new("hello.txt")
         ));
@@ -183,49 +148,8 @@ mod tests {
             cli.command,
             Command::Receive {
                 listen,
-                output,
-                protocol: ProtocolArg::Quic
+                output
             } if listen == "[::1]:9000".parse().unwrap() && output == std::path::Path::new("received")
-        ));
-    }
-
-    #[test]
-    fn parses_tcp_protocol() {
-        let send = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--peer",
-            "[::1]:9000",
-            "--protocol",
-            "tcp",
-            "hello.txt",
-        ])
-        .unwrap();
-        let receive = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--listen",
-            "[::1]:9000",
-            "--output",
-            "received",
-            "--protocol",
-            "tcp",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            send.command,
-            Command::Send {
-                protocol: ProtocolArg::Tcp,
-                ..
-            }
-        ));
-        assert!(matches!(
-            receive.command,
-            Command::Receive {
-                protocol: ProtocolArg::Tcp,
-                ..
-            }
         ));
     }
 }

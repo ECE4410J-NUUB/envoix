@@ -48,7 +48,6 @@ pub enum TransferDirection {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum ConnectionMode {
-    TcpIpv6,
     QuicDirect,
     Relay,
     ServerFallback,
