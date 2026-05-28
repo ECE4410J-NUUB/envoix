@@ -1,17 +1,15 @@
 [package]
-name = "envoix-transfer"
+name = "envoix-transport-quic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-envoix-crypto.workspace = true
 envoix-error.workspace = true
 envoix-protocol.workspace = true
-envoix-storage.workspace = true
 envoix-transport.workspace = true
-envoix-types.workspace = true
-blake3.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 tokio.workspace = true
-uuid = { version = "1", features = ["v7"] }

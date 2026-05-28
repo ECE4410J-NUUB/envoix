@@ -20,7 +20,11 @@ impl TransportDialer for TcpIpv6Dialer {
         &self,
         candidate: ConnectionCandidate,
     ) -> Result<Box<dyn FrameConnection>, TransportError> {
-        let ConnectionCandidate::TcpIpv6 { addr } = candidate;
+        let ConnectionCandidate::Tcp { addr } = candidate else {
+            return Err(CoreError::Transport(format!(
+                "TCP dialer cannot dial candidate: {candidate:?}"
+            )));
+        };
         let stream = TcpStream::connect(addr).await?;
         Ok(Box::new(TcpFrameConnection::new(stream)))
     }
@@ -104,7 +108,7 @@ mod tests {
 
         let dialer = TcpIpv6Dialer;
         let mut connection = dialer
-            .dial(ConnectionCandidate::TcpIpv6 { addr })
+            .dial(ConnectionCandidate::Tcp { addr })
             .await
             .unwrap();
 

@@ -10,7 +10,8 @@ pub type TransportError = CoreError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ConnectionCandidate {
-    TcpIpv6 { addr: SocketAddr },
+    Tcp { addr: SocketAddr },
+    Quic { addr: SocketAddr },
 }
 
 #[async_trait]
