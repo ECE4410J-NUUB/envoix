@@ -12,5 +12,6 @@ envoix-protocol.workspace = true
 envoix-storage.workspace = true
 envoix-transport.workspace = true
 envoix-types.workspace = true
+blake3 = "1"
 tokio.workspace = true
 uuid = { version = "1", features = ["v7"] }
