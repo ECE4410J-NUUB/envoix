@@ -4,6 +4,10 @@ Status: draft
 Scope: minimal CLI-first architecture and intended final architecture  
 Primary design rule: **applications depend on the core; the core must not depend on applications.**
 
+Update note: the current implementation is QUIC-only and requires pairing
+authentication before transfer metadata. See `docs/auth.md` for the current
+pairing model and SPAKE2 risk caveat.
+
 ---
 
 ## 1. Project intent
@@ -400,9 +404,10 @@ pub enum Frame {
     Hello(Hello),
     Ready(Ready),
     FileHeader(FileHeader),
-    FileHeaderAck(FileHeaderAck),
+    ResumeStatus(ResumeStatus),
     Chunk(Chunk),
     Complete(Complete),
+    CompleteAck(CompleteAck),
     Error(ErrorFrame),
 }
 
@@ -421,9 +426,10 @@ Minimal protocol flow:
 sender   → receiver: Hello
 receiver → sender:   Ready
 sender   → receiver: FileHeader
-receiver → sender:   FileHeaderAck
+receiver → sender:   ResumeStatus
 sender   → receiver: Chunk*
 sender   → receiver: Complete
+receiver → sender:   CompleteAck
 ```
 
 Should expose:
@@ -520,6 +526,21 @@ Should not expose:
 - crypto logic.
 
 This crate is replaceable. Later, `envoix-transport-quic`, `envoix-transport-relay`, and `envoix-transport-server` should implement compatible abstractions.
+
+### 6.6.1 `envoix-transport-quic`
+
+Current implementation:
+
+- `QuicDialer`;
+- `QuicListener`;
+- one bidirectional QUIC stream per transfer;
+- length-prefixed protocol frames over that stream.
+
+Security caveat:
+
+- generated self-signed certificates;
+- explicitly insecure no-auth verifier;
+- suitable only for the current unauthenticated skeleton, not production security.
 
 
 ### 6.7 `envoix-discovery`
@@ -1000,12 +1021,13 @@ Do not add this in v0 unless needed.
 
 ### 9.4 Integrity
 
-Minimal version may skip integrity. The first upgrade should add:
+Current implementation:
 
-- whole-file hash;
-- received-file verification after completion.
+- sender computes a whole-file BLAKE3 hash before sending `FileHeader`;
+- receiver verifies the completed temp file before final rename;
+- receiver sends `CompleteAck` only after final verification succeeds.
 
-The next upgrade should add:
+Deferred:
 
 - per-chunk hash;
 - chunk verification before write or before marking complete.
@@ -1621,4 +1643,3 @@ Allowed to change early:
 - internal transfer loop implementation.
 
 Do not prematurely stabilize the full wire protocol. Stabilize the layer boundaries first.
-

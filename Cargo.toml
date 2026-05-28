@@ -1,15 +1,15 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-session",
     "crates/envoix-transfer",
     "crates/envoix-transport",
-    "crates/envoix-transport-tcp",
+    "crates/envoix-transport-quic",
     "crates/envoix-protocol",
     "crates/envoix-discovery",
     "crates/envoix-storage",
-    "crates/envoix-crypto",
     "crates/envoix-types",
     "crates/envoix-error",
 ]
@@ -21,20 +21,29 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-transfer = { path = "crates/envoix-transfer" }
 envoix-transport = { path = "crates/envoix-transport" }
-envoix-transport-tcp = { path = "crates/envoix-transport-tcp" }
+envoix-transport-quic = { path = "crates/envoix-transport-quic" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-discovery = { path = "crates/envoix-discovery" }
 envoix-storage = { path = "crates/envoix-storage" }
-envoix-crypto = { path = "crates/envoix-crypto" }
 envoix-types = { path = "crates/envoix-types" }
 envoix-error = { path = "crates/envoix-error" }
 async-trait = "0.1"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+hmac = "0.12"
+log = "0.4"
+quinn = "0.11"
+rcgen = "0.13"
+rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

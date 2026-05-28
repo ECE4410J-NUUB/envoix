@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-envoix-crypto.workspace = true
+envoix-auth.workspace = true
 envoix-discovery.workspace = true
 envoix-error.workspace = true
 envoix-transfer.workspace = true
 envoix-transport.workspace = true
-envoix-transport-tcp.workspace = true
+envoix-transport-quic.workspace = true
 envoix-types.workspace = true

@@ -1,14 +1,27 @@
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    EnvoixClient, EventSink, ReceiveFileRequest, SendFileRequest, TransferDirection, TransferEvent,
+    ClientConfig, EnvoixClient, EventSink, PairingConfig, ReceiveFileRequest,
+    SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, TransferDirection, TransferEvent,
 };
 
+const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
+const IPV6_RECEIVE_ADDR: &str = "[::]:0";
+const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Parser)]
-#[command(name = "envoix", version, about = "Secure file transfer CLI")]
+#[command(
+    name = "envoix",
+    version,
+    about = "Secure file transfer CLI",
+    after_help = "Typical flow:\n  1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.\n  2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -16,17 +29,35 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Send one file to a receiver address printed by `envoix receive`.
     Send {
+        /// Receiver address, using the port printed by `envoix receive`.
         #[arg(long)]
         peer: SocketAddr,
+        /// Shared ASCII pairing token, at least 12 bytes.
+        #[arg(long)]
+        token: String,
+        /// File to send.
         file: PathBuf,
     },
+    /// Receive one file into an output directory.
     Receive {
-        #[arg(long)]
-        listen: SocketAddr,
+        /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Shared ASCII pairing token, at least 12 bytes.
+        #[arg(long)]
+        token: String,
+        /// Address family to bind for receiving.
+        #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
+        ip_version: IpVersion,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum IpVersion {
+    Ipv4,
+    Ipv6,
 }
 
 #[tokio::main]
@@ -41,17 +72,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
-    let client = EnvoixClient::default();
-
     match cli.command {
-        Command::Send { peer, file } => {
+        Command::Send { peer, token, file } => {
+            let client = client_for_token(token)?;
             let summary = client
                 .send_file(
                     SendFileRequest {
                         peer_addr: peer,
                         file_path: file,
                     },
-                    Box::new(ConsoleEventSink),
+                    Box::new(ConsoleEventSink::new()),
                 )
                 .await?;
             eprintln!(
@@ -59,14 +89,20 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 summary.bytes_transferred, summary.file_name
             );
         }
-        Command::Receive { listen, output } => {
+        Command::Receive {
+            output,
+            token,
+            ip_version,
+        } => {
+            let client = client_for_token(token)?;
             let summary = client
-                .receive_file(
+                .receive_file_with_bound_addr(
                     ReceiveFileRequest {
-                        listen_addr: listen,
+                        listen_addr: receive_addr_for(ip_version),
                         output_dir: output,
                     },
-                    Box::new(ConsoleEventSink),
+                    Box::new(ConsoleEventSink::new()),
+                    |addr| eprintln!("listening on {addr}"),
                 )
                 .await?;
             eprintln!(
@@ -79,8 +115,40 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ConsoleEventSink;
+fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
+    let addr = match ip_version {
+        IpVersion::Ipv4 => IPV4_RECEIVE_ADDR,
+        IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
+    };
+    addr.parse().expect("default receive address is valid")
+}
+
+fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
+    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
+    Ok(EnvoixClient::new(ClientConfig::new(
+        PairingConfig::spake2_shared_token(token)?,
+    )))
+}
+
+#[derive(Debug, Default)]
+struct ConsoleEventSink {
+    progress: Mutex<Option<ProgressState>>,
+}
+
+impl ConsoleEventSink {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug)]
+struct ProgressState {
+    file_name: String,
+    direction: TransferDirection,
+    total_bytes: u64,
+    started_at: Instant,
+    last_rendered_at: Instant,
+}
 
 impl EventSink for ConsoleEventSink {
     fn on_event(&self, event: TransferEvent) {
@@ -91,25 +159,131 @@ impl EventSink for ConsoleEventSink {
                 total_bytes,
                 ..
             } => {
-                let verb = match direction {
-                    TransferDirection::Send => "sending",
-                    TransferDirection::Receive => "receiving",
+                let state = ProgressState {
+                    file_name,
+                    direction,
+                    total_bytes,
+                    started_at: Instant::now(),
+                    last_rendered_at: Instant::now(),
                 };
-                eprintln!("{verb} {file_name} ({total_bytes} bytes)");
+                render_progress_line(&state, 0, false);
+                *self.progress.lock().unwrap() = Some(state);
             }
             TransferEvent::Progress {
-                bytes_transferred,
-                total_bytes,
-                ..
+                bytes_transferred, ..
             } => {
-                eprintln!("progress {bytes_transferred}/{total_bytes} bytes");
+                if let Some(state) = self.progress.lock().unwrap().as_mut()
+                    && state.last_rendered_at.elapsed() >= PROGRESS_RENDER_INTERVAL
+                {
+                    render_progress_line(state, bytes_transferred, false);
+                    state.last_rendered_at = Instant::now();
+                }
             }
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
-                eprintln!("completed {bytes_transferred} bytes");
+                let state = self.progress.lock().unwrap().take();
+                if let Some(state) = state {
+                    render_progress_line(&state, bytes_transferred, true);
+                } else {
+                    eprintln!("completed {bytes_transferred} bytes");
+                }
             }
         }
+    }
+}
+
+fn render_progress_line(state: &ProgressState, bytes_transferred: u64, done: bool) {
+    let percent = bytes_transferred
+        .saturating_mul(100)
+        .checked_div(state.total_bytes)
+        .unwrap_or(100);
+    let elapsed = state.started_at.elapsed();
+    let bytes_per_second = if elapsed.is_zero() {
+        0.0
+    } else {
+        bytes_transferred as f64 / elapsed.as_secs_f64()
+    };
+    let eta = eta(bytes_transferred, state.total_bytes, bytes_per_second);
+    let verb = match state.direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let line = format!(
+        "{:<24} {:>4}% {:>9}/{:<9} {:>10}/s {:>5}",
+        format!("{verb} {}", display_file_name(&state.file_name)),
+        percent.min(100),
+        format_bytes(bytes_transferred),
+        format_bytes(state.total_bytes),
+        format_bytes(bytes_per_second as u64),
+        eta,
+    );
+
+    let mut stderr = io::stderr().lock();
+    if done {
+        let _ = writeln!(stderr, "\r{line:<80}");
+    } else {
+        let _ = write!(stderr, "\r{line:<80}");
+        let _ = stderr.flush();
+    }
+}
+
+fn display_file_name(file_name: &str) -> String {
+    const MAX_LEN: usize = 19;
+
+    if file_name.chars().count() <= MAX_LEN {
+        return file_name.to_owned();
+    }
+
+    let suffix: String = file_name
+        .chars()
+        .rev()
+        .take(MAX_LEN - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("~{suffix}")
+}
+
+fn eta(bytes_transferred: u64, total_bytes: u64, bytes_per_second: f64) -> String {
+    if bytes_transferred >= total_bytes {
+        return "00:00".into();
+    }
+    if bytes_transferred == 0 || bytes_per_second <= 0.0 {
+        return "--:--".into();
+    }
+
+    let remaining = total_bytes - bytes_transferred;
+    format_duration(Duration::from_secs_f64(remaining as f64 / bytes_per_second))
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+
+    let mut value = bytes as f64;
+    let mut unit = UNITS[0];
+    for next_unit in UNITS.iter().skip(1) {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next_unit;
+    }
+
+    if unit == "B" {
+        format!("{bytes}B")
+    } else if value < 10.0 {
+        format!("{value:.1}{unit}")
+    } else {
+        format!("{value:.0}{unit}")
     }
 }
 
@@ -119,15 +293,26 @@ mod tests {
 
     #[test]
     fn parses_send_command() {
-        let cli =
-            Cli::try_parse_from(["envoix", "send", "--peer", "[::1]:9000", "hello.txt"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Send {
                 peer,
+                token,
                 file
-            } if peer == "[::1]:9000".parse().unwrap() && file == std::path::Path::new("hello.txt")
+            } if peer == "[::1]:9000".parse().unwrap()
+                && token == "abcdefghijkl"
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -136,19 +321,56 @@ mod tests {
         let cli = Cli::try_parse_from([
             "envoix",
             "receive",
-            "--listen",
-            "[::1]:9000",
             "--output",
             "received",
+            "--token",
+            "abcdefghijkl",
         ])
         .unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Receive {
-                listen,
-                output
-            } if listen == "[::1]:9000".parse().unwrap() && output == std::path::Path::new("received")
+                output,
+                token,
+                ip_version
+            } if output == std::path::Path::new("received")
+                && token == "abcdefghijkl"
+                && ip_version == IpVersion::Ipv4
         ));
+    }
+
+    #[test]
+    fn parses_receive_ipv6() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "received",
+            "--token",
+            "abcdefghijkl",
+            "--ip-version",
+            "ipv6",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                ip_version: IpVersion::Ipv6,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_token() {
+        let error = Cli::try_parse_from(["envoix", "send", "--peer", "[::1]:9000", "hello.txt"])
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }

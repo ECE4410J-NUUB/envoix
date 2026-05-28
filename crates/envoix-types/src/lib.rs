@@ -4,8 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Wire protocol version used by the v0 walking skeleton.
-pub const PROTOCOL_VERSION: u32 = 0;
+/// Wire protocol version used by the resumable transfer flow.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct TransferId(pub String);
@@ -48,7 +48,6 @@ pub enum TransferDirection {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum ConnectionMode {
-    TcpIpv6,
     QuicDirect,
     Relay,
     ServerFallback,
