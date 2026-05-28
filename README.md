@@ -22,6 +22,9 @@ source file and output directory. The receiver resumes from its deterministic
 `.part` file and JSON sidecar state, then verifies the whole-file BLAKE3 hash
 before final rename.
 
+See [docs/auth.md](docs/auth.md) for the pairing model and SPAKE2 prototype
+security caveat.
+
 ## Current Scope
 
 Implemented:

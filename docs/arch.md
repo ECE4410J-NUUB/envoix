@@ -4,6 +4,10 @@ Status: draft
 Scope: minimal CLI-first architecture and intended final architecture  
 Primary design rule: **applications depend on the core; the core must not depend on applications.**
 
+Update note: the current implementation is QUIC-only and requires pairing
+authentication before transfer metadata. See `docs/auth.md` for the current
+pairing model and SPAKE2 risk caveat.
+
 ---
 
 ## 1. Project intent
