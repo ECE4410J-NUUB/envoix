@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use envoix_crypto::CryptoProvider;
 use envoix_error::CoreError;
-use envoix_protocol::{Chunk, Complete, FileHeader, FileHeaderAck, Frame, Hello, Ready};
+use envoix_protocol::{
+    Chunk, Complete, CompleteAck, FileHeader, Frame, Hello, Ready, ResumeStatus,
+};
 use envoix_storage::LocalFileStorage;
 use envoix_transport::FrameConnection;
 use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
@@ -109,9 +111,10 @@ where
                 file_name: file_name.clone(),
                 file_size: total_bytes,
                 chunk_size: self.chunk_size as u64,
+                file_hash: String::new(),
             }))
             .await?;
-        expect_file_header_ack(connection.recv_frame().await?, &transfer_id)?;
+        expect_resume_status(connection.recv_frame().await?, &transfer_id)?;
 
         events.on_event(TransferEvent::Started {
             transfer_id: transfer_id.clone(),
@@ -162,8 +165,10 @@ where
         connection
             .send_frame(Frame::Complete(Complete {
                 transfer_id: transfer_id.clone(),
+                file_hash: String::new(),
             }))
             .await?;
+        expect_complete_ack(connection.recv_frame().await?, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
             bytes_transferred: offset,
@@ -198,8 +203,10 @@ where
             LocalFileStorage::create_temp_destination(&output_dir, &header.file_name).await?;
 
         connection
-            .send_frame(Frame::FileHeaderAck(FileHeaderAck {
+            .send_frame(Frame::ResumeStatus(ResumeStatus {
                 transfer_id: header.transfer_id.clone(),
+                next_chunk_index: 0,
+                bytes_received: 0,
             }))
             .await?;
 
@@ -250,6 +257,11 @@ where
                     file.flush().await?;
                     drop(file);
                     LocalFileStorage::finalize_temp_file(&temp_path, &final_path).await?;
+                    connection
+                        .send_frame(Frame::CompleteAck(CompleteAck {
+                            transfer_id: header.transfer_id.clone(),
+                        }))
+                        .await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
                         bytes_transferred: expected_offset,
@@ -301,11 +313,26 @@ fn expect_file_header(frame: Frame) -> Result<FileHeader, TransferError> {
     }
 }
 
-fn expect_file_header_ack(frame: Frame, transfer_id: &TransferId) -> Result<(), TransferError> {
+fn expect_resume_status(frame: Frame, transfer_id: &TransferId) -> Result<(), TransferError> {
     match frame {
-        Frame::FileHeaderAck(ack) if &ack.transfer_id == transfer_id => Ok(()),
+        Frame::ResumeStatus(status)
+            if &status.transfer_id == transfer_id
+                && status.next_chunk_index == 0
+                && status.bytes_received == 0 =>
+        {
+            Ok(())
+        }
         frame => Err(CoreError::Transfer(format!(
-            "expected FileHeaderAck for {transfer_id}, got {frame:?}"
+            "expected empty ResumeStatus for {transfer_id}, got {frame:?}"
+        ))),
+    }
+}
+
+fn expect_complete_ack(frame: Frame, transfer_id: &TransferId) -> Result<(), TransferError> {
+    match frame {
+        Frame::CompleteAck(ack) if &ack.transfer_id == transfer_id => Ok(()),
+        frame => Err(CoreError::Transfer(format!(
+            "expected CompleteAck for {transfer_id}, got {frame:?}"
         ))),
     }
 }

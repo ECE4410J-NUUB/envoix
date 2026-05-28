@@ -14,9 +14,10 @@ pub enum Frame {
     Hello(Hello),
     Ready(Ready),
     FileHeader(FileHeader),
-    FileHeaderAck(FileHeaderAck),
+    ResumeStatus(ResumeStatus),
     Chunk(Chunk),
     Complete(Complete),
+    CompleteAck(CompleteAck),
     Error(ErrorFrame),
 }
 
@@ -35,11 +36,14 @@ pub struct FileHeader {
     pub file_name: String,
     pub file_size: u64,
     pub chunk_size: u64,
+    pub file_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FileHeaderAck {
+pub struct ResumeStatus {
     pub transfer_id: TransferId,
+    pub next_chunk_index: u64,
+    pub bytes_received: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -52,6 +56,12 @@ pub struct Chunk {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Complete {
+    pub transfer_id: TransferId,
+    pub file_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompleteAck {
     pub transfer_id: TransferId,
 }
 
@@ -111,17 +121,48 @@ mod tests {
     #[tokio::test]
     async fn frame_round_trip() {
         let (mut writer, mut reader) = tokio::io::duplex(1024);
-        let frame = Frame::Chunk(Chunk {
+        let frame = Frame::FileHeader(FileHeader {
             transfer_id: TransferId::new("transfer-1"),
-            index: 2,
-            offset: 128,
-            bytes: b"hello".to_vec(),
+            file_name: "hello.txt".into(),
+            file_size: 5,
+            chunk_size: 1024,
+            file_hash: "abc123".into(),
         });
 
         write_frame(&mut writer, &frame).await.unwrap();
         let decoded = read_frame(&mut reader).await.unwrap();
 
         assert_eq!(decoded, frame);
+    }
+
+    #[tokio::test]
+    async fn resumable_v1_frames_round_trip() {
+        let frames = [
+            Frame::ResumeStatus(ResumeStatus {
+                transfer_id: TransferId::new("transfer-1"),
+                next_chunk_index: 2,
+                bytes_received: 128,
+            }),
+            Frame::Chunk(Chunk {
+                transfer_id: TransferId::new("transfer-1"),
+                index: 2,
+                offset: 128,
+                bytes: b"hello".to_vec(),
+            }),
+            Frame::Complete(Complete {
+                transfer_id: TransferId::new("transfer-1"),
+                file_hash: "abc123".into(),
+            }),
+            Frame::CompleteAck(CompleteAck {
+                transfer_id: TransferId::new("transfer-1"),
+            }),
+        ];
+
+        for frame in frames {
+            let (mut writer, mut reader) = tokio::io::duplex(1024);
+            write_frame(&mut writer, &frame).await.unwrap();
+            assert_eq!(read_frame(&mut reader).await.unwrap(), frame);
+        }
     }
 
     #[tokio::test]
