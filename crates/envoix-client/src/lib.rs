@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+pub use envoix_auth::{PairingConfig, SPAKE2_EXPERIMENTAL_WARNING};
 use envoix_error::CoreError;
 pub use envoix_session::{
     EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
@@ -13,16 +14,20 @@ use envoix_session::{SessionConfig, receive_file, send_file_manual};
 pub type PublicError = CoreError;
 
 /// Public client configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientConfig {
     /// Maximum chunk payload size used for transfers.
     pub chunk_size: usize,
+    /// Pairing authentication required before transfer.
+    pub pairing: PairingConfig,
 }
 
-impl Default for ClientConfig {
-    fn default() -> Self {
+impl ClientConfig {
+    /// Creates config using the default chunk size and required pairing auth.
+    pub fn new(pairing: PairingConfig) -> Self {
         Self {
             chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
+            pairing,
         }
     }
 }
@@ -95,6 +100,7 @@ impl EnvoixClient {
                 "chunk size must be positive".into(),
             ));
         }
+        self.config.pairing.validate()?;
 
         Ok(())
     }
@@ -102,13 +108,8 @@ impl EnvoixClient {
     fn session_config(&self) -> SessionConfig {
         SessionConfig {
             chunk_size: self.config.chunk_size,
+            pairing: self.config.pairing.clone(),
         }
-    }
-}
-
-impl Default for EnvoixClient {
-    fn default() -> Self {
-        Self::new(ClientConfig::default())
     }
 }
 
@@ -118,7 +119,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_zero_chunk_size() {
-        let client = EnvoixClient::new(ClientConfig { chunk_size: 0 });
+        let client = EnvoixClient::new(ClientConfig {
+            chunk_size: 0,
+            pairing: test_pairing(),
+        });
 
         let error = client
             .send_file(
@@ -132,5 +136,9 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, CoreError::InvalidInput(_)));
+    }
+
+    fn test_pairing() -> PairingConfig {
+        PairingConfig::spake2_shared_token("abcdefghijkl").unwrap()
     }
 }

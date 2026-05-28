@@ -4,8 +4,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use envoix_client::{
-    ClientConfig, EnvoixClient, EventSink, ReceiveFileRequest, SendFileRequest, TransferDirection,
-    TransferEvent,
+    ClientConfig, EnvoixClient, EventSink, PairingConfig, ReceiveFileRequest,
+    SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, TransferDirection, TransferEvent,
 };
 
 #[derive(Debug, Parser)]
@@ -20,6 +20,8 @@ enum Command {
     Send {
         #[arg(long)]
         peer: SocketAddr,
+        #[arg(long)]
+        token: String,
         file: PathBuf,
     },
     Receive {
@@ -27,6 +29,8 @@ enum Command {
         listen: SocketAddr,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long)]
+        token: String,
     },
 }
 
@@ -43,8 +47,8 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
-        Command::Send { peer, file } => {
-            let client = EnvoixClient::new(ClientConfig::default());
+        Command::Send { peer, token, file } => {
+            let client = client_for_token(token)?;
             let summary = client
                 .send_file(
                     SendFileRequest {
@@ -59,8 +63,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 summary.bytes_transferred, summary.file_name
             );
         }
-        Command::Receive { listen, output } => {
-            let client = EnvoixClient::new(ClientConfig::default());
+        Command::Receive {
+            listen,
+            output,
+            token,
+        } => {
+            let client = client_for_token(token)?;
             let summary = client
                 .receive_file(
                     ReceiveFileRequest {
@@ -78,6 +86,13 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     }
 
     Ok(())
+}
+
+fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
+    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
+    Ok(EnvoixClient::new(ClientConfig::new(
+        PairingConfig::spake2_shared_token(token)?,
+    )))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,15 +135,26 @@ mod tests {
 
     #[test]
     fn parses_send_command() {
-        let cli =
-            Cli::try_parse_from(["envoix", "send", "--peer", "[::1]:9000", "hello.txt"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Send {
                 peer,
+                token,
                 file
-            } if peer == "[::1]:9000".parse().unwrap() && file == std::path::Path::new("hello.txt")
+            } if peer == "[::1]:9000".parse().unwrap()
+                && token == "abcdefghijkl"
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -141,6 +167,8 @@ mod tests {
             "[::1]:9000",
             "--output",
             "received",
+            "--token",
+            "abcdefghijkl",
         ])
         .unwrap();
 
@@ -148,8 +176,22 @@ mod tests {
             cli.command,
             Command::Receive {
                 listen,
-                output
-            } if listen == "[::1]:9000".parse().unwrap() && output == std::path::Path::new("received")
+                output,
+                token
+            } if listen == "[::1]:9000".parse().unwrap()
+                && output == std::path::Path::new("received")
+                && token == "abcdefghijkl"
         ));
+    }
+
+    #[test]
+    fn rejects_missing_token() {
+        let error = Cli::try_parse_from(["envoix", "send", "--peer", "[::1]:9000", "hello.txt"])
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }

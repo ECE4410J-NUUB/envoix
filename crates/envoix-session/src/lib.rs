@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+pub use envoix_auth::PairingConfig;
+use envoix_auth::{authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
 use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
@@ -16,18 +18,12 @@ pub use envoix_types::TransferDirection;
 pub type SessionError = CoreError;
 
 /// Runtime options used when wiring transports into the transfer engine.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionConfig {
     /// Maximum chunk payload size sent by the transfer engine.
     pub chunk_size: usize,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            chunk_size: DEFAULT_CHUNK_SIZE,
-        }
-    }
+    /// Pairing authentication required before any transfer frame.
+    pub pairing: PairingConfig,
 }
 
 /// Sends one file to a manually supplied peer address.
@@ -43,6 +39,10 @@ pub async fn send_file_manual(
         .await?;
     let engine = TransferEngine::new(config.chunk_size);
 
+    if let Err(error) = authenticate_sender(&mut *connection, &config.pairing).await {
+        let _ = connection.close().await;
+        return Err(error);
+    }
     let summary = engine
         .send_file(&mut *connection, file_path, events.as_ref())
         .await?;
@@ -61,6 +61,10 @@ pub async fn receive_file(
     let mut connection = listener.accept().await?;
     let engine = TransferEngine::new(config.chunk_size);
 
+    if let Err(error) = authenticate_receiver(&mut *connection, &config.pairing).await {
+        let _ = connection.close().await;
+        return Err(error);
+    }
     let summary = engine
         .receive_file(&mut *connection, output_dir, events.as_ref())
         .await?;

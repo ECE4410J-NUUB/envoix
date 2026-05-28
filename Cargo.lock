@@ -370,6 +370,7 @@ dependencies = [
 name = "envoix-client"
 version = "0.1.0"
 dependencies = [
+ "envoix-auth",
  "envoix-error",
  "envoix-session",
  "tokio",
@@ -405,6 +406,7 @@ dependencies = [
 name = "envoix-session"
 version = "0.1.0"
 dependencies = [
+ "envoix-auth",
  "envoix-discovery",
  "envoix-error",
  "envoix-transfer",

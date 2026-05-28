@@ -6,6 +6,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const TOKEN: &str = "abcdefghijkl";
+
 #[test]
 fn cli_transfers_file_over_default_quic_loopback() {
     run_cli_loopback(free_udp_loopback_addr());
@@ -27,7 +29,9 @@ fn run_cli_loopback(listen_addr: std::net::SocketAddr) {
         .arg("--listen")
         .arg(listen_addr.to_string())
         .arg("--output")
-        .arg(&output_dir);
+        .arg(&output_dir)
+        .arg("--token")
+        .arg(TOKEN);
     let mut receiver = receiver_command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -86,7 +90,9 @@ fn run_send_once(listen_addr: std::net::SocketAddr, source_path: &Path) -> Outpu
     send_command
         .arg("send")
         .arg("--peer")
-        .arg(listen_addr.to_string());
+        .arg(listen_addr.to_string())
+        .arg("--token")
+        .arg(TOKEN);
     send_command.arg(source_path).output().unwrap()
 }
 
