@@ -1,9 +1,0 @@
-[package]
-name = "envoix-crypto"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-envoix-error.workspace = true
-envoix-types.workspace = true

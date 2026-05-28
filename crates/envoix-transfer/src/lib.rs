@@ -3,7 +3,6 @@
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
-use envoix_crypto::CryptoProvider;
 use envoix_error::CoreError;
 use envoix_protocol::{
     Chunk, Complete, CompleteAck, FileHeader, Frame, Hello, Ready, ResumeStatus,
@@ -79,18 +78,14 @@ pub struct TransferSummary {
 
 /// Sequential single-file transfer engine.
 #[derive(Clone, Debug)]
-pub struct TransferEngine<C> {
-    crypto: C,
+pub struct TransferEngine {
     chunk_size: usize,
 }
 
-impl<C> TransferEngine<C>
-where
-    C: CryptoProvider,
-{
-    /// Creates a transfer engine using `crypto` and a fixed chunk size.
-    pub fn new(crypto: C, chunk_size: usize) -> Self {
-        Self { crypto, chunk_size }
+impl TransferEngine {
+    /// Creates a transfer engine using a fixed chunk size.
+    pub fn new(chunk_size: usize) -> Self {
+        Self { chunk_size }
     }
 
     /// Sends one file over an established frame connection.
@@ -172,15 +167,12 @@ where
                 break;
             }
 
-            let encrypted =
-                self.crypto
-                    .encrypt_chunk(&transfer_id, index, &buffer[..bytes_read])?;
             connection
                 .send_frame(Frame::Chunk(Chunk {
                     transfer_id: transfer_id.clone(),
                     index,
                     offset,
-                    bytes: encrypted,
+                    bytes: buffer[..bytes_read].to_vec(),
                 }))
                 .await?;
 
@@ -330,23 +322,18 @@ where
             match connection.recv_frame().await? {
                 Frame::Chunk(chunk) => {
                     validate_chunk(&chunk, &header.transfer_id, expected_index, expected_offset)?;
-                    let decrypted = self.crypto.decrypt_chunk(
-                        &header.transfer_id,
-                        chunk.index,
-                        &chunk.bytes,
-                    )?;
-                    if decrypted.len() as u64 + expected_offset > header.file_size {
+                    if chunk.bytes.len() as u64 + expected_offset > header.file_size {
                         return Err(CoreError::Transfer(format!(
                             "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
                             chunk.offset,
-                            decrypted.len(),
+                            chunk.bytes.len(),
                             header.file_size
                         )));
                     }
-                    file.write_all(&decrypted).await?;
+                    file.write_all(&chunk.bytes).await?;
 
                     expected_index += 1;
-                    expected_offset += decrypted.len() as u64;
+                    expected_offset += chunk.bytes.len() as u64;
                     LocalFileStorage::write_resume_state(
                         &output_dir,
                         &TransferResumeState {
@@ -588,7 +575,6 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use envoix_crypto::InsecureNoopCryptoProvider;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
@@ -608,14 +594,14 @@ mod tests {
         let receiver = tokio::spawn({
             let output_dir = output_dir.clone();
             async move {
-                TransferEngine::new(InsecureNoopCryptoProvider, 4)
+                TransferEngine::new(4)
                     .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
                     .await
                     .unwrap()
             }
         });
 
-        let send_summary = TransferEngine::new(InsecureNoopCryptoProvider, 4)
+        let send_summary = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, &NoopEventSink)
             .await
             .unwrap();
@@ -648,7 +634,7 @@ mod tests {
             let output_dir = output_dir.clone();
             let stopped = stopped.clone();
             async move {
-                TransferEngine::new(InsecureNoopCryptoProvider, 4)
+                TransferEngine::new(4)
                     .receive_file(
                         &mut receiver_connection,
                         output_dir,
@@ -658,7 +644,7 @@ mod tests {
             }
         });
 
-        let send_error = TransferEngine::new(InsecureNoopCryptoProvider, 4)
+        let send_error = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path.clone(), &NoopEventSink)
             .await
             .unwrap_err();
@@ -675,14 +661,14 @@ mod tests {
         let receiver = tokio::spawn({
             let output_dir = output_dir.clone();
             async move {
-                TransferEngine::new(InsecureNoopCryptoProvider, 4)
+                TransferEngine::new(4)
                     .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
                     .await
                     .unwrap()
             }
         });
 
-        let send_summary = TransferEngine::new(InsecureNoopCryptoProvider, 4)
+        let send_summary = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, &NoopEventSink)
             .await
             .unwrap();
@@ -734,13 +720,13 @@ mod tests {
         let receiver = tokio::spawn({
             let output_dir = output_dir.clone();
             async move {
-                TransferEngine::new(InsecureNoopCryptoProvider, 5)
+                TransferEngine::new(5)
                     .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
                     .await
             }
         });
 
-        let send_error = TransferEngine::new(InsecureNoopCryptoProvider, 5)
+        let send_error = TransferEngine::new(5)
             .send_file(&mut sender_connection, source_path, &NoopEventSink)
             .await
             .unwrap_err();
@@ -777,14 +763,14 @@ mod tests {
         let receiver = tokio::spawn({
             let output_dir = output_dir.clone();
             async move {
-                TransferEngine::new(InsecureNoopCryptoProvider, 4)
+                TransferEngine::new(4)
                     .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
                     .await
                     .unwrap()
             }
         });
 
-        let send_summary = TransferEngine::new(InsecureNoopCryptoProvider, 4)
+        let send_summary = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, &NoopEventSink)
             .await
             .unwrap();

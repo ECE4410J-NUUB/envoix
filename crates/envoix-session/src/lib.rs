@@ -3,7 +3,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use envoix_crypto::InsecureNoopCryptoProvider;
 use envoix_error::CoreError;
 use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
@@ -65,7 +64,7 @@ pub async fn send_file_manual_ipv6(
                 .await?
         }
     };
-    let engine = TransferEngine::new(InsecureNoopCryptoProvider, config.chunk_size);
+    let engine = TransferEngine::new(config.chunk_size);
 
     let summary = engine
         .send_file(&mut *connection, file_path, events.as_ref())
@@ -91,7 +90,7 @@ pub async fn receive_file_ipv6(
             listener.accept().await?
         }
     };
-    let engine = TransferEngine::new(InsecureNoopCryptoProvider, config.chunk_size);
+    let engine = TransferEngine::new(config.chunk_size);
 
     let summary = engine
         .receive_file(&mut *connection, output_dir, events.as_ref())
