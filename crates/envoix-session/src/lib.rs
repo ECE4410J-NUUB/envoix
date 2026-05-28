@@ -67,9 +67,11 @@ pub async fn send_file_manual_ipv6(
     };
     let engine = TransferEngine::new(InsecureNoopCryptoProvider, config.chunk_size);
 
-    engine
+    let summary = engine
         .send_file(&mut *connection, file_path, events.as_ref())
-        .await
+        .await?;
+    let _ = connection.close().await;
+    Ok(summary)
 }
 
 /// Receives one file on a manually supplied listen address.
@@ -91,7 +93,9 @@ pub async fn receive_file_ipv6(
     };
     let engine = TransferEngine::new(InsecureNoopCryptoProvider, config.chunk_size);
 
-    engine
+    let summary = engine
         .receive_file(&mut *connection, output_dir, events.as_ref())
-        .await
+        .await?;
+    let _ = connection.close().await;
+    Ok(summary)
 }

@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use envoix_error::CoreError;
@@ -55,8 +56,8 @@ impl TransportDialer for QuicDialer {
             .map_err(|error| CoreError::Transport(error.to_string()))?;
 
         Ok(Box::new(QuicFrameConnection {
-            endpoint,
-            connection,
+            _endpoint: endpoint,
+            _connection: connection,
             send,
             recv,
         }))
@@ -102,8 +103,8 @@ impl TransportListener for QuicListener {
             .map_err(|error| CoreError::Transport(error.to_string()))?;
 
         Ok(Box::new(QuicFrameConnection {
-            endpoint: self.endpoint.clone(),
-            connection,
+            _endpoint: self.endpoint.clone(),
+            _connection: connection,
             send,
             recv,
         }))
@@ -112,8 +113,8 @@ impl TransportListener for QuicListener {
 
 #[derive(Debug)]
 struct QuicFrameConnection {
-    endpoint: Endpoint,
-    connection: quinn::Connection,
+    _endpoint: Endpoint,
+    _connection: quinn::Connection,
     send: SendStream,
     recv: RecvStream,
 }
@@ -129,8 +130,10 @@ impl FrameConnection for QuicFrameConnection {
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
-        self.connection.close(0_u32.into(), b"done");
-        self.endpoint.wait_idle().await;
+        self.send
+            .finish()
+            .map_err(|error| CoreError::Transport(error.to_string()))?;
+        let _ = tokio::time::timeout(Duration::from_millis(250), self.send.stopped()).await;
         Ok(())
     }
 }

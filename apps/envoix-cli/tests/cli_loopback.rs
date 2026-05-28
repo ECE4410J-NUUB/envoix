@@ -1,8 +1,8 @@
 use std::fs;
 use std::io::Read;
 use std::net::{TcpListener, UdpSocket};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,19 +42,11 @@ fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
         .spawn()
         .unwrap();
 
-    // TODO: should use other approaches other than fixed time sleep.
-    // but this is not easy to solve.
-    thread::sleep(Duration::from_millis(200));
+    // Give the spawned receiver an initial chance to bind; the send command
+    // still retries connection-refused failures below.
+    thread::sleep(Duration::from_millis(500));
 
-    let mut send_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
-    send_command
-        .arg("send")
-        .arg("--peer")
-        .arg(listen_addr.to_string());
-    if let Some(protocol) = protocol {
-        send_command.arg("--protocol").arg(protocol);
-    }
-    let send_output = send_command.arg(&source_path).output().unwrap();
+    let send_output = run_send_with_retries(protocol, listen_addr, &source_path);
 
     if !send_output.status.success() {
         let _ = receiver.kill();
@@ -79,6 +71,42 @@ fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
     assert_eq!(fs::read(output_dir.join("hello.txt")).unwrap(), source_text);
 
     fs::remove_dir_all(root).unwrap();
+}
+
+fn run_send_with_retries(
+    protocol: Option<&str>,
+    listen_addr: std::net::SocketAddr,
+    source_path: &Path,
+) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(3);
+
+    loop {
+        let output = run_send_once(protocol, listen_addr, source_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() || !stderr.contains("Connection refused") {
+            return output;
+        }
+        if Instant::now() >= deadline {
+            return output;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn run_send_once(
+    protocol: Option<&str>,
+    listen_addr: std::net::SocketAddr,
+    source_path: &Path,
+) -> Output {
+    let mut send_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
+    send_command
+        .arg("send")
+        .arg("--peer")
+        .arg(listen_addr.to_string());
+    if let Some(protocol) = protocol {
+        send_command.arg("--protocol").arg(protocol);
+    }
+    send_command.arg(source_path).output().unwrap()
 }
 
 fn free_tcp_loopback_addr() -> std::net::SocketAddr {
