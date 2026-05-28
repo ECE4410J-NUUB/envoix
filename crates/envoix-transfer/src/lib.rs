@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Default sequential chunk size used by clients that do not override it.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
+const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
 pub type TransferError = CoreError;
@@ -324,6 +325,7 @@ impl TransferEngine {
 
         let mut expected_index = state.next_chunk_index;
         let mut expected_offset = state.bytes_received;
+        let mut last_resume_state_bytes = state.bytes_received;
         events.on_event(TransferEvent::Progress {
             transfer_id: header.transfer_id.clone(),
             bytes_transferred: expected_offset,
@@ -346,19 +348,18 @@ impl TransferEngine {
 
                     expected_index += 1;
                     expected_offset += chunk.bytes.len() as u64;
-                    LocalFileStorage::write_resume_state(
-                        &output_dir,
-                        &TransferResumeState {
-                            transfer_id: header.transfer_id.clone(),
-                            file_name: header.file_name.clone(),
-                            file_size: header.file_size,
-                            chunk_size: header.chunk_size,
-                            expected_file_hash: header.file_hash.clone(),
-                            bytes_received: expected_offset,
-                            next_chunk_index: expected_index,
-                        },
-                    )
-                    .await?;
+                    if expected_offset.saturating_sub(last_resume_state_bytes)
+                        >= RESUME_STATE_WRITE_INTERVAL
+                    {
+                        write_resume_state_for_offset(
+                            &output_dir,
+                            &header,
+                            expected_offset,
+                            expected_index,
+                        )
+                        .await?;
+                        last_resume_state_bytes = expected_offset;
+                    }
                     events.on_event(TransferEvent::Progress {
                         transfer_id: header.transfer_id.clone(),
                         bytes_transferred: expected_offset,
@@ -512,6 +513,27 @@ fn validate_chunk(
         )));
     }
     Ok(())
+}
+
+async fn write_resume_state_for_offset(
+    output_dir: &Path,
+    header: &FileHeader,
+    bytes_received: u64,
+    next_chunk_index: u64,
+) -> Result<(), TransferError> {
+    LocalFileStorage::write_resume_state(
+        output_dir,
+        &TransferResumeState {
+            transfer_id: header.transfer_id.clone(),
+            file_name: header.file_name.clone(),
+            file_size: header.file_size,
+            chunk_size: header.chunk_size,
+            expected_file_hash: header.file_hash.clone(),
+            bytes_received,
+            next_chunk_index,
+        },
+    )
+    .await
 }
 
 async fn load_or_create_resume_state(

@@ -14,12 +14,14 @@ use envoix_transport::{
     ConnectionCandidate, FrameConnection, TransportDialer, TransportError, TransportListener,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{Endpoint, RecvStream, SendStream};
+use quinn::{Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default)]
 /// QUIC dialer that opens one bidirectional stream per transfer.
@@ -162,7 +164,9 @@ fn insecure_no_auth_server_config() -> Result<quinn::ServerConfig, TransportErro
     let quic_crypto = QuicServerConfig::try_from(server_crypto)
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_crypto)))
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
+    config.transport_config(shared_transport_config());
+    Ok(config)
 }
 
 fn insecure_no_auth_client_config() -> Result<quinn::ClientConfig, TransportError> {
@@ -174,7 +178,17 @@ fn insecure_no_auth_client_config() -> Result<quinn::ClientConfig, TransportErro
     let quic_crypto = QuicClientConfig::try_from(client_crypto)
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
+    let mut config = quinn::ClientConfig::new(Arc::new(quic_crypto));
+    config.transport_config(shared_transport_config());
+    Ok(config)
+}
+
+fn shared_transport_config() -> Arc<TransportConfig> {
+    let mut config = TransportConfig::default();
+    config
+        .max_idle_timeout(Some(MAX_IDLE_TIMEOUT.try_into().unwrap()))
+        .keep_alive_interval(Some(KEEP_ALIVE_INTERVAL));
+    Arc::new(config)
 }
 
 fn install_rustls_crypto_provider() {

@@ -13,6 +13,7 @@ use envoix_client::{
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
+const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -146,6 +147,7 @@ struct ProgressState {
     direction: TransferDirection,
     total_bytes: u64,
     started_at: Instant,
+    last_rendered_at: Instant,
 }
 
 impl EventSink for ConsoleEventSink {
@@ -162,6 +164,7 @@ impl EventSink for ConsoleEventSink {
                     direction,
                     total_bytes,
                     started_at: Instant::now(),
+                    last_rendered_at: Instant::now(),
                 };
                 render_progress_line(&state, 0, false);
                 *self.progress.lock().unwrap() = Some(state);
@@ -169,8 +172,11 @@ impl EventSink for ConsoleEventSink {
             TransferEvent::Progress {
                 bytes_transferred, ..
             } => {
-                if let Some(state) = self.progress.lock().unwrap().as_ref() {
+                if let Some(state) = self.progress.lock().unwrap().as_mut()
+                    && state.last_rendered_at.elapsed() >= PROGRESS_RENDER_INTERVAL
+                {
                     render_progress_line(state, bytes_transferred, false);
+                    state.last_rendered_at = Instant::now();
                 }
             }
             TransferEvent::Completed {
