@@ -14,14 +14,15 @@
 
 \graphicspath{{figures/}}
 
-\usetheme[max,blue]{sjtubeamer}
+\usetheme[min,blue]{sjtubeamer}
+\titlegraphic{}
 
-\title[FluxLink · Project Proposal]%
-  {\textbf{FluxLink}: A Unified Adaptive Platform\\for Secure Multi-Transport File Transfer}
+\title[Envoix · Project Proposal]%
+  {\textbf{Envoix}: A Hybrid Adaptive Platform for Secure End-to-End File Transfer}
 \subtitle{VE441 · App Development for Entrepreneurs · Project Proposal}
 \author{Sun Qizhen \and Zhang Jinbin \and Li Yuhao \and He Yumeng}
-\institute[UM-SJTU JI]{UM-SJTU Joint Institute · Shanghai Jiao Tong University}
-\date{2025}
+\institute[SJTU GC]{Shanghai Jiao Tong University Global College}
+\date{\today}
 
 \begin{document}
 
@@ -30,30 +31,22 @@
 % ----------------------------------------------------------------
 % Elevator Pitch
 % ----------------------------------------------------------------
-\begin{frame}{FluxLink --- Elevator Pitch}
+\begin{frame}{Envoix --- Elevator Pitch}
   \begin{block}{}
     \centering\large\itshape
     Never waste time choosing how to send a file again ---\\
-    FluxLink automatically selects the fastest, most secure transfer path\\
+    Envoix automatically selects the fastest, most secure transfer path\\
     across any platform and any network.
   \end{block}
 
   \vspace{1.5em}
 
-  \begin{columns}[c]
-    \column{0.5\textwidth}
-    \begin{itemize}
-      \item \textbf{Zero decision cost} --- routing is automatic
-      \item \textbf{Any network} --- LAN, P2P, relay fallback
-      \item \textbf{Any platform} --- Android, iOS, Desktop
-    \end{itemize}
-    \column{0.5\textwidth}
-    \begin{itemize}
-      \item \textbf{Uniform E2EE} --- all modes, all files
-      \item \textbf{Encrypted chat} --- context stays private
-      \item \textbf{No account required} --- pair via QR/token
-    \end{itemize}
-  \end{columns}
+  \begin{itemize}\setlength{\itemsep}{0.55em}
+    \item \textbf{Zero decision cost} --- routing is automatic, zero manual selection
+    \item \textbf{Uniform E2EE} --- all transfer modes, all files, always encrypted
+    \item \textbf{Encrypted chat} --- conversation context stays as private as the file
+    \item \textbf{No account required} --- pair instantly via QR code or short token
+  \end{itemize}
 \end{frame}
 
 % ----------------------------------------------------------------
@@ -73,45 +66,475 @@
 \section{Team Members}
 % ================================================================
 
-\begin{frame}{Team Members}
-  \textbf{Team Name:} NUUB \hfill \textbf{PM:} Zhang Jinbin
+\begin{frame}{Team Members \quad{\small\normalfont\textbf{Team:} NUUB \enspace \textbf{PM:} Zhang Jinbin}}
 
-  \vspace{0.8em}
+\vspace{-0.3em}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{@{} >{\bfseries}l l X X @{}}
+  \toprule
+  Name & jAccount & Task Assignment & Technical Strengths \\
+  \midrule
+  Sun Qizhen   & qz\_sun       & Product architecture, routing engine, network path scoring & Networking, distributed systems, system design \\
+  Zhang Jinbin & moranxuege   & PM, mobile client (Android/iOS), cross-platform UI/UX & Android (Kotlin), iOS (Swift), UX implementation \\
+  Li Yuhao     & 17521218310  & End-to-end encryption, QR/token handshake, encrypted chat & Cryptography, backend security, protocol design \\
+  He Yumeng    & y4954he      & Relay server, deployment, testing & Backend, QA, Rust REST \\
+  \bottomrule
+\end{tabularx}
 
-  \resizebox{\textwidth}{!}{%
-    \begin{tabular}{llll}
-      \toprule
-      \textbf{Full Name} & \textbf{jAccount} & \textbf{Task Assignment} & \textbf{Technical Strengths} \\
-      \midrule
-      Sun Qizhen   & qz\_sun      & Product architecture · Protocol routing engine · Network path scoring & Networking · Distributed systems · System design \\
-      Zhang Jinbin & moranxuege   & PM · Mobile client (Android/iOS) · Cross-platform UI/UX            & Android (Kotlin) · iOS (Swift) · UX implementation \\
-      Li Yuhao     & y4954he      & End-to-end encryption · QR/token handshake · Encrypted chat         & Cryptography · Backend security · Protocol design \\
-      He Yumeng    & 17521218310  & Relay server · Deployment · Testing · Cache policy                  & Backend · DevOps · QA · Django REST \\
-      \bottomrule
-    \end{tabular}%
-  }
-
-  \vspace{0.8em}
-
-  \begin{columns}[t]
-    \column{0.25\textwidth}
-    \textbf{Product \& Research}\\[0.3em]
-    \small Sun Qizhen\\routing logic \& protocol priority
-    \column{0.25\textwidth}
-    \textbf{Client \& UX (PM)}\\[0.3em]
-    \small Zhang Jinbin\\mobile UI \& cross-platform
-    \column{0.25\textwidth}
-    \textbf{Networking \& Security}\\[0.3em]
-    \small Li Yuhao\\E2EE model \& handshake
-    \column{0.25\textwidth}
-    \textbf{Backend \& QA}\\[0.3em]
-    \small He Yumeng\\relay infra \& test coverage
-  \end{columns}
 \end{frame}
 
 % ================================================================
-\section{User Interview Questionnaire}
+\section{Customer Profile}
+ 
+\begin{frame}{Affinity Map}
+  \vfill
+  \centering
+  {\LARGE\faLink}\\[1.2em]
+  \href{https://chkxw.github.io/affinity-map-site/}%
+       {\large\ttfamily chkxw.github.io/affinity-map-site}
+  \vfill
+\end{frame}
+ 
+% ---- Customer profile slide 1: context ----
+\begin{frame}[shrink=16, t]{Customer Profile --- Who Are Our Users?}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{User Context (17 interviews)}
+      \begin{itemize}
+        \item Own \textbf{2--3 devices}: phone + laptop (± tablet)
+        \item Platforms span \textbf{iOS, Android, Windows, macOS, Linux}
+        \item \textbf{8 / 17} transfers are self-to-self between own devices
+        \item Files: art / photos, coursework docs, large datasets
+      \end{itemize}
+    \end{block}
+    \vspace{0.1em}
+    \begin{block}{Current Tools}
+      \small
+      \begin{tabular}{@{}ll@{}}
+        WeChat File Transfer  & universal default (10 / 17) \\
+        Google Drive          & large files                 \\
+        Discord / QQ          & makeshift shuttles          \\
+        USB cable / drive     & offline fallback            \\
+      \end{tabular}
+    \end{block}
+    \column{0.48\textwidth}
+    \begin{alertblock}{Key Insight}
+      Tool choice is driven by \textbf{habit, not quality}.
+      \vspace{0.4em}
+ 
+      \small\itshape
+      ``WeChat was already open, so I just used it.
+       I wasn't thinking about AirDrop.''
+      \vspace{0.4em}
+ 
+      \normalfont\small
+      Even full Apple-ecosystem users prefer WeChat
+      over AirDrop due to inertia.
+    \end{alertblock}
+    \vspace{0.5em}
+    \begin{block}{What They Like Today}
+      \small
+      \begin{itemize}
+        \item \textbf{Always there} --- no extra install needed
+        \item \textbf{Persistent storage} --- QQ files don't expire
+        \item \textbf{Multi-purpose} --- chat + transfer in one app
+      \end{itemize}
+    \end{block}
+  \end{columns}
+\end{frame}
+ 
+% ---- Customer profile slide 2: pain points ----
+\begin{frame}[shrink=8]{Customer Profile --- Key Pain Points}
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \noindent\hspace*{-0.5cm}%
+  \begin{tabularx}{\dimexpr\textwidth+0.5cm\relax}{@{} p{3.6cm} X @{}}
+    \toprule
+    \textbf{Pain Point} & \textbf{Representative Quote} \\
+    \midrule
+    Transfer interrupted; no auto-resume (\texttimes\,11)
+      & \small\itshape ``scp cut out halfway and I had to start over from the beginning'' \\
+    \rowcolor{cprimary!8}
+    Cross-platform wall: multi-step detour (\texttimes\,7)
+      & \small\itshape ``I had to log in on both devices, sync through WeChat, download, then move it'' \\
+    File size \& format caps (\texttimes\,7)
+      & \small\itshape ``Discord has a file size limit; for anything larger I use Google Drive'' \\
+    \rowcolor{cprimary!8}
+    Cloud storage quota exhaustion (\texttimes\,6)
+      & \small\itshape ``I've already used 3 Google accounts worth of the free 15 GB'' \\
+    Speed throttling behind paywall (\texttimes\,6)
+      & \small\itshape ``Cloud storage requires a paid membership for full speed'' \\
+    \rowcolor{cprimary!8}
+    WeChat save-location friction (\texttimes\,4)
+      & \small\itshape ``WeChat automatically saves files somewhere weird; you have to Save As every time'' \\
+    \bottomrule
+  \end{tabularx}
+  \vspace{0.3em}
+  {\footnotesize \texttimes{} = affinity map tally; all findings supported by $\geq$2 interviewees.}
+\end{frame}
+\section{Value Proposition}
+ 
+\begin{frame}[shrink=12]{Value Proposition}
+  \begin{block}{}
+    \centering\itshape\small
+    For multi-device users who lose files to interruptions and platform walls,\\[0.1em]
+    \textbf{Envoix} automatically routes every transfer via the fastest available
+    path --- LAN, P2P, or relay --- with uniform end-to-end encryption,
+    no account, no size cap, and no speed throttle.
+  \end{block}
+  \vspace{0.2em}
+  \small
+  \renewcommand{\arraystretch}{1.1}
+  \begin{tabular}{p{4.8cm} p{7.2cm}}
+    \toprule
+    \textbf{Pain Point (\texttimes)} & \textbf{How Envoix Addresses It} \\
+    \midrule
+    Interrupted; no auto-resume (11)
+      & Built-in resumable transfer; reconnects silently after any network drop \\
+    Cross-platform wall (7)
+      & Runs on iOS, Android, Windows, macOS, Linux --- one app, zero friction \\
+    File size \& format caps (7)
+      & No server storage; size bounded only by local disk \\
+    Storage quota \& speed throttle (6)
+      & LAN direct path at full NIC speed; relay is ciphertext-only fallback \\
+    Privacy resignation (6)
+      & E2EE before leaving the device; relay never sees plaintext \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+ 
+% ---- Storyboard ----
+\begin{frame}{Storyboard --- ``Lin's 11 PM Deadline''}
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \renewcommand{\arraystretch}{1.0}
+  \begin{tabular}{|p{3.72cm}|p{3.72cm}|p{3.72cm}|}
+    \hline
+    \cellcolor{red!8}
+    \textbf{1 · The Deadline}\newline\vspace{0.1em}
+    Lin is finishing her design project at 11 PM.
+    She needs to send a 2 GB video render to her
+    Windows teammate before midnight.\newline
+    \textit{\faExclamationTriangle~Rushed, under pressure}
+    &
+    \cellcolor{red!15}
+    \textbf{2 · Three Tools Fail}\newline\vspace{0.1em}
+    AirDrop: ``Apple only.''
+    Discord: file too large.
+    WeChat: starts, then drops with no resume.
+    15 minutes wasted.\newline
+    \textit{\faFrown~Frustrated, helpless}
+    &
+    \cellcolor{yellow!15}
+    \textbf{3 · Opens Envoix}\newline\vspace{0.1em}
+    Teammate suggests Envoix.
+    She opens it --- no sign-up screen.
+    ``Send File'' is the first thing she sees.\newline
+    \textit{\faSmile~Cautiously hopeful}
+    \\
+    \hline
+    \cellcolor{yellow!8}
+    \textbf{4 · One Scan to Pair}\newline\vspace{0.1em}
+    Teammate shows a QR code on his screen.
+    She scans it.
+    Devices paired in under 2 seconds.
+    She taps the file and hits Send.\newline
+    \textit{\faSurprise~Surprised by simplicity}
+    &
+    \cellcolor{green!10}
+    \textbf{5 · LAN Direct Transfer}\newline\vspace{0.1em}
+    Envoix detects both are on the same Wi-Fi.
+    Routes directly over LAN --- no cloud, no relay.
+    2 GB transferred in 40 seconds at full speed.\newline
+    \textit{\faStar~Pleasantly astonished}
+    &
+    \cellcolor{green!20}
+    \textbf{6 · File Received, Deadline Met}\newline\vspace{0.1em}
+    File arrives intact, original quality.
+    ``That was it?''
+    Project submitted on time --- no cloud, no drama.\newline
+    \textit{\faHeart~Relieved and delighted}
+    \\
+    \hline
+  \end{tabular}
+  \vspace{0.25em}
+  {\footnotesize\textbf{Pain points resolved:} interruption (\texttimes11) · cross-platform wall (\texttimes7) · file size cap (\texttimes7)}
+  \hfill
+  {\footnotesize\itshape % TODO: replace cells with illustrated panels from storyboardthat.com
+  }
+\end{frame}
+
 % ================================================================
+\section{Competitor Analysis}
+% ================================================================
+
+\begin{frame}{Market Overview}
+  \begin{block}{The Fundamental Gap}
+    Existing systems typically optimize for \textbf{exactly one transport pathway}. No single consumer app combines all approaches into a unified, adaptive experience.
+  \end{block}
+
+  \vspace{0.5em}
+
+  \begin{columns}[c]
+    \column{0.2\textwidth}
+    \centering\small\textbf{Cloud Storage}\\[0.3em]
+    \footnotesize Google Drive\\iCloud · Dropbox
+    \column{0.2\textwidth}
+    \centering\small\textbf{Messaging Apps}\\[0.3em]
+    \footnotesize WeChat\\WhatsApp · Telegram
+    \column{0.2\textwidth}
+    \centering\small\textbf{LAN}\\[0.3em]
+    \footnotesize AirDrop\\Nearby Share
+    \column{0.2\textwidth}
+    \centering\small\textbf{Internet P2P}\\[0.3em]
+    \footnotesize BitTorrent\\Syncthing
+    \column{0.2\textwidth}
+    \centering\small\textbf{PAKE Transfer}\\[0.3em]
+    \footnotesize Magic Wormhole\\croc
+  \end{columns}
+
+  \vspace{0.8em}
+  \centering\textbf{Competitors analyzed:} Google Drive · WeChat · AirDrop · BitTorrent · croc
+\end{frame}
+
+\begin{frame}{Competitor Profiles (1/2)}
+
+\vspace{-1.2em}
+
+\footnotesize
+\setlength{\itemsep}{0em}
+\linespread{0.9}\selectfont
+
+\begin{columns}[t]
+
+\column{0.48\textwidth}
+
+\begin{block}{Google Drive --- Cloud Storage}
+\begin{itemize}
+  \item[\faPlus] Persistent storage
+  \item[\faPlus] Cross-device sync
+  \item[\faPlus] 15 GB free storage
+  \item[\faPlus] No recipient installation
+  \item[\faPlus] Fast transfer
+  \item[\faMinus] Double bandwidth usage
+  \item[\faMinus] Metadata leakage
+  \item[\faMinus] Subscription pressure
+  \item[\faMinus] Poor for transient transfer
+  \item[\faMinus] Privacy concerns
+\end{itemize}
+\end{block}
+
+\column{0.48\textwidth}
+
+\begin{block}{WeChat --- Messaging App}
+\begin{itemize}
+  \item[\faPlus] 1.3B+ users
+  \item[\faPlus] Already widely used
+  \item[\faPlus] Fast and convenient
+  \item[\faMinus] 1 GB file limit
+  \item[\faMinus] Aggressive compression
+  \item[\faMinus] Multiple local copies
+  \item[\faMinus] No persistent storage
+  \item[\faMinus] Ecosystem lock-in
+  \item[\faMinus] Surveillance/privacy risks
+\end{itemize}
+\end{block}
+
+\end{columns}
+\end{frame}
+
+\begin{frame}{Competitor Profiles (2/2)}
+
+\vspace{-2.0em}
+
+\small
+\setlength{\itemsep}{0em}
+\linespread{0.9}\selectfont
+\begin{columns}[t]
+
+\column{0.34\textwidth}
+
+\begin{block}{AirDrop --- LAN}
+\begin{itemize}
+  \item[\faPlus] Bluetooth + Wi-Fi Direct
+  \item[\faPlus] No account required
+  \item[\faPlus] No internet required
+  \item[\faPlus] Seamless Apple UX
+  \item[\faMinus] Apple-only
+  \item[\faMinus] Proximity-only
+  \item[\faMinus] No remote fallback
+  \item[\faMinus] Discovery may leak info
+\end{itemize}
+\end{block}
+
+\column{0.33\textwidth}
+
+\begin{block}{BitTorrent --- Internet P2P}
+\begin{itemize}
+  \item[\faPlus] Cross-platform
+  \item[\faPlus] Widely used
+  \item[\faPlus] Fast P2P transfer
+  \item[\faPlus] Secure transfer
+  \item[\faMinus] Optimized for many peers
+  \item[\faMinus] Weak in small networks
+\end{itemize}
+\end{block}
+
+\column{0.33\textwidth}
+
+\begin{block}{croc --- PAKE Transfer}
+\begin{itemize}
+  \item[\faPlus] SPAKE2 cryptographic model
+  \item[\faPlus] Relay stores no plaintext
+  \item[\faPlus] Resistant to offline attack
+  \item[\faPlus] Open-source
+  \item[\faPlus] Closest arch to Envoix
+  \item[\faMinus] Desktop CLI-only
+  \item[\faMinus] No LAN fast path
+  \item[\faMinus] All traffic via relay
+\end{itemize}
+\end{block}
+
+\end{columns}
+
+\end{frame}
+
+
+\linespread{1.0}\selectfont
+\small
+\begin{frame}{Comparison Table}
+
+\vspace{-0.5em}
+
+\scriptsize
+\linespread{0.95}\selectfont
+
+\centering
+
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Feature} &
+\textbf{Google Drive} &
+\textbf{WeChat} &
+\textbf{AirDrop} &
+\textbf{BitTorrent} &
+\textbf{croc} &
+\textbf{Envoix} \\
+\midrule
+
+Cross-platform
+& \checkmark
+& Partial
+& $\times$
+& \checkmark
+& \checkmark
+& \textbf{\checkmark} \\
+
+LAN / local transfer
+& $\times$
+& $\times$
+& \checkmark
+& $\times$
+& $\times$
+& \textbf{\checkmark} \\
+
+Internet / relay
+& \checkmark
+& \checkmark
+& $\times$
+& $\times$
+& \checkmark
+& \textbf{\checkmark} \\
+
+P2P transfer
+& $\times$
+& $\times$
+& \checkmark
+& \checkmark
+& $\times$
+& \textbf{\checkmark} \\
+
+\rowcolor{cprimary!15}
+Auto-routing
+& $\times$
+& $\times$
+& $\times$
+& $\times$
+& $\times$
+& \textbf{\checkmark} \\
+
+\rowcolor{cprimary!15}
+Adaptive LAN + relay
+& $\times$
+& $\times$
+& $\times$
+& $\times$
+& $\times$
+& \textbf{\checkmark} \\
+
+\rowcolor{cprimary!15}
+E2EE (all modes)
+& $\times$
+& $\times$
+& Partial
+& Partial
+& \checkmark
+& \textbf{\checkmark} \\
+
+No account required
+& \checkmark
+& $\times$
+& \checkmark
+& \checkmark
+& \checkmark
+& \textbf{\checkmark} \\
+
+No ecosystem lock-in
+& \checkmark
+& $\times$
+& $\times$
+& \checkmark
+& \checkmark
+& \textbf{\checkmark} \\
+
+Mobile app
+& \checkmark
+& \checkmark
+& \checkmark
+& Partial
+& $\times$
+& \textbf{\checkmark} \\
+
+Resume on failure
+& Partial
+& $\times$
+& $\times$
+& Partial
+& $\times$
+& \textbf{\checkmark} \\
+
+Open-source
+& $\times$
+& $\times$
+& $\times$
+& \checkmark
+& \checkmark
+& \textbf{\checkmark} \\
+
+\bottomrule
+\end{tabular}%
+}
+
+\end{frame}
+
+% ================================================================
+% Closing
+% ================================================================
+
+\appendix
+% \section{User Interview Questionnaire}
 
 \begin{frame}[shrink=8]{Interview Design --- Participants \& Venue}
   \begin{columns}[t]
@@ -180,199 +603,9 @@
     \item[\textbf{Q12}] What frustrations have you accepted as ``the way file transfer works'' --- things you've stopped trying to fix?
   \end{enumerate}
 \end{frame}
-
-% ================================================================
-\section{Competitor Analysis}
-% ================================================================
-
-\begin{frame}{Market Overview}
-  \begin{block}{The Fundamental Gap}
-    Existing systems typically optimize for \textbf{exactly one transport pathway}. No single consumer app combines all approaches into a unified, adaptive experience.
-  \end{block}
-
-  \vspace{0.5em}
-
-  \begin{columns}[c]
-    \column{0.2\textwidth}
-    \centering\small\textbf{Cloud Storage}\\[0.3em]
-    \footnotesize Google Drive\\iCloud · Dropbox
-    \column{0.2\textwidth}
-    \centering\small\textbf{Messaging Apps}\\[0.3em]
-    \footnotesize WeChat\\WhatsApp · Telegram
-    \column{0.2\textwidth}
-    \centering\small\textbf{Ecosystem / LAN}\\[0.3em]
-    \footnotesize AirDrop\\Nearby Share
-    \column{0.2\textwidth}
-    \centering\small\textbf{Internet P2P}\\[0.3em]
-    \footnotesize Send Anywhere\\Snapdrop
-    \column{0.2\textwidth}
-    \centering\small\textbf{PAKE Transfer}\\[0.3em]
-    \footnotesize Magic Wormhole\\croc
-  \end{columns}
-
-  \vspace{0.8em}
-  \centering\textbf{Competitors analyzed:} Google Drive · WeChat · AirDrop · Send Anywhere · Magic Wormhole
-\end{frame}
-
-\begin{frame}[shrink=12]{Competitor Profiles (1/2)}
-  \begin{columns}[t]
-    \column{0.5\textwidth}
-    \begin{block}{Google Drive --- Cloud Storage}
-      \small\begin{itemize}
-        \item[\faPlus] Persistent storage; cross-device sync; 15 GB free; no recipient install
-        \item[\faMinus] Double bandwidth (sender $\to$ server $\to$ receiver)
-        \item[\faMinus] Metadata leakage; subscription pressure; unsuited for transient transfer
-      \end{itemize}
-    \end{block}
-    \vspace{0.3em}
-    \begin{block}{WeChat --- Messaging App}
-      \small\begin{itemize}
-        \item[\faPlus] 1.3B+ users; already in daily use; integrated cloud storage
-        \item[\faMinus] 100 MB limit; aggressive compression; server upload bottleneck
-        \item[\faMinus] Ecosystem lock-in; super-app surveillance risks
-      \end{itemize}
-    \end{block}
-    \column{0.5\textwidth}
-    \begin{block}{AirDrop --- Ecosystem LAN Transfer}
-      \small\begin{itemize}
-        \item[\faPlus] Fast (Bluetooth + Wi-Fi Direct); no account; no internet required
-        \item[\faPlus] Seamless Apple-to-Apple UX
-        \item[\faMinus] Apple-only; proximity-only; no fallback for remote scenarios
-        \item[\faMinus] Contact-discovery leaks phone numbers and email addresses to passive attackers \textit{(Heinrich et al., 2021)}
-      \end{itemize}
-    \end{block}
-  \end{columns}
-\end{frame}
-
-\begin{frame}[shrink=12]{Competitor Profiles (2/2)}
-  \begin{columns}[t]
-    \column{0.5\textwidth}
-    \begin{block}{Send Anywhere --- Internet P2P}
-      \begin{itemize}
-        \item[\faPlus] Cross-platform (Android, iOS, Web); 6-digit key; no account; 4.3\faAndroid
-        \item[\faMinus] No intelligent routing between LAN/P2P/relay; relay-dependent in most real-world conditions; no resume on failure; no encrypted chat alongside transfer
-      \end{itemize}
-    \end{block}
-    \column{0.5\textwidth}
-    \begin{block}{Magic Wormhole --- PAKE Transfer}
-      \begin{itemize}
-        \item[\faPlus] Strongest cryptographic model (SPAKE2); relay holds no plaintext; resists offline attack; open-source --- \textit{architecturally closest to FluxLink}
-        \item[\faMinus] CLI-only; no mobile app; no LAN fast path (all traffic routed through relay even on same Wi-Fi); no resume; single centralized relay
-      \end{itemize}
-    \end{block}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Comparison Table}
-  \centering
-  \resizebox{\textwidth}{!}{%
-    \begin{tabular}{lcccccc}
-      \toprule
-      \textbf{Feature} & \textbf{Google Drive} & \textbf{WeChat} & \textbf{AirDrop} & \textbf{Send Anywhere} & \textbf{Magic Wormhole} & \textbf{FluxLink} \\
-      \midrule
-      Cross-platform          & \checkmark & Partial    & $\times$   & \checkmark & \checkmark & \textbf{\checkmark} \\
-      LAN / local transfer    & $\times$   & $\times$   & \checkmark & $\times$   & $\times$   & \textbf{\checkmark} \\
-      Internet / relay        & \checkmark & \checkmark & $\times$   & \checkmark & \checkmark & \textbf{\checkmark} \\
-      \rowcolor{cprimary!15}
-      Auto-routing            & $\times$   & $\times$   & $\times$   & $\times$   & $\times$   & \textbf{\checkmark} \\
-      \rowcolor{cprimary!15}
-      E2EE (all modes)        & $\times$   & $\times$   & Partial    & Partial    & \checkmark & \textbf{\checkmark} \\
-      \rowcolor{cprimary!15}
-      Encrypted chat          & $\times$   & $\times$   & $\times$   & $\times$   & $\times$   & \textbf{\checkmark} \\
-      No account required     & \checkmark & $\times$   & \checkmark & \checkmark & \checkmark & \textbf{\checkmark} \\
-      No ecosystem lock-in    & \checkmark & $\times$   & $\times$   & \checkmark & \checkmark & \textbf{\checkmark} \\
-      Mobile app              & \checkmark & \checkmark & \checkmark & \checkmark & $\times$   & \textbf{\checkmark} \\
-      Resume on failure       & $\times$   & $\times$   & $\times$   & $\times$   & $\times$   & \textbf{\checkmark} \\
-      \bottomrule
-    \end{tabular}%
-  }
-\end{frame}
-
-% ================================================================
-\section{Technical Differentiation}
-% ================================================================
-
-\begin{frame}[shrink=22]{Intelligent Transfer Routing Engine}
-  \begin{block}{Core Insight}
-    Every competitor optimizes a \textbf{single transfer modality} and asks users to manage the rest manually.\\
-    FluxLink treats the protocol stack as a \textbf{scored decision}, not a user configuration.
-  \end{block}
-
-  \vspace{0.5em}
-
-  \textbf{Priority chain (probed automatically after pairing):}
-
-  \vspace{0.3em}
-
-  \begin{enumerate}
-    \item \textbf{mDNS-based LAN} --- lowest latency, highest throughput, no internet dependency
-    \item \textbf{IPv6 direct P2P} --- increasingly viable on campus and carrier networks
-    \item \textbf{QUIC/UDP hole-punching} --- rendezvous-assisted NAT traversal; no file content on relay
-    \item \textbf{Centralized relay fallback} --- guarantees delivery under any condition; relay handles ciphertext only
-  \end{enumerate}
-
-  \vspace{0.5em}
-  \textit{The user sees one consistent interaction: \textbf{pair, send, done}. Path degradation triggers silent fallback.}
-\end{frame}
-
-\begin{frame}[shrink=33]{Security Model \& Encrypted Chat}
-  \begin{columns}[t]
-    \column{0.5\textwidth}
-    \begin{block}{Uniform Security Across All Modes}
-      \begin{itemize}
-        \item QR / short-code handshake establishes a session key (SPAKE2)
-        \item All file chunks and chat messages encrypted \textbf{before leaving the device}
-        \item Relay server never sees plaintext
-        \item Relay-cached messages cleared weekly
-      \end{itemize}
-    \end{block}
-    \column{0.5\textwidth}
-    \begin{block}{Encrypted Chat Layer}
-      \begin{itemize}
-        \item \textbf{No competitor} integrates encrypted chat alongside file transfer
-        \item The conversation about a file is as private as the file itself
-        \item Same E2EE session --- no context leakage
-      \end{itemize}
-    \end{block}
-  \end{columns}
-
-  \vspace{1em}
-
-  \begin{alertblock}{Why This is Hard to Copy}
-    The routing engine cannot be added incrementally to a single-modality app. Competitors would need to simultaneously rebuild their network layer, session model, and security architecture --- at odds with their current business models and architectural philosophy.
-  \end{alertblock}
-\end{frame}
-
-% ================================================================
-% Closing
-% ================================================================
-\begin{frame}{Summary}
-  \begin{columns}[c]
-    \column{0.5\textwidth}
-    \begin{block}{What We Bring}
-      \begin{itemize}
-        \item Intelligent multi-protocol routing engine
-        \item Uniform E2EE across LAN, P2P, and relay
-        \item Integrated encrypted chat
-        \item No account, no ads, no decision cost
-      \end{itemize}
-    \end{block}
-    \column{0.5\textwidth}
-    \begin{block}{Next Steps}
-      \begin{itemize}
-        \item Conduct user interviews (10--15 participants)
-        \item Synthesize pain points \& refine problem framing
-        \item Prototype routing engine core
-        \item Validate pairing UX with paper prototypes
-      \end{itemize}
-    \end{block}
-  \end{columns}
-
-  \vspace{1.5em}
-
-  \centering\Large\textbf{Thank you --- Questions?}
-\end{frame}
-
+\author{}
+\title{}
+\renewcommand{\bottomthanks}{\fontsize{52}{62}\selectfont\textbf{Thank You}}
 \makebottom
 
 \end{document}
