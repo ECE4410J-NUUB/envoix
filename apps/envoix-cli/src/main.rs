@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    ClientConfig, EnvoixClient, EventSink, PairingConfig, ReceiveFileRequest,
-    SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, TransferDirection, TransferEvent,
+    ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
+    ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    TransferDirection, TransferEvent,
 };
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
@@ -20,7 +21,14 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
     name = "envoix",
     version,
     about = "Secure file transfer CLI",
-    after_help = "Typical flow:\n  1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.\n  2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`."
+    after_help = "Typical flow:
+1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.
+2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`.
+
+Future automatic flow:
+    envoix receive --auto --output ./received --token <token>
+    envoix send --auto --token <token> <file>
+"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -33,7 +41,10 @@ enum Command {
     Send {
         /// Receiver address, using the port printed by `envoix receive`.
         #[arg(long)]
-        peer: SocketAddr,
+        peer: Option<SocketAddr>,
+        /// Use automatic discovery, pairing, and connection setup.
+        #[arg(long)]
+        auto: bool,
         /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
@@ -45,6 +56,9 @@ enum Command {
         /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Use automatic discovery, pairing, and connection setup.
+        #[arg(long)]
+        auto: bool,
         /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
@@ -73,17 +87,44 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
-        Command::Send { peer, token, file } => {
+        Command::Send {
+            peer,
+            auto,
+            token,
+            file,
+        } => {
             let client = client_for_token(token)?;
-            let summary = client
-                .send_file(
-                    SendFileRequest {
-                        peer_addr: peer,
-                        file_path: file,
-                    },
-                    Box::new(ConsoleEventSink::new()),
-                )
-                .await?;
+            let summary = if auto {
+                if peer.is_some() {
+                    return Err(envoix_client::PublicError::InvalidInput(
+                        "use either --auto or --peer, not both".into(),
+                    ));
+                }
+                client
+                    .send(
+                        SendRequest {
+                            file_path: file,
+                            connection_policy: ConnectionPolicy::Auto,
+                        },
+                        Box::new(NoopClientEventSink),
+                    )
+                    .await?
+            } else {
+                let peer = peer.ok_or_else(|| {
+                    envoix_client::PublicError::InvalidInput(
+                        "send requires --peer unless --auto is set".into(),
+                    )
+                })?;
+                client
+                    .send_file(
+                        SendFileRequest {
+                            peer_addr: peer,
+                            file_path: file,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                    )
+                    .await?
+            };
             eprintln!(
                 "sent {} bytes from {}",
                 summary.bytes_transferred, summary.file_name
@@ -91,20 +132,33 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         }
         Command::Receive {
             output,
+            auto,
             token,
             ip_version,
         } => {
             let client = client_for_token(token)?;
-            let summary = client
-                .receive_file_with_bound_addr(
-                    ReceiveFileRequest {
-                        listen_addr: receive_addr_for(ip_version),
-                        output_dir: output,
-                    },
-                    Box::new(ConsoleEventSink::new()),
-                    |addr| eprintln!("listening on {addr}"),
-                )
-                .await?;
+            let summary = if auto {
+                client
+                    .receive(
+                        ReceiveRequest {
+                            output_dir: output,
+                            connection_policy: ConnectionPolicy::Auto,
+                        },
+                        Box::new(NoopClientEventSink),
+                    )
+                    .await?
+            } else {
+                client
+                    .receive_file_with_bound_addr(
+                        ReceiveFileRequest {
+                            listen_addr: receive_addr_for(ip_version),
+                            output_dir: output,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                        |addr| eprintln!("listening on {addr}"),
+                    )
+                    .await?
+            };
             eprintln!(
                 "received {} bytes into {}",
                 summary.bytes_transferred, summary.file_name
@@ -308,11 +362,36 @@ mod tests {
             cli.command,
             Command::Send {
                 peer,
+                auto,
                 token,
                 file
-            } if peer == "[::1]:9000".parse().unwrap()
+            } if peer == Some("[::1]:9000".parse().unwrap())
+                && !auto
                 && token == "abcdefghijkl"
                 && file == std::path::Path::new("hello.txt")
+        ));
+    }
+
+    #[test]
+    fn parses_send_auto_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--auto",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                peer: None,
+                auto: true,
+                token,
+                file
+            } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -332,11 +411,37 @@ mod tests {
             cli.command,
             Command::Receive {
                 output,
+                auto,
                 token,
                 ip_version
             } if output == std::path::Path::new("received")
+                && !auto
                 && token == "abcdefghijkl"
                 && ip_version == IpVersion::Ipv4
+        ));
+    }
+
+    #[test]
+    fn parses_receive_auto_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--auto",
+            "--output",
+            "received",
+            "--token",
+            "abcdefghijkl",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                output,
+                auto: true,
+                token,
+                ..
+            } if output == std::path::Path::new("received") && token == "abcdefghijkl"
         ));
     }
 
