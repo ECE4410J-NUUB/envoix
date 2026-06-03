@@ -21,7 +21,14 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
     name = "envoix",
     version,
     about = "Secure file transfer CLI",
-    after_help = "Typical flow:\n  1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.\n  2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`.\n\nFuture automatic flow:\n  envoix receive --auto --output ./received --token <token>\n  envoix send --auto --token <token> <file>"
+    after_help = "Typical flow:
+1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.
+2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`.
+
+Future automatic flow:
+    envoix receive --auto --output ./received --token <token>
+    envoix send --auto --token <token> <file>
+"
 )]
 struct Cli {
     #[command(subcommand)]
