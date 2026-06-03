@@ -50,6 +50,72 @@ pub struct ReceiveFileRequest {
     pub output_dir: PathBuf,
 }
 
+/// Automatic connection policy used by the mobile-facing facade.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConnectionPolicy {
+    /// Try supported connection strategies according to the client default order.
+    Auto,
+}
+
+/// Request to send one local file using automatic pairing and connection setup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SendRequest {
+    /// Local file path to send.
+    pub file_path: PathBuf,
+    /// Connection strategy policy for this operation.
+    pub connection_policy: ConnectionPolicy,
+}
+
+/// Request to receive one file using automatic pairing and connection setup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveRequest {
+    /// Directory where the received file and resume state are stored.
+    pub output_dir: PathBuf,
+    /// Connection strategy policy for this operation.
+    pub connection_policy: ConnectionPolicy,
+}
+
+/// Advisory snapshot of the local network environment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkEnvironment {
+    /// Whether local IPv4 connectivity appears available.
+    pub ipv4_available: Option<bool>,
+    /// Whether local IPv6 connectivity appears available.
+    pub ipv6_available: Option<bool>,
+    /// Whether UDP connectivity appears usable for QUIC.
+    pub udp_available: Option<bool>,
+    /// Whether the rendezvous server appears reachable.
+    pub server_reachable: Option<bool>,
+    /// Human-readable diagnostic notes for UI and logs.
+    pub notes: Vec<String>,
+}
+
+/// Observer for client-level discovery, pairing, and connection events.
+pub trait ClientEventSink: Send + Sync {
+    /// Handles one client lifecycle event.
+    fn on_event(&self, event: ClientEvent);
+}
+
+/// Event sink that ignores all client lifecycle events.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopClientEventSink;
+
+impl ClientEventSink for NoopClientEventSink {
+    fn on_event(&self, _event: ClientEvent) {}
+}
+
+/// User-visible lifecycle events above the transfer engine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientEvent {
+    /// Advisory network probing has started.
+    NetworkDetectionStarted,
+    /// Automatic connection setup has started.
+    AutoConnectionStarted {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+    },
+}
+
 /// Public facade for sending and receiving files.
 #[derive(Clone, Debug)]
 pub struct EnvoixClient {
@@ -78,6 +144,20 @@ impl EnvoixClient {
         .await
     }
 
+    /// Sends one file using automatic pairing and connection establishment.
+    pub async fn send(
+        &self,
+        request: SendRequest,
+        events: Box<dyn ClientEventSink>,
+    ) -> Result<TransferSummary, PublicError> {
+        self.validate_config()?;
+        let _ = request;
+        events.on_event(ClientEvent::AutoConnectionStarted {
+            direction: TransferDirection::Send,
+        });
+        Err(auto_not_implemented())
+    }
+
     /// Receives one file and reports the concrete bound address before accepting.
     pub async fn receive_file_with_bound_addr<F>(
         &self,
@@ -99,6 +179,32 @@ impl EnvoixClient {
         .await
     }
 
+    /// Receives one file using automatic pairing and connection establishment.
+    pub async fn receive(
+        &self,
+        request: ReceiveRequest,
+        events: Box<dyn ClientEventSink>,
+    ) -> Result<TransferSummary, PublicError> {
+        self.validate_config()?;
+        let _ = request;
+        events.on_event(ClientEvent::AutoConnectionStarted {
+            direction: TransferDirection::Receive,
+        });
+        Err(auto_not_implemented())
+    }
+
+    /// Detects the local network environment for UI diagnostics and strategy hints.
+    pub async fn detect_network_environment(
+        &self,
+        events: Box<dyn ClientEventSink>,
+    ) -> Result<NetworkEnvironment, PublicError> {
+        self.validate_config()?;
+        events.on_event(ClientEvent::NetworkDetectionStarted);
+        Err(CoreError::Discovery(
+            "network environment detection is not implemented".into(),
+        ))
+    }
+
     fn validate_config(&self) -> Result<(), PublicError> {
         if self.config.chunk_size == 0 {
             return Err(CoreError::InvalidInput(
@@ -116,6 +222,10 @@ impl EnvoixClient {
             pairing: self.config.pairing.clone(),
         }
     }
+}
+
+fn auto_not_implemented() -> PublicError {
+    CoreError::Discovery("automatic connection establishment is not implemented".into())
 }
 
 #[cfg(test)]
