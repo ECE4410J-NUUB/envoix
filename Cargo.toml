@@ -36,7 +36,7 @@ envoix-transport-quic = { path = "crates/envoix-transport-quic" }
 envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"
 base64 = "0.22"
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
