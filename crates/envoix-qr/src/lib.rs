@@ -45,8 +45,11 @@ pub struct QrInvitePayload {
 /// Errors returned by QR payload operations.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QrError {
-    #[error("unsupported payload version {found} (expected {expected})")]
+    #[error("unsupported payload schema version {found} (expected {expected})")]
     VersionMismatch { found: u32, expected: u32 },
+
+    #[error("unsupported protocol version {found} (expected {expected})")]
+    ProtocolVersionMismatch { found: u32, expected: u32 },
 
     #[error("invite has expired")]
     Expired,
@@ -62,15 +65,21 @@ pub enum QrError {
 
     #[error("decode error: {0}")]
     DecodeError(String),
+
+    #[error("entropy source unavailable: {0}")]
+    Entropy(String),
 }
 
 impl QrInvitePayload {
     /// Encodes the payload into an invite string: `envoix:<base64url>`.
-    pub fn encode(&self) -> Result<String, QrError> {
-        let json = serde_json::to_string(self)
-            .map_err(|e| QrError::DecodeError(format!("serialization failed: {e}")))?;
+    ///
+    /// Serialization is infallible for this struct (only primitives, `String`,
+    /// and `Vec<String>`), so this does not return a `Result`.
+    pub fn encode(&self) -> String {
+        let json =
+            serde_json::to_string(self).expect("QrInvitePayload always serializes to JSON");
         let b64 = URL_SAFE_NO_PAD.encode(json.as_bytes());
-        Ok(format!("{INVITE_PREFIX}{b64}"))
+        format!("{INVITE_PREFIX}{b64}")
     }
 
     /// Decodes an invite string produced by [`encode`](Self::encode).
@@ -100,6 +109,13 @@ impl QrInvitePayload {
             return Err(QrError::VersionMismatch {
                 found: self.version,
                 expected: PAYLOAD_VERSION,
+            });
+        }
+
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(QrError::ProtocolVersionMismatch {
+                found: self.protocol_version,
+                expected: PROTOCOL_VERSION,
             });
         }
 
@@ -151,12 +167,11 @@ impl QrInvitePayload {
 /// Generates a random pairing token as an 18-character lowercase hex string.
 ///
 /// 9 random bytes → 18 hex chars, which satisfies the ≥12 ASCII-byte
-/// requirement of the SPAKE2 auth layer.  Returns [`QrError::DecodeError`]
+/// requirement of the SPAKE2 auth layer.  Returns [`QrError::Entropy`]
 /// only if the OS entropy source is unavailable.
 pub fn generate_token() -> Result<String, QrError> {
     let mut bytes = [0u8; 9];
-    getrandom::fill(&mut bytes)
-        .map_err(|e| QrError::DecodeError(format!("entropy source unavailable: {e}")))?;
+    getrandom::fill(&mut bytes).map_err(|e| QrError::Entropy(e.to_string()))?;
 
     let mut token = String::with_capacity(18);
     for b in bytes {
@@ -174,64 +189,41 @@ pub fn generate_token() -> Result<String, QrError> {
 /// in a fixed-width font.  A two-module quiet zone is added on every side so
 /// that scanners can locate the finder patterns reliably.
 ///
-/// Returns an empty string if `data` is too long to encode at any QR error-
-/// correction level.
-pub fn render_terminal_qr(data: &str) -> String {
-    let code = match QrCode::new(data.as_bytes()) {
-        Ok(c) => c,
-        Err(_) => return String::new(),
+/// Returns `None` if `data` is too long to encode at any QR error-correction
+/// level.
+pub fn render_terminal_qr(data: &str) -> Option<String> {
+    const QUIET: usize = 2;
+
+    let code = QrCode::new(data.as_bytes()).ok()?;
+    let width = code.width();
+    let colors = code.into_colors();
+    let padded = width + QUIET * 2;
+
+    // Dark module lookup that treats the quiet zone as light.
+    let is_dark = |row: usize, col: usize| -> bool {
+        if row < QUIET || col < QUIET || row >= width + QUIET || col >= width + QUIET {
+            return false;
+        }
+        colors[(row - QUIET) * width + (col - QUIET)] == Color::Dark
     };
 
-    // Collect the raw module grid (true = dark).
-    let width = code.width();
-    let modules: Vec<bool> = code
-        .into_colors()
-        .iter()
-        .map(|c| *c == Color::Dark)
-        .collect();
-
-    // Add a 2-module quiet zone on every side.
-    const QUIET: usize = 2;
-    let padded_width = width + QUIET * 2;
-    let padded_height = width + QUIET * 2; // QR codes are always square
-
-    // Build the padded grid (false = light/white).
-    let mut grid = vec![false; padded_width * padded_height];
-    for row in 0..width {
-        for col in 0..width {
-            grid[(row + QUIET) * padded_width + (col + QUIET)] = modules[row * width + col];
-        }
-    }
-
-    // Render two rows per output line using half-block Unicode characters.
+    // Render two QR rows per output line using half-block characters.
     let mut output = String::new();
-    let mut row = 0;
-    while row < padded_height {
-        let top_row = row;
-        let bot_row = row + 1;
-
-        for col in 0..padded_width {
-            let top = grid[top_row * padded_width + col];
-            let bot = if bot_row < padded_height {
-                grid[bot_row * padded_width + col]
-            } else {
-                false
-            };
-
-            // Dark modules are "filled"; light modules are "empty".
-            let ch = match (top, bot) {
-                (true,  true)  => '█',
-                (true,  false) => '▀',
-                (false, true)  => '▄',
+    for row in (0..padded).step_by(2) {
+        for col in 0..padded {
+            let top = is_dark(row, col);
+            let bot = row + 1 < padded && is_dark(row + 1, col);
+            output.push(match (top, bot) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
                 (false, false) => ' ',
-            };
-            output.push(ch);
+            });
         }
         output.push('\n');
-        row += 2;
     }
 
-    output
+    Some(output)
 }
 
 #[cfg(test)]
@@ -249,14 +241,14 @@ mod tests {
     #[test]
     fn round_trip_encode_decode() {
         let payload = valid_payload(0);
-        let encoded = payload.encode().unwrap();
+        let encoded = payload.encode();
         let decoded = QrInvitePayload::decode(&encoded).unwrap();
         assert_eq!(payload, decoded);
     }
 
     #[test]
     fn encoded_string_has_invite_prefix() {
-        let encoded = valid_payload(0).encode().unwrap();
+        let encoded = valid_payload(0).encode();
         assert!(encoded.starts_with(INVITE_PREFIX));
     }
 
@@ -277,6 +269,17 @@ mod tests {
         let b64 = URL_SAFE_NO_PAD.encode(b"not json");
         let err = QrInvitePayload::decode(&format!("envoix:{b64}")).unwrap_err();
         assert!(matches!(err, QrError::DecodeError(_)));
+    }
+
+    #[test]
+    fn protocol_version_mismatch_is_rejected() {
+        let mut payload = valid_payload(0);
+        payload.protocol_version = 999;
+        let err = payload.validate(0).unwrap_err();
+        assert!(matches!(
+            err,
+            QrError::ProtocolVersionMismatch { found: 999, .. }
+        ));
     }
 
     // --- validate ---
@@ -397,13 +400,13 @@ mod tests {
 
     #[test]
     fn render_produces_non_empty_output_for_short_data() {
-        let qr = render_terminal_qr("hello");
+        let qr = render_terminal_qr("hello").unwrap();
         assert!(!qr.is_empty());
     }
 
     #[test]
     fn render_output_contains_only_block_chars_and_newlines() {
-        let qr = render_terminal_qr("test");
+        let qr = render_terminal_qr("test").unwrap();
         for ch in qr.chars() {
             assert!(
                 matches!(ch, '█' | '▀' | '▄' | ' ' | '\n'),
@@ -414,7 +417,7 @@ mod tests {
 
     #[test]
     fn render_all_lines_have_equal_width() {
-        let qr = render_terminal_qr("envoix test payload");
+        let qr = render_terminal_qr("envoix test payload").unwrap();
         let lines: Vec<&str> = qr.trim_end_matches('\n').split('\n').collect();
         let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
         assert!(
@@ -426,8 +429,7 @@ mod tests {
     #[test]
     fn render_invite_string_produces_scannable_qr() {
         let payload = valid_payload(0);
-        let invite = payload.encode().unwrap();
-        let qr = render_terminal_qr(&invite);
-        assert!(!qr.is_empty());
+        let invite = payload.encode();
+        assert!(render_terminal_qr(&invite).is_some());
     }
 }

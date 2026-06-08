@@ -67,7 +67,7 @@ fn qr_invite_loopback() {
 
     let mut receiver = spawn_receiver_auto(&output_dir);
 
-    let send_output = run_send_with_invite(&receiver.invite_str, &source_path);
+    let send_output = retry_send(|| run_send_with_invite(&receiver.invite_str, &source_path));
 
     if !send_output.status.success() {
         let _ = receiver.child.kill();
@@ -96,6 +96,10 @@ fn qr_invite_loopback() {
     fs::remove_dir_all(root).unwrap();
 }
 
+// The next two tests pass a nonexistent file ("ignored.txt") on purpose: invite
+// validation must reject the invite before the sender ever opens the file or
+// dials the peer, so a missing file never matters.
+
 #[test]
 fn send_with_expired_invite_fails() {
     let expired = QrInvitePayload::new(
@@ -103,8 +107,7 @@ fn send_with_expired_invite_fails() {
         vec!["127.0.0.1:9000".into()],
         0, // expires_at = 0 → always in the past
     )
-    .encode()
-    .unwrap();
+    .encode();
 
     let output = Command::new(env!("CARGO_BIN_EXE_envoix"))
         .args(["send", "--invite", &expired, "ignored.txt"])
@@ -127,7 +130,7 @@ fn send_with_version_mismatched_invite_fails() {
         u64::MAX,
     );
     payload.version = 99;
-    let invite = payload.encode().unwrap();
+    let invite = payload.encode();
 
     let output = Command::new(env!("CARGO_BIN_EXE_envoix"))
         .args(["send", "--invite", &invite, "ignored.txt"])
@@ -254,10 +257,18 @@ fn run_send_with_invite(invite: &str, source_path: &Path) -> Output {
 }
 
 fn run_send_with_retries(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Output {
+    retry_send(|| run_send_once(listen_addr, source_path, token))
+}
+
+/// Runs a send closure, retrying while the receiver's QUIC listener is still
+/// coming up.  Both the manual `--peer` and the QR `--invite` flows print the
+/// receiver address from the same point, so both can race the listener and
+/// need this guard against transient "Connection refused".
+fn retry_send(mut send: impl FnMut() -> Output) -> Output {
     let deadline = Instant::now() + Duration::from_secs(3);
 
     loop {
-        let output = run_send_once(listen_addr, source_path, token);
+        let output = send();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() || !stderr.contains("Connection refused") {
             return output;

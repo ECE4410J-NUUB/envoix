@@ -16,6 +16,8 @@ use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
 const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
+/// Lifetime of a generated QR invite before it is considered expired.
+const INVITE_TTL_SECS: u64 = 300;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -64,7 +66,7 @@ enum Command {
         #[arg(long)]
         auto: bool,
         /// Shared ASCII pairing token (≥12 bytes). Required unless --auto is set.
-        #[arg(long)]
+        #[arg(long, required_unless_present = "auto", conflicts_with = "auto")]
         token: Option<String>,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
@@ -99,29 +101,16 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             file,
         } => {
             let summary = if let Some(invite_str) = invite {
-                let payload =
-                    envoix_qr::QrInvitePayload::decode(&invite_str).map_err(|e| {
-                        envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
-                    })?;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                payload.validate(now).map_err(|e| {
-                    envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
-                })?;
-                let peer_addr = payload.first_candidate().map_err(|e| {
-                    envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
-                })?;
-                let expires_in = payload.expires_at.saturating_sub(now);
+                let resolved = resolve_invite(&invite_str)?;
                 eprintln!(
-                    "connecting to {peer_addr} (invite expires in {})",
-                    format_duration(Duration::from_secs(expires_in))
+                    "connecting to {} (invite expires in {})",
+                    resolved.peer_addr,
+                    format_duration(Duration::from_secs(resolved.expires_in))
                 );
-                client_for_token(payload.token)?
+                client_for_token(resolved.token)?
                     .send_file(
                         SendFileRequest {
-                            peer_addr,
+                            peer_addr: resolved.peer_addr,
                             file_path: file,
                         },
                         Box::new(ConsoleEventSink::new()),
@@ -172,22 +161,14 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             ip_version,
         } => {
             let summary = if auto {
-                if token.is_some() {
-                    return Err(envoix_client::PublicError::InvalidInput(
-                        "use either --auto or --token, not both".into(),
-                    ));
-                }
+                // clap guarantees --token is absent here (conflicts_with = "auto").
                 let generated = generate_token().map_err(|e| {
                     envoix_client::PublicError::InvalidInput(format!(
                         "failed to generate token: {e}"
                     ))
                 })?;
                 let client = client_for_token(generated.clone())?;
-                let expires_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    + 300;
+                let expires_at = unix_now() + INVITE_TTL_SECS;
                 client
                     .receive_file_with_bound_addr(
                         ReceiveFileRequest {
@@ -197,26 +178,19 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         Box::new(ConsoleEventSink::new()),
                         |bound_addr| {
                             let candidates = build_candidates(bound_addr, ip_version);
-                            let payload =
-                                QrInvitePayload::new(generated, candidates, expires_at);
-                            match payload.encode() {
-                                Ok(invite) => {
-                                    let qr = render_terminal_qr(&invite);
-                                    eprint!("{qr}");
-                                    eprintln!("invite: {invite}");
-                                    eprintln!("waiting for sender...");
-                                }
-                                Err(e) => eprintln!("warning: could not encode invite: {e}"),
+                            let payload = QrInvitePayload::new(generated, candidates, expires_at);
+                            let invite = payload.encode();
+                            if let Some(qr) = render_terminal_qr(&invite) {
+                                eprint!("{qr}");
                             }
+                            eprintln!("invite: {invite}");
+                            eprintln!("waiting for sender...");
                         },
                     )
                     .await?
             } else {
-                let token = token.ok_or_else(|| {
-                    envoix_client::PublicError::InvalidInput(
-                        "receive requires --token unless --auto is set".into(),
-                    )
-                })?;
+                // clap guarantees --token is present here (required_unless_present = "auto").
+                let token = token.expect("clap requires --token unless --auto is set");
                 client_for_token(token)?
                     .receive_file_with_bound_addr(
                         ReceiveFileRequest {
@@ -246,14 +220,57 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
     addr.parse().expect("default receive address is valid")
 }
 
+/// Resolved fields extracted from a validated QR invite.
+struct ResolvedInvite {
+    peer_addr: SocketAddr,
+    token: String,
+    expires_in: u64,
+}
+
+/// Decodes and validates an invite string, returning the fields the sender needs.
+///
+/// Validation (including expiry and version checks) runs before any connection
+/// is attempted, so a stale or incompatible invite fails fast.
+fn resolve_invite(invite: &str) -> Result<ResolvedInvite, envoix_client::PublicError> {
+    let to_err =
+        |e| envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"));
+
+    let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
+    let now = unix_now();
+    payload.validate(now).map_err(to_err)?;
+    let peer_addr = payload.first_candidate().map_err(to_err)?;
+
+    Ok(ResolvedInvite {
+        peer_addr,
+        token: payload.token,
+        expires_in: payload.expires_at.saturating_sub(now),
+    })
+}
+
+/// Current Unix time in whole seconds.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Builds the candidate list for a QR invite from the listener's bound address.
 ///
 /// Uses a UDP socket trick to find the machine's outbound LAN IP, then pairs
-/// it with the bound port.  Falls back to the bound address itself if detection
-/// fails (e.g. offline machine or unusual network config).
+/// it with the bound port.  On networks with no usable route (e.g. an offline
+/// LAN), detection fails and the bound IP is an unspecified address that a
+/// peer cannot dial, so we warn the user to supply a reachable address out of
+/// band.
 fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String> {
     let port = bound_addr.port();
     let ip = detect_local_ip(ip_version).unwrap_or(bound_addr.ip());
+    if ip.is_unspecified() {
+        eprintln!(
+            "warning: could not detect a reachable local IP; the invite contains \
+             {ip} which a sender cannot dial. Share a reachable address manually."
+        );
+    }
     vec![SocketAddr::new(ip, port).to_string()]
 }
 
