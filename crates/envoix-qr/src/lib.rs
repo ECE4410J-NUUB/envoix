@@ -177,14 +177,18 @@ impl QrInvitePayload {
     }
 }
 
+/// Number of random bytes used when generating a pairing token.
+/// 16 bytes = 128 bits of entropy, well above the MIN_SHARED_TOKEN_LEN minimum.
+const TOKEN_RANDOM_BYTES: usize = 16;
+
 /// Generates a random pairing token as a lowercase hex string.
 ///
 /// Returns [`QrError::Entropy`] only if the OS entropy source is unavailable.
 pub fn generate_token() -> Result<String, QrError> {
-    let mut bytes = [0u8; 9];
+    let mut bytes = [0u8; TOKEN_RANDOM_BYTES];
     getrandom::fill(&mut bytes).map_err(|e| QrError::Entropy(e.to_string()))?;
 
-    let mut token = String::with_capacity(18);
+    let mut token = String::with_capacity(TOKEN_RANDOM_BYTES * 2);
     for b in bytes {
         use std::fmt::Write as _;
         write!(token, "{b:02x}").expect("writing to String is infallible");
@@ -400,7 +404,7 @@ mod tests {
     #[test]
     fn generated_token_is_valid_hex_and_meets_spake2_minimum() {
         let token = generate_token().unwrap();
-        assert_eq!(token.len(), 18);
+        assert_eq!(token.len(), TOKEN_RANDOM_BYTES * 2);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(token.len() >= MIN_SHARED_TOKEN_LEN);
     }
