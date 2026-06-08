@@ -1,7 +1,8 @@
 //! Public application-facing facade for envoix clients.
 
+use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use envoix_auth::{PairingConfig, SPAKE2_EXPERIMENTAL_WARNING};
 use envoix_error::CoreError;
@@ -9,6 +10,14 @@ pub use envoix_session::{
     EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
 };
 use envoix_session::{SessionConfig, receive_file_with_bound_addr, send_file_manual};
+use serde::Deserialize;
+
+/// Environment variable overriding the runtime transfer chunk size.
+pub const ENVOIX_CHUNK_SIZE: &str = "ENVOIX_CHUNK_SIZE";
+/// Minimum accepted transfer chunk size.
+pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
+/// Maximum accepted transfer chunk size.
+pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Error type exposed by the public client facade.
 pub type PublicError = CoreError;
@@ -29,6 +38,68 @@ impl ClientConfig {
             chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
             pairing,
         }
+    }
+
+    /// Creates config from default, optional TOML file, and environment overrides.
+    pub fn from_runtime_sources(
+        pairing: PairingConfig,
+        config_path: Option<&Path>,
+    ) -> Result<Self, PublicError> {
+        Self::from_runtime_sources_with_env(
+            pairing,
+            config_path,
+            std::env::var_os(ENVOIX_CHUNK_SIZE),
+        )
+    }
+
+    fn from_runtime_sources_with_env(
+        pairing: PairingConfig,
+        config_path: Option<&Path>,
+        env_chunk_size: Option<std::ffi::OsString>,
+    ) -> Result<Self, PublicError> {
+        let mut config = Self::new(pairing);
+
+        if let Some(config_path) = config_path {
+            let file_config = RuntimeConfig::read(config_path)?;
+            if let Some(chunk_size) = file_config.chunk_size {
+                config.chunk_size = parse_chunk_size(&chunk_size)?;
+            }
+        }
+
+        if let Some(chunk_size) = env_chunk_size {
+            let chunk_size = chunk_size.into_string().map_err(|_| {
+                CoreError::InvalidInput(format!("{ENVOIX_CHUNK_SIZE} is not UTF-8"))
+            })?;
+            config.chunk_size = parse_chunk_size(&chunk_size)?;
+        }
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates chunk sizing and pairing fields before starting a transfer.
+    pub fn validate(&self) -> Result<(), PublicError> {
+        validate_chunk_size(self.chunk_size)?;
+        self.pairing.validate()?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeConfig {
+    chunk_size: Option<String>,
+}
+
+impl RuntimeConfig {
+    fn read(path: &Path) -> Result<Self, PublicError> {
+        let text = fs::read_to_string(path).map_err(|error| {
+            CoreError::InvalidInput(format!("failed to read config {}: {error}", path.display()))
+        })?;
+        toml::from_str(&text).map_err(|error| {
+            CoreError::InvalidInput(format!("invalid config {}: {error}", path.display()))
+        })
     }
 }
 
@@ -206,14 +277,7 @@ impl EnvoixClient {
     }
 
     fn validate_config(&self) -> Result<(), PublicError> {
-        if self.config.chunk_size == 0 {
-            return Err(CoreError::InvalidInput(
-                "chunk size must be positive".into(),
-            ));
-        }
-        self.config.pairing.validate()?;
-
-        Ok(())
+        self.config.validate()
     }
 
     fn session_config(&self) -> SessionConfig {
@@ -226,6 +290,50 @@ impl EnvoixClient {
 
 fn auto_not_implemented() -> PublicError {
     CoreError::Discovery("automatic connection establishment is not implemented".into())
+}
+
+fn parse_chunk_size(value: &str) -> Result<usize, PublicError> {
+    let value = value.trim();
+    let (number, unit) = if let Some(number) = value.strip_suffix("KiB") {
+        (number, 1024_usize)
+    } else if let Some(number) = value.strip_suffix("Ki") {
+        (number, 1024_usize)
+    } else if let Some(number) = value.strip_suffix("MiB") {
+        (number, 1024_usize * 1024)
+    } else if let Some(number) = value.strip_suffix("Mi") {
+        (number, 1024_usize * 1024)
+    } else if let Some(number) = value.strip_suffix('B') {
+        (number, 1_usize)
+    } else {
+        return Err(CoreError::InvalidInput(format!(
+            "chunk size {value:?} must include B, KiB, or MiB"
+        )));
+    };
+
+    if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(CoreError::InvalidInput(format!(
+            "invalid chunk size {value:?}"
+        )));
+    }
+
+    let count = number.parse::<usize>().map_err(|error| {
+        CoreError::InvalidInput(format!("invalid chunk size {value:?}: {error}"))
+    })?;
+    let bytes = count.checked_mul(unit).ok_or_else(|| {
+        CoreError::InvalidInput(format!("chunk size {value:?} exceeds supported range"))
+    })?;
+    validate_chunk_size(bytes)?;
+    Ok(bytes)
+}
+
+fn validate_chunk_size(chunk_size: usize) -> Result<(), PublicError> {
+    if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
+        return Err(CoreError::InvalidInput(format!(
+            "chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes"
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -253,7 +361,72 @@ mod tests {
         assert!(matches!(error, CoreError::InvalidInput(_)));
     }
 
+    #[test]
+    fn parses_human_readable_chunk_sizes() {
+        assert_eq!(parse_chunk_size("16KiB").unwrap(), 16 * 1024);
+        assert_eq!(parse_chunk_size("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_chunk_size("16384B").unwrap(), 16 * 1024);
+    }
+
+    #[test]
+    fn rejects_bare_or_out_of_range_chunk_sizes() {
+        assert!(matches!(
+            parse_chunk_size("65536"),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_chunk_size("15KiB"),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_chunk_size("17MiB"),
+            Err(CoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn config_file_overrides_default_chunk_size() {
+        let config_path = unique_test_path("config-overrides-default.toml");
+        std::fs::write(&config_path, "chunk_size = \"1MiB\"\n").unwrap();
+
+        let config =
+            ClientConfig::from_runtime_sources_with_env(test_pairing(), Some(&config_path), None)
+                .unwrap();
+
+        assert_eq!(config.chunk_size, 1024 * 1024);
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn env_chunk_size_overrides_config_file() {
+        let config_path = unique_test_path("env-overrides-config.toml");
+        std::fs::write(&config_path, "chunk_size = \"1MiB\"\n").unwrap();
+
+        let config = ClientConfig::from_runtime_sources_with_env(
+            test_pairing(),
+            Some(&config_path),
+            Some("4MiB".into()),
+        )
+        .unwrap();
+
+        assert_eq!(config.chunk_size, 4 * 1024 * 1024);
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn invalid_env_chunk_size_fails_early() {
+        let error =
+            ClientConfig::from_runtime_sources_with_env(test_pairing(), None, Some("65536".into()))
+                .unwrap_err();
+
+        assert!(matches!(error, CoreError::InvalidInput(_)));
+    }
+
     fn test_pairing() -> PairingConfig {
         PairingConfig::spake2_shared_token("abcdefghijkl").unwrap()
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("envoix-client-test-{}-{name}", std::process::id()))
     }
 }

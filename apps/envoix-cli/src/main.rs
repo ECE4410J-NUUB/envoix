@@ -42,6 +42,9 @@ enum Command {
         /// Receiver address, using the port printed by `envoix receive`.
         #[arg(long)]
         peer: Option<SocketAddr>,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
@@ -56,6 +59,9 @@ enum Command {
         /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
@@ -89,11 +95,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
         Command::Send {
             peer,
+            config,
             auto,
             token,
             file,
         } => {
-            let client = client_for_token(token)?;
+            let client = client_for_token(token, config.as_deref())?;
             let summary = if auto {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
@@ -132,11 +139,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         }
         Command::Receive {
             output,
+            config,
             auto,
             token,
             ip_version,
         } => {
-            let client = client_for_token(token)?;
+            let client = client_for_token(token, config.as_deref())?;
             let summary = if auto {
                 client
                     .receive(
@@ -177,11 +185,16 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
     addr.parse().expect("default receive address is valid")
 }
 
-fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
+fn client_for_token(
+    token: String,
+    config_path: Option<&std::path::Path>,
+) -> Result<EnvoixClient, envoix_client::PublicError> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
-    Ok(EnvoixClient::new(ClientConfig::new(
-        PairingConfig::spake2_shared_token(token)?,
-    )))
+    let pairing = PairingConfig::spake2_shared_token(token)?;
+    Ok(EnvoixClient::new(ClientConfig::from_runtime_sources(
+        pairing,
+        config_path,
+    )?))
 }
 
 #[derive(Debug, Default)]
@@ -362,6 +375,7 @@ mod tests {
             cli.command,
             Command::Send {
                 peer,
+                config: None,
                 auto,
                 token,
                 file
@@ -388,6 +402,7 @@ mod tests {
             cli.command,
             Command::Send {
                 peer: None,
+                config: None,
                 auto: true,
                 token,
                 file
@@ -411,6 +426,7 @@ mod tests {
             cli.command,
             Command::Receive {
                 output,
+                config: None,
                 auto,
                 token,
                 ip_version
@@ -465,6 +481,30 @@ mod tests {
                 ip_version: IpVersion::Ipv6,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_explicit_config_path() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--config",
+            "envoix.toml",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                config,
+                ..
+            } if config == Some(std::path::PathBuf::from("envoix.toml"))
         ));
     }
 
