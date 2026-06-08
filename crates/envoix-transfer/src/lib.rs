@@ -289,7 +289,7 @@ impl TransferEngine {
         connection.send_frame(Frame::Ready(Ready)).await?;
 
         let header = expect_file_header(connection.recv_frame().await?)?;
-        validate_header(&header)?;
+        validate_header(&header, self.chunk_size)?;
         let final_path = output_dir.join(&header.file_name);
         if fs::try_exists(&final_path).await? {
             return receive_existing_final(connection, header, final_path, events).await;
@@ -843,9 +843,18 @@ async fn hash_file_prefix(
     Ok(())
 }
 
-fn validate_header(header: &FileHeader) -> Result<(), TransferError> {
+fn validate_header(header: &FileHeader, receiver_chunk_size: usize) -> Result<(), TransferError> {
+    if receiver_chunk_size == 0 {
+        return Err(CoreError::Transfer("chunk size must be positive".into()));
+    }
     if header.chunk_size == 0 {
         return Err(CoreError::Transfer("chunk size must be positive".into()));
+    }
+    if header.chunk_size != receiver_chunk_size as u64 {
+        return Err(CoreError::Transfer(format!(
+            "sender chunk size {} does not match receiver chunk size {receiver_chunk_size}",
+            header.chunk_size
+        )));
     }
     LocalFileStorage::resumable_temp_path(Path::new("."), &header.file_name, &header.transfer_id)?;
     Ok(())
@@ -911,6 +920,48 @@ mod tests {
             tokio::fs::read(output_dir.join("hello.txt")).await.unwrap(),
             b"hello over frames"
         );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_sender_receiver_chunk_size_mismatch() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("mismatch.txt");
+        tokio::fs::write(&source_path, b"chunk size mismatch")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(8)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+
+        let send_error = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .unwrap_err();
+        let receive_error = receiver.await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            send_error,
+            CoreError::Transport(_) | CoreError::Transfer(_)
+        ));
+        assert!(matches!(receive_error, CoreError::Transfer(_)));
+        assert!(
+            !fs::try_exists(output_dir.join("mismatch.txt"))
+                .await
+                .unwrap()
+        );
+        assert_no_sidecars(&output_dir).await;
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
@@ -1470,6 +1521,22 @@ mod tests {
             .unwrap();
         if request.complete_hash == blake3::hash(request.source_bytes).to_hex().as_str() {
             expect_complete_ack(connection.recv_frame().await.unwrap(), &transfer_id).unwrap();
+        }
+    }
+
+    async fn assert_no_sidecars(output_dir: &Path) {
+        if !fs::try_exists(output_dir).await.unwrap() {
+            return;
+        }
+
+        let mut entries = fs::read_dir(output_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !(name.ends_with(".json") || name.ends_with(".part")),
+                "unexpected sidecar: {name}"
+            );
         }
     }
 
