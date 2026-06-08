@@ -20,7 +20,7 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
 
-use envoix_types::PROTOCOL_VERSION;
+use envoix_types::{MIN_SHARED_TOKEN_LEN, PROTOCOL_VERSION};
 
 /// Prefix prepended to every encoded invite string.
 pub const INVITE_PREFIX: &str = "envoix:";
@@ -29,9 +29,6 @@ pub const INVITE_PREFIX: &str = "envoix:";
 /// backward-incompatible way.
 pub const PAYLOAD_VERSION: u32 = 1;
 
-/// Minimum shared-token length required by the SPAKE2 auth layer.
-const MIN_TOKEN_LEN: usize = 12;
-
 /// Versioned invite payload carried inside a QR code or pasted as plain text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QrInvitePayload {
@@ -39,7 +36,7 @@ pub struct QrInvitePayload {
     pub version: u32,
     /// Wire protocol version the receiver is running.
     pub protocol_version: u32,
-    /// SPAKE2 shared token (at least MIN_TOKEN_LEN ASCII bytes).
+    /// SPAKE2 shared token (at least MIN_SHARED_TOKEN_LEN ASCII bytes).
     pub token: String,
     /// Network candidates the sender should try, e.g. `["192.168.1.5:54321"]`.
     pub candidates: Vec<String>,
@@ -65,7 +62,7 @@ pub enum QrError {
     #[error("invite contains no network candidates")]
     NoCandidates,
 
-    #[error("token is too short or not ASCII (minimum {MIN_TOKEN_LEN} ASCII bytes)")]
+    #[error("token is too short or not ASCII (minimum {MIN_SHARED_TOKEN_LEN} ASCII bytes)")]
     WeakToken,
 
     #[error("malformed candidate address: {0}")]
@@ -139,7 +136,7 @@ impl QrInvitePayload {
             return Err(QrError::NoCandidates);
         }
 
-        if !self.token.is_ascii() || self.token.len() < MIN_TOKEN_LEN {
+        if !self.token.is_ascii() || self.token.len() < MIN_SHARED_TOKEN_LEN {
             return Err(QrError::WeakToken);
         }
 
@@ -352,7 +349,7 @@ mod tests {
     #[test]
     fn token_one_byte_short_of_minimum_is_rejected() {
         let mut payload = valid_payload(0);
-        payload.token = "a".repeat(MIN_TOKEN_LEN - 1);
+        payload.token = "a".repeat(MIN_SHARED_TOKEN_LEN - 1);
         assert_eq!(payload.validate(0).unwrap_err(), QrError::WeakToken);
     }
 
@@ -405,7 +402,7 @@ mod tests {
         let token = generate_token().unwrap();
         assert_eq!(token.len(), 18);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(token.len() >= MIN_TOKEN_LEN);
+        assert!(token.len() >= MIN_SHARED_TOKEN_LEN);
     }
 
     #[test]
