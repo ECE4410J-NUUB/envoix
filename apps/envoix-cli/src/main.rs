@@ -40,15 +40,18 @@ struct Cli {
 enum Command {
     /// Send one file to a receiver address printed by `envoix receive`.
     Send {
-        /// Receiver address, using the port printed by `envoix receive`.
-        #[arg(long)]
+        /// Receiver address (manual mode). Cannot be combined with --invite.
+        #[arg(long, conflicts_with = "invite")]
         peer: Option<SocketAddr>,
-        /// Use automatic discovery, pairing, and connection setup.
-        #[arg(long)]
+        /// Use automatic discovery (placeholder). Cannot be combined with --invite.
+        #[arg(long, conflicts_with = "invite")]
         auto: bool,
-        /// Shared ASCII pairing token, at least 12 bytes.
-        #[arg(long)]
-        token: String,
+        /// Shared ASCII pairing token (≥12 bytes). Required unless --invite is set.
+        #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
+        token: Option<String>,
+        /// Invite string printed by `envoix receive --auto`; sets peer and token automatically.
+        #[arg(long, conflicts_with_all = ["peer", "auto", "token"])]
+        invite: Option<String>,
         /// File to send.
         file: PathBuf,
     },
@@ -92,16 +95,46 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             peer,
             auto,
             token,
+            invite,
             file,
         } => {
-            let client = client_for_token(token)?;
-            let summary = if auto {
+            let summary = if let Some(invite_str) = invite {
+                let payload =
+                    envoix_qr::QrInvitePayload::decode(&invite_str).map_err(|e| {
+                        envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
+                    })?;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                payload.validate(now).map_err(|e| {
+                    envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
+                })?;
+                let peer_addr = payload.first_candidate().map_err(|e| {
+                    envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"))
+                })?;
+                let expires_in = payload.expires_at.saturating_sub(now);
+                eprintln!(
+                    "connecting to {peer_addr} (invite expires in {})",
+                    format_duration(Duration::from_secs(expires_in))
+                );
+                client_for_token(payload.token)?
+                    .send_file(
+                        SendFileRequest {
+                            peer_addr,
+                            file_path: file,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                    )
+                    .await?
+            } else if auto {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
                         "use either --auto or --peer, not both".into(),
                     ));
                 }
-                client
+                let token = token.expect("clap ensures --token is present with --auto");
+                client_for_token(token)?
                     .send(
                         SendRequest {
                             file_path: file,
@@ -113,10 +146,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
-                        "send requires --peer unless --auto is set".into(),
+                        "send requires --peer unless --auto or --invite is set".into(),
                     )
                 })?;
-                client
+                let token = token.expect("clap ensures --token is present without --invite");
+                client_for_token(token)?
                     .send_file(
                         SendFileRequest {
                             peer_addr: peer,
@@ -426,11 +460,12 @@ mod tests {
             Command::Send {
                 peer,
                 auto,
-                token,
-                file
+                ref token,
+                invite: None,
+                ref file,
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
-                && token == "abcdefghijkl"
+                && token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
         ));
     }
@@ -452,9 +487,11 @@ mod tests {
             Command::Send {
                 peer: None,
                 auto: true,
-                token,
-                file
-            } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
+                ref token,
+                invite: None,
+                ref file,
+            } if token.as_deref() == Some("abcdefghijkl")
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -542,6 +579,30 @@ mod tests {
                 ip_version: IpVersion::Ipv6,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_send_invite_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--invite",
+            "envoix:dGVzdA",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                peer: None,
+                auto: false,
+                token: None,
+                ref invite,
+                ref file,
+            } if invite.as_deref() == Some("envoix:dGVzdA")
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
