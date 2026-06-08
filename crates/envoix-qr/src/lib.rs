@@ -194,13 +194,14 @@ pub fn generate_token() -> Result<String, QrError> {
 ///
 /// Each pair of QR rows is collapsed into one line of text using Unicode
 /// half-block characters (`▀` `▄` `█` ` `), so the output is roughly square
-/// in a fixed-width font.  A two-module quiet zone is added on every side so
-/// that scanners can locate the finder patterns reliably.
+/// in a fixed-width font.  A four-module quiet zone is added on every side
+/// per the QR Code specification, which requires this minimum for reliable
+/// finder-pattern detection.
 ///
 /// Returns `None` if `data` is too long to encode at any QR error-correction
 /// level.
 pub fn render_terminal_qr(data: &str) -> Option<String> {
-    const QUIET: usize = 2;
+    const QUIET: usize = 4;
 
     let code = QrCode::new(data.as_bytes()).ok()?;
     let width = code.width();
