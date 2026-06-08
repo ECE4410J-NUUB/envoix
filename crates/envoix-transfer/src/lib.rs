@@ -643,6 +643,7 @@ async fn prepare_existing_resume_state(
     if state.bytes_received > state.file_size
         || state.next_chunk_index != next_chunk_index(state.bytes_received, state.chunk_size)
     {
+        delete_resume_candidate(output_dir, &state).await?;
         return Ok(None);
     }
 
@@ -660,6 +661,7 @@ async fn prepare_existing_resume_state(
             "resume temp length {temp_len} is shorter than recorded length {}; starting fresh",
             state.bytes_received
         );
+        delete_resume_candidate(output_dir, &state).await?;
         return Ok(None);
     }
     if temp_len > state.bytes_received {
@@ -688,6 +690,14 @@ async fn prepare_existing_resume_state(
     LocalFileStorage::write_resume_state(output_dir, &state).await?;
 
     Ok(Some(state))
+}
+
+async fn delete_resume_candidate(
+    output_dir: &Path,
+    state: &TransferResumeState,
+) -> Result<(), TransferError> {
+    LocalFileStorage::delete_resume_temp(output_dir, &state.file_name, &state.transfer_id).await?;
+    LocalFileStorage::delete_resume_state(output_dir, &state.file_name, &state.transfer_id).await
 }
 
 async fn fresh_resume_state(
@@ -1216,6 +1226,82 @@ mod tests {
                 .unwrap(),
             source_bytes
         );
+        assert!(
+            LocalFileStorage::read_resume_state(&output_dir, "short-temp.txt", &old_transfer_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!fs::try_exists(temp_path).await.unwrap());
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inconsistent_resume_state_is_deleted_before_fresh_transfer() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        let old_transfer_id = TransferId::new("old-transfer");
+        let state = TransferResumeState {
+            transfer_id: old_transfer_id.clone(),
+            file_name: "bad-state.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            bytes_received: 5,
+            next_chunk_index: 7,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "bad-state.txt", &old_transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abcde").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "bad-state.txt",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("bad-state.txt"))
+                .await
+                .unwrap(),
+            source_bytes
+        );
+        assert!(
+            LocalFileStorage::read_resume_state(&output_dir, "bad-state.txt", &old_transfer_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!fs::try_exists(temp_path).await.unwrap());
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
