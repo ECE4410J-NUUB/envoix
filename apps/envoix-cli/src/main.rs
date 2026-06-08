@@ -1,16 +1,17 @@
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
-    ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    ReceiveFileRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
     TransferDirection, TransferEvent,
 };
+use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
@@ -21,13 +22,13 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
     name = "envoix",
     version,
     about = "Secure file transfer CLI",
-    after_help = "Typical flow:
-1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.
-2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`.
+    after_help = "Manual flow:
+    envoix receive --output ./received --token <token>
+    envoix send --peer <receiver-ip>:<port> --token <token> <file>
 
-Future automatic flow:
-    envoix receive --auto --output ./received --token <token>
-    envoix send --auto --token <token> <file>
+QR flow (no manual token or address needed):
+    envoix receive --auto --output ./received
+    envoix send --invite <invite-string> <file>
 "
 )]
 struct Cli {
@@ -56,12 +57,12 @@ enum Command {
         /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
-        /// Use automatic discovery, pairing, and connection setup.
+        /// Generate a random token and print a QR invite; cannot be combined with --token.
         #[arg(long)]
         auto: bool,
-        /// Shared ASCII pairing token, at least 12 bytes.
+        /// Shared ASCII pairing token (≥12 bytes). Required unless --auto is set.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
         ip_version: IpVersion,
@@ -136,19 +137,53 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             token,
             ip_version,
         } => {
-            let client = client_for_token(token)?;
             let summary = if auto {
+                if token.is_some() {
+                    return Err(envoix_client::PublicError::InvalidInput(
+                        "use either --auto or --token, not both".into(),
+                    ));
+                }
+                let generated = generate_token().map_err(|e| {
+                    envoix_client::PublicError::InvalidInput(format!(
+                        "failed to generate token: {e}"
+                    ))
+                })?;
+                let client = client_for_token(generated.clone())?;
+                let expires_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    + 300;
                 client
-                    .receive(
-                        ReceiveRequest {
+                    .receive_file_with_bound_addr(
+                        ReceiveFileRequest {
+                            listen_addr: receive_addr_for(ip_version),
                             output_dir: output,
-                            connection_policy: ConnectionPolicy::Auto,
                         },
-                        Box::new(NoopClientEventSink),
+                        Box::new(ConsoleEventSink::new()),
+                        |bound_addr| {
+                            let candidates = build_candidates(bound_addr, ip_version);
+                            let payload =
+                                QrInvitePayload::new(generated, candidates, expires_at);
+                            match payload.encode() {
+                                Ok(invite) => {
+                                    let qr = render_terminal_qr(&invite);
+                                    eprint!("{qr}");
+                                    eprintln!("invite: {invite}");
+                                    eprintln!("waiting for sender...");
+                                }
+                                Err(e) => eprintln!("warning: could not encode invite: {e}"),
+                            }
+                        },
                     )
                     .await?
             } else {
-                client
+                let token = token.ok_or_else(|| {
+                    envoix_client::PublicError::InvalidInput(
+                        "receive requires --token unless --auto is set".into(),
+                    )
+                })?;
+                client_for_token(token)?
                     .receive_file_with_bound_addr(
                         ReceiveFileRequest {
                             listen_addr: receive_addr_for(ip_version),
@@ -175,6 +210,34 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
         IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
     };
     addr.parse().expect("default receive address is valid")
+}
+
+/// Builds the candidate list for a QR invite from the listener's bound address.
+///
+/// Uses a UDP socket trick to find the machine's outbound LAN IP, then pairs
+/// it with the bound port.  Falls back to the bound address itself if detection
+/// fails (e.g. offline machine or unusual network config).
+fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String> {
+    let port = bound_addr.port();
+    let ip = detect_local_ip(ip_version).unwrap_or(bound_addr.ip());
+    vec![SocketAddr::new(ip, port).to_string()]
+}
+
+/// Probes the OS routing table to find the preferred outbound LAN IP without
+/// sending any packets (connect on UDP never transmits data).
+fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
+    match ip_version {
+        IpVersion::Ipv4 => {
+            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+            socket.connect("8.8.8.8:80").ok()?;
+            Some(socket.local_addr().ok()?.ip())
+        }
+        IpVersion::Ipv6 => {
+            let socket = UdpSocket::bind("[::]:0").ok()?;
+            socket.connect("[2001:4860:4860::8888]:80").ok()?;
+            Some(socket.local_addr().ok()?.ip())
+        }
+    }
 }
 
 fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
@@ -412,7 +475,7 @@ mod tests {
             Command::Receive {
                 output,
                 auto,
-                token,
+                token: Some(ref token),
                 ip_version
             } if output == std::path::Path::new("received")
                 && !auto
@@ -423,10 +486,25 @@ mod tests {
 
     #[test]
     fn parses_receive_auto_command() {
+        let cli = Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"])
+            .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                output,
+                auto: true,
+                token: None,
+                ..
+            } if output == std::path::Path::new("received")
+        ));
+    }
+
+    #[test]
+    fn parses_receive_with_explicit_token() {
         let cli = Cli::try_parse_from([
             "envoix",
             "receive",
-            "--auto",
             "--output",
             "received",
             "--token",
@@ -437,11 +515,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Receive {
-                output,
-                auto: true,
-                token,
+                auto: false,
+                token: Some(ref t),
                 ..
-            } if output == std::path::Path::new("received") && token == "abcdefghijkl"
+            } if t == "abcdefghijkl"
         ));
     }
 
