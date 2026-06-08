@@ -297,7 +297,7 @@ impl TransferEngine {
                     state.file_size
                 )));
             }
-            log::warn!(
+            tracing::warn!(
                 "resume temp length {temp_len} does not match recorded length {}; trusting temp file",
                 state.bytes_received
             );
