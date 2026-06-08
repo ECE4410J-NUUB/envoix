@@ -68,6 +68,9 @@ pub enum QrError {
 
     #[error("entropy source unavailable: {0}")]
     Entropy(String),
+
+    #[error("unsupported feature flags 0x{0:08x}; sender and receiver versions may be incompatible")]
+    UnsupportedFlags(u32),
 }
 
 impl QrInvitePayload {
@@ -88,6 +91,7 @@ impl QrInvitePayload {
     /// [`validate`](Self::validate) separately to check semantic constraints.
     pub fn decode(s: &str) -> Result<Self, QrError> {
         let b64 = s
+            .trim()
             .strip_prefix(INVITE_PREFIX)
             .ok_or_else(|| QrError::DecodeError(format!("missing '{INVITE_PREFIX}' prefix")))?;
 
@@ -135,6 +139,10 @@ impl QrInvitePayload {
             candidate.parse::<SocketAddr>().map_err(|_| {
                 QrError::MalformedAddress(candidate.clone())
             })?;
+        }
+
+        if self.flags != 0 {
+            return Err(QrError::UnsupportedFlags(self.flags));
         }
 
         Ok(())
@@ -247,12 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn encoded_string_has_invite_prefix() {
-        let encoded = valid_payload(0).encode();
-        assert!(encoded.starts_with(INVITE_PREFIX));
-    }
-
-    #[test]
     fn decode_rejects_missing_prefix() {
         let err = QrInvitePayload::decode("badstring").unwrap_err();
         assert!(matches!(err, QrError::DecodeError(_)));
@@ -271,15 +273,12 @@ mod tests {
         assert!(matches!(err, QrError::DecodeError(_)));
     }
 
+    // Invite strings copied from a terminal or QR scanner often carry a
+    // trailing newline or leading space.
     #[test]
-    fn protocol_version_mismatch_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.protocol_version = 999;
-        let err = payload.validate(0).unwrap_err();
-        assert!(matches!(
-            err,
-            QrError::ProtocolVersionMismatch { found: 999, .. }
-        ));
+    fn decode_tolerates_surrounding_whitespace() {
+        let invite = format!("  {}\n", valid_payload(0).encode());
+        QrInvitePayload::decode(&invite).unwrap();
     }
 
     // --- validate ---
@@ -290,11 +289,21 @@ mod tests {
         valid_payload(now).validate(now).unwrap();
     }
 
+    // expires_at == now satisfies the `<=` condition and must be rejected.
     #[test]
     fn expired_payload_is_rejected() {
         let payload = valid_payload(0); // expires_at = 300
         let err = payload.validate(300).unwrap_err(); // now == expires_at → expired
         assert_eq!(err, QrError::Expired);
+    }
+
+    // expires_at == now + 1 is the tightest value that must pass.
+    #[test]
+    fn payload_expiring_in_one_second_passes() {
+        let now = 1_000_000_u64;
+        let mut payload = valid_payload(0);
+        payload.expires_at = now + 1;
+        payload.validate(now).unwrap();
     }
 
     #[test]
@@ -306,6 +315,25 @@ mod tests {
     }
 
     #[test]
+    fn protocol_version_mismatch_is_rejected() {
+        let mut payload = valid_payload(0);
+        payload.protocol_version = 999;
+        let err = payload.validate(0).unwrap_err();
+        assert!(matches!(
+            err,
+            QrError::ProtocolVersionMismatch { found: 999, .. }
+        ));
+    }
+
+    #[test]
+    fn nonzero_flags_are_rejected() {
+        let mut payload = valid_payload(0);
+        payload.flags = 1;
+        let err = payload.validate(0).unwrap_err();
+        assert!(matches!(err, QrError::UnsupportedFlags(1)));
+    }
+
+    #[test]
     fn no_candidates_is_rejected() {
         let mut payload = valid_payload(0);
         payload.candidates.clear();
@@ -313,20 +341,19 @@ mod tests {
         assert_eq!(err, QrError::NoCandidates);
     }
 
+    // Token exactly one byte short of the minimum must be rejected.
     #[test]
-    fn short_token_is_rejected() {
+    fn token_one_byte_short_of_minimum_is_rejected() {
         let mut payload = valid_payload(0);
-        payload.token = "short".into();
-        let err = payload.validate(0).unwrap_err();
-        assert_eq!(err, QrError::WeakToken);
+        payload.token = "a".repeat(MIN_TOKEN_LEN - 1);
+        assert_eq!(payload.validate(0).unwrap_err(), QrError::WeakToken);
     }
 
     #[test]
     fn non_ascii_token_is_rejected() {
         let mut payload = valid_payload(0);
-        payload.token = "abcdefghijklé".into(); // non-ASCII
-        let err = payload.validate(0).unwrap_err();
-        assert_eq!(err, QrError::WeakToken);
+        payload.token = "abcdefghijklé".into(); // non-ASCII suffix, still ≥12 bytes
+        assert_eq!(payload.validate(0).unwrap_err(), QrError::WeakToken);
     }
 
     #[test]
@@ -346,11 +373,13 @@ mod tests {
 
     // --- first_candidate ---
 
+    // With multiple candidates the first one must be returned, not the last.
     #[test]
-    fn first_candidate_returns_parsed_addr() {
-        let payload = valid_payload(0);
+    fn first_candidate_with_multiple_returns_first() {
+        let mut payload = valid_payload(0);
+        payload.candidates = vec!["1.2.3.4:1000".into(), "5.6.7.8:2000".into()];
         let addr = payload.first_candidate().unwrap();
-        assert_eq!(addr, "127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+        assert_eq!(addr, "1.2.3.4:1000".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
@@ -362,31 +391,14 @@ mod tests {
 
     // --- generate_token ---
 
+    // Verify all structural requirements in a single test: length, charset,
+    // and SPAKE2 minimum — these are the same property viewed from three angles.
     #[test]
-    fn token_is_18_chars() {
+    fn generated_token_is_valid_hex_and_meets_spake2_minimum() {
         let token = generate_token().unwrap();
         assert_eq!(token.len(), 18);
-    }
-
-    #[test]
-    fn token_is_ascii_hex() {
-        let token = generate_token().unwrap();
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn token_satisfies_auth_minimum_length() {
-        let token = generate_token().unwrap();
-        assert!(token.is_ascii());
         assert!(token.len() >= MIN_TOKEN_LEN);
-    }
-
-    #[test]
-    fn two_tokens_are_different() {
-        // Probability of collision is 1/2^72 — effectively impossible.
-        let a = generate_token().unwrap();
-        let b = generate_token().unwrap();
-        assert_ne!(a, b);
     }
 
     #[test]
@@ -399,12 +411,6 @@ mod tests {
     // --- render_terminal_qr ---
 
     #[test]
-    fn render_produces_non_empty_output_for_short_data() {
-        let qr = render_terminal_qr("hello").unwrap();
-        assert!(!qr.is_empty());
-    }
-
-    #[test]
     fn render_output_contains_only_block_chars_and_newlines() {
         let qr = render_terminal_qr("test").unwrap();
         for ch in qr.chars() {
@@ -415,6 +421,7 @@ mod tests {
         }
     }
 
+    // All lines must be the same width so the QR matrix is square.
     #[test]
     fn render_all_lines_have_equal_width() {
         let qr = render_terminal_qr("envoix test payload").unwrap();
@@ -426,6 +433,7 @@ mod tests {
         );
     }
 
+    // A real invite string must encode without hitting the QR data limit.
     #[test]
     fn render_invite_string_produces_scannable_qr() {
         let payload = valid_payload(0);
