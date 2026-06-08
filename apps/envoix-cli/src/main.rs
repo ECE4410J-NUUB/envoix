@@ -633,4 +633,28 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
     }
+
+    #[test]
+    fn rejects_receive_auto_with_token() {
+        assert!(Cli::try_parse_from([
+            "envoix", "receive", "--auto", "--output", "recv", "--token", "abcdefghijkl",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_send_invite_with_peer() {
+        assert!(Cli::try_parse_from([
+            "envoix", "send", "--invite", "envoix:dGVzdA", "--peer", "127.0.0.1:9000", "f.txt",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_send_invite_with_token() {
+        assert!(Cli::try_parse_from([
+            "envoix", "send", "--invite", "envoix:dGVzdA", "--token", "abcdefghijkl", "f.txt",
+        ])
+        .is_err());
+    }
 }
