@@ -85,6 +85,7 @@ enum IpVersion {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_tracing();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -92,6 +93,22 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to
+/// `warn` for the workspace and `error` for everything else so that library
+/// warnings (e.g. resume-state corruption notices) reach the terminal
+/// without flooding it.  Output goes to stderr to keep stdout clean for
+/// future machine-consumable formats.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("envoix=warn,warn"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .with_target(false)
+        .init();
 }
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {

@@ -652,7 +652,7 @@ async fn prepare_existing_resume_state(
     };
 
     if temp_len < state.bytes_received {
-        log::warn!(
+        tracing::warn!(
             "resume temp length {temp_len} is shorter than recorded length {}; starting fresh",
             state.bytes_received
         );
