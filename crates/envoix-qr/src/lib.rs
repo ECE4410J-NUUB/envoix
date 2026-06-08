@@ -3,6 +3,14 @@
 //! Invite strings have the form `envoix:<base64url>` where the base64url payload
 //! is a JSON-encoded [`QrInvitePayload`].  The `envoix:` prefix makes the string
 //! recognisable and leaves room for future format versions.
+//!
+//! # Security
+//!
+//! The invite payload is **unauthenticated and unencrypted**.  It contains the
+//! plaintext SPAKE2 token, which must be treated like a password: share it only
+//! over a trusted channel (e.g. scan the QR from the same screen, or paste it
+//! over an already-secure session).  Anyone who obtains the invite string before
+//! it expires can impersonate the receiver.
 
 use std::net::SocketAddr;
 
