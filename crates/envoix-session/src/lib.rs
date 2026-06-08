@@ -30,6 +30,7 @@ pub struct SessionConfig {
 pub async fn send_file_manual(
     peer_addr: SocketAddr,
     file_path: PathBuf,
+    resume: bool,
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
@@ -44,7 +45,7 @@ pub async fn send_file_manual(
         return Err(error);
     }
     let summary = engine
-        .send_file(&mut *connection, file_path, events.as_ref())
+        .send_file(&mut *connection, file_path, resume, events.as_ref())
         .await?;
     let _ = connection.close().await;
     Ok(summary)

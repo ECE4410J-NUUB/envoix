@@ -144,6 +144,8 @@ pub struct SendFileRequest {
     pub peer_addr: SocketAddr,
     /// Local file path to send.
     pub file_path: PathBuf,
+    /// Whether receiver-side resume state may be used.
+    pub resume: bool,
 }
 
 /// Request to receive one file into a local directory.
@@ -169,6 +171,8 @@ pub struct SendRequest {
     pub file_path: PathBuf,
     /// Connection strategy policy for this operation.
     pub connection_policy: ConnectionPolicy,
+    /// Whether receiver-side resume state may be used.
+    pub resume: bool,
 }
 
 /// Request to receive one file using automatic pairing and connection setup.
@@ -243,6 +247,7 @@ impl EnvoixClient {
         send_file_manual(
             request.peer_addr,
             request.file_path,
+            request.resume,
             self.session_config(),
             events,
         )
@@ -391,6 +396,7 @@ mod tests {
                 SendFileRequest {
                     peer_addr: "[::1]:9000".parse().unwrap(),
                     file_path: "missing.txt".into(),
+                    resume: false,
                 },
                 Box::new(NoopEventSink),
             )

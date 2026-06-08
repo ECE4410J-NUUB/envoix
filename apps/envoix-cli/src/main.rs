@@ -48,6 +48,9 @@ enum Command {
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
+        /// Resume from compatible receiver-side state.
+        #[arg(long)]
+        resume: bool,
         /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
@@ -97,6 +100,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             peer,
             config,
             auto,
+            resume,
             token,
             file,
         } => {
@@ -112,6 +116,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         SendRequest {
                             file_path: file,
                             connection_policy: ConnectionPolicy::Auto,
+                            resume,
                         },
                         Box::new(NoopClientEventSink),
                     )
@@ -127,6 +132,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         SendFileRequest {
                             peer_addr: peer,
                             file_path: file,
+                            resume,
                         },
                         Box::new(ConsoleEventSink::new()),
                     )
@@ -246,6 +252,22 @@ impl EventSink for ConsoleEventSink {
                     state.last_rendered_at = Instant::now();
                 }
             }
+            TransferEvent::HashStarted {
+                direction,
+                file_name,
+                bytes_to_hash,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_to_hash, false);
+            }
+            TransferEvent::HashCompleted {
+                direction,
+                file_name,
+                bytes_hashed,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_hashed, true);
+            }
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
@@ -257,6 +279,28 @@ impl EventSink for ConsoleEventSink {
                 }
             }
         }
+    }
+}
+
+fn render_hash_line(direction: TransferDirection, file_name: &str, bytes_hashed: u64, done: bool) {
+    let verb = match direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let status = if done { "verified" } else { "verifying" };
+    let line = format!(
+        "{:<24} {:>9} {}",
+        format!("{verb} {}", display_file_name(file_name)),
+        format_bytes(bytes_hashed),
+        status,
+    );
+
+    let mut stderr = io::stderr().lock();
+    if done {
+        let _ = writeln!(stderr, "\r{line:<80}");
+    } else {
+        let _ = write!(stderr, "\r{line:<80}");
+        let _ = stderr.flush();
     }
 }
 
@@ -377,10 +421,12 @@ mod tests {
                 peer,
                 config: None,
                 auto,
+                resume,
                 token,
                 file
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
+                && !resume
                 && token == "abcdefghijkl"
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -404,10 +450,28 @@ mod tests {
                 peer: None,
                 config: None,
                 auto: true,
+                resume: false,
                 token,
                 file
             } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
         ));
+    }
+
+    #[test]
+    fn parses_send_resume_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--resume",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Send { resume: true, .. }));
     }
 
     #[test]

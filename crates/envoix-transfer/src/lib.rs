@@ -57,6 +57,28 @@ pub enum TransferEvent {
         /// Total expected plaintext bytes.
         total_bytes: u64,
     },
+    /// A hash-only verification phase has started.
+    HashStarted {
+        /// Transfer identifier for correlating events.
+        transfer_id: TransferId,
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// File name being verified.
+        file_name: String,
+        /// Number of plaintext bytes being hashed.
+        bytes_to_hash: u64,
+    },
+    /// A hash-only verification phase completed.
+    HashCompleted {
+        /// Transfer identifier for correlating events.
+        transfer_id: TransferId,
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// File name that was verified.
+        file_name: String,
+        /// Number of plaintext bytes hashed.
+        bytes_hashed: u64,
+    },
     /// Transfer completed and, on receive, the file was finalized.
     Completed {
         /// Transfer identifier for correlating events.
@@ -94,6 +116,7 @@ impl TransferEngine {
         &self,
         connection: &mut dyn FrameConnection,
         path: PathBuf,
+        resume: bool,
         events: &dyn EventSink,
     ) -> Result<TransferSummary, TransferError> {
         if self.chunk_size == 0 {
@@ -116,8 +139,7 @@ impl TransferEngine {
         }
 
         let total_bytes = metadata.len();
-        let file_hash = hash_file(&path).await?;
-        let transfer_id = transfer_id_for_hash(&file_hash);
+        let transfer_id = random_transfer_id()?;
 
         connection
             .send_frame(Frame::Hello(Hello {
@@ -133,7 +155,7 @@ impl TransferEngine {
                 file_name: file_name.clone(),
                 file_size: total_bytes,
                 chunk_size: self.chunk_size as u64,
-                file_hash: file_hash.clone(),
+                resume_requested: resume,
             }))
             .await?;
         let resume_status = expect_resume_status(
@@ -148,6 +170,40 @@ impl TransferEngine {
             )));
         }
 
+        let mut hasher = blake3::Hasher::new();
+        let mut file = LocalFileStorage::open_source(&path).await?;
+        let mut start_offset = 0;
+        let mut start_index = 0;
+
+        if resume_status.bytes_received > 0 {
+            events.on_event(TransferEvent::HashStarted {
+                transfer_id: transfer_id.clone(),
+                direction: TransferDirection::Send,
+                file_name: file_name.clone(),
+                bytes_to_hash: resume_status.bytes_received,
+            });
+            hash_file_prefix(
+                &mut file,
+                &mut hasher,
+                resume_status.bytes_received,
+                self.chunk_size,
+            )
+            .await?;
+            let prefix_hash = hasher.finalize().to_hex().to_string();
+            events.on_event(TransferEvent::HashCompleted {
+                transfer_id: transfer_id.clone(),
+                direction: TransferDirection::Send,
+                file_name: file_name.clone(),
+                bytes_hashed: resume_status.bytes_received,
+            });
+            if prefix_hash == resume_status.prefix_hash {
+                start_offset = resume_status.bytes_received;
+                start_index = resume_status.next_chunk_index;
+            } else {
+                hasher = blake3::Hasher::new();
+            }
+        }
+
         events.on_event(TransferEvent::Started {
             transfer_id: transfer_id.clone(),
             direction: TransferDirection::Send,
@@ -155,12 +211,10 @@ impl TransferEngine {
             total_bytes,
         });
 
-        let mut file = LocalFileStorage::open_source(&path).await?;
-        file.seek(SeekFrom::Start(resume_status.bytes_received))
-            .await?;
+        file.seek(SeekFrom::Start(start_offset)).await?;
         let mut buffer = vec![0_u8; self.chunk_size];
-        let mut index = resume_status.next_chunk_index;
-        let mut offset = resume_status.bytes_received;
+        let mut index = start_index;
+        let mut offset = start_offset;
 
         loop {
             let bytes_read = file.read(&mut buffer).await?;
@@ -177,6 +231,7 @@ impl TransferEngine {
                 }))
                 .await?;
 
+            hasher.update(&buffer[..bytes_read]);
             offset += bytes_read as u64;
             index += 1;
             events.on_event(TransferEvent::Progress {
@@ -196,7 +251,7 @@ impl TransferEngine {
         connection
             .send_frame(Frame::Complete(Complete {
                 transfer_id: transfer_id.clone(),
-                file_hash: file_hash.clone(),
+                file_hash: hasher.finalize().to_hex().to_string(),
             }))
             .await?;
         match connection.recv_frame().await {
@@ -234,85 +289,23 @@ impl TransferEngine {
         connection.send_frame(Frame::Ready(Ready)).await?;
 
         let header = expect_file_header(connection.recv_frame().await?)?;
+        validate_header(&header)?;
         let final_path = output_dir.join(&header.file_name);
-        // file exists
-        // either this is a different file -> abort
-        // or this is the same file -> skip to complete phase
         if fs::try_exists(&final_path).await? {
-            let final_hash = hash_file(&final_path).await?;
-            if final_hash != header.file_hash {
-                return Err(CoreError::Storage(format!(
-                    "destination already exists with different content: {}",
-                    final_path.display()
-                )));
-            }
-
-            connection
-                .send_frame(Frame::ResumeStatus(ResumeStatus {
-                    transfer_id: header.transfer_id.clone(),
-                    next_chunk_index: next_chunk_index(header.file_size, header.chunk_size),
-                    bytes_received: header.file_size,
-                }))
-                .await?;
-            let complete = expect_complete(connection.recv_frame().await?, &header.transfer_id)?;
-            if complete.file_hash != header.file_hash {
-                return Err(CoreError::Transfer(format!(
-                    "complete hash {} does not match header hash {}",
-                    complete.file_hash, header.file_hash
-                )));
-            }
-            connection
-                .send_frame(Frame::CompleteAck(CompleteAck {
-                    transfer_id: header.transfer_id.clone(),
-                }))
-                .await?;
-
-            events.on_event(TransferEvent::Completed {
-                transfer_id: header.transfer_id.clone(),
-                bytes_transferred: header.file_size,
-            });
-
-            return Ok(TransferSummary {
-                transfer_id: header.transfer_id,
-                file_name: header.file_name,
-                bytes_transferred: header.file_size,
-            });
+            return receive_existing_final(connection, header, final_path, events).await;
         }
 
-        let mut state = load_or_create_resume_state(&output_dir, &header).await?;
-        let temp_path = LocalFileStorage::resumable_temp_path(
-            &output_dir,
-            &state.file_name,
-            &state.transfer_id,
-        )?;
-        let temp_len = match fs::metadata(&temp_path).await {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(CoreError::from(error)),
-        };
-        if temp_len != state.bytes_received {
-            if temp_len > state.file_size {
-                return Err(CoreError::Storage(format!(
-                    "resume temp length {temp_len} exceeds recorded file size {}",
-                    state.file_size
-                )));
-            }
-            log::warn!(
-                "resume temp length {temp_len} does not match recorded length {}; trusting temp file",
-                state.bytes_received
-            );
-            state.bytes_received = temp_len;
-            state.next_chunk_index = next_chunk_index(temp_len, state.chunk_size);
-            LocalFileStorage::write_resume_state(&output_dir, &state).await?;
-        }
-        let (temp_path, mut file) =
-            LocalFileStorage::open_resumable_destination(&output_dir, &state).await?;
+        let prepared = prepare_receive_state(&output_dir, &header, events, self.chunk_size).await?;
+        let temp_path = prepared.temp_path;
+        let mut file = prepared.file;
+        let mut hasher = prepared.hasher;
 
         connection
             .send_frame(Frame::ResumeStatus(ResumeStatus {
                 transfer_id: header.transfer_id.clone(),
-                next_chunk_index: state.next_chunk_index,
-                bytes_received: state.bytes_received,
+                next_chunk_index: prepared.state.next_chunk_index,
+                bytes_received: prepared.state.bytes_received,
+                prefix_hash: prepared.prefix_hash,
             }))
             .await?;
 
@@ -323,9 +316,9 @@ impl TransferEngine {
             total_bytes: header.file_size,
         });
 
-        let mut expected_index = state.next_chunk_index;
-        let mut expected_offset = state.bytes_received;
-        let mut last_resume_state_bytes = state.bytes_received;
+        let mut expected_index = prepared.state.next_chunk_index;
+        let mut expected_offset = prepared.state.bytes_received;
+        let mut last_resume_state_bytes = prepared.state.bytes_received;
         events.on_event(TransferEvent::Progress {
             transfer_id: header.transfer_id.clone(),
             bytes_transferred: expected_offset,
@@ -333,8 +326,33 @@ impl TransferEngine {
         });
 
         loop {
-            match connection.recv_frame().await? {
+            let frame = match connection.recv_frame().await {
+                Ok(frame) => frame,
+                Err(error) => {
+                    file.flush().await?;
+                    write_resume_state_for_offset(
+                        &output_dir,
+                        &header,
+                        expected_offset,
+                        expected_index,
+                        Some(hasher.finalize().to_hex().to_string()),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+
+            match frame {
                 Frame::Chunk(chunk) => {
+                    if expected_offset > 0 && chunk.index == 0 && chunk.offset == 0 {
+                        file.set_len(0).await?;
+                        file.flush().await?;
+                        expected_index = 0;
+                        expected_offset = 0;
+                        last_resume_state_bytes = 0;
+                        hasher = blake3::Hasher::new();
+                        write_resume_state_for_offset(&output_dir, &header, 0, 0, None).await?;
+                    }
                     validate_chunk(&chunk, &header.transfer_id, expected_index, expected_offset)?;
                     if chunk.bytes.len() as u64 + expected_offset > header.file_size {
                         return Err(CoreError::Transfer(format!(
@@ -345,17 +363,20 @@ impl TransferEngine {
                         )));
                     }
                     file.write_all(&chunk.bytes).await?;
+                    hasher.update(&chunk.bytes);
 
                     expected_index += 1;
                     expected_offset += chunk.bytes.len() as u64;
                     if expected_offset.saturating_sub(last_resume_state_bytes)
                         >= RESUME_STATE_WRITE_INTERVAL
                     {
+                        file.flush().await?;
                         write_resume_state_for_offset(
                             &output_dir,
                             &header,
                             expected_offset,
                             expected_index,
+                            Some(hasher.finalize().to_hex().to_string()),
                         )
                         .await?;
                         last_resume_state_bytes = expected_offset;
@@ -367,12 +388,6 @@ impl TransferEngine {
                     });
                 }
                 Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
-                    if complete.file_hash != header.file_hash {
-                        return Err(CoreError::Transfer(format!(
-                            "complete hash {} does not match header hash {}",
-                            complete.file_hash, header.file_hash
-                        )));
-                    }
                     if expected_offset != header.file_size {
                         return Err(CoreError::Transfer(format!(
                             "transfer complete but expected offset {expected_offset} does not match file size {}",
@@ -380,12 +395,20 @@ impl TransferEngine {
                         )));
                     }
                     file.flush().await?;
+                    let actual_hash = hasher.finalize().to_hex().to_string();
+                    write_resume_state_for_offset(
+                        &output_dir,
+                        &header,
+                        expected_offset,
+                        expected_index,
+                        Some(actual_hash.clone()),
+                    )
+                    .await?;
                     drop(file);
-                    let actual_hash = hash_file(&temp_path).await?;
-                    if actual_hash != header.file_hash {
+                    if actual_hash != complete.file_hash {
                         return Err(CoreError::Transfer(format!(
                             "completed file hash {actual_hash} does not match expected {}",
-                            header.file_hash
+                            complete.file_hash
                         )));
                     }
                     LocalFileStorage::finalize_temp_file(&temp_path, &final_path).await?;
@@ -479,15 +502,6 @@ fn expect_complete_ack(frame: Frame, transfer_id: &TransferId) -> Result<(), Tra
     }
 }
 
-fn expect_complete(frame: Frame, transfer_id: &TransferId) -> Result<Complete, TransferError> {
-    match frame {
-        Frame::Complete(complete) if &complete.transfer_id == transfer_id => Ok(complete),
-        frame => Err(CoreError::Transfer(format!(
-            "expected Complete for {transfer_id}, got {frame:?}"
-        ))),
-    }
-}
-
 fn validate_chunk(
     chunk: &Chunk,
     transfer_id: &TransferId,
@@ -520,6 +534,7 @@ async fn write_resume_state_for_offset(
     header: &FileHeader,
     bytes_received: u64,
     next_chunk_index: u64,
+    hash_checkpoint: Option<String>,
 ) -> Result<(), TransferError> {
     LocalFileStorage::write_resume_state(
         output_dir,
@@ -528,53 +543,254 @@ async fn write_resume_state_for_offset(
             file_name: header.file_name.clone(),
             file_size: header.file_size,
             chunk_size: header.chunk_size,
-            expected_file_hash: header.file_hash.clone(),
             bytes_received,
             next_chunk_index,
+            hash_bytes: bytes_received,
+            hash_checkpoint,
         },
     )
     .await
 }
 
-async fn load_or_create_resume_state(
+struct PreparedReceive {
+    state: TransferResumeState,
+    temp_path: PathBuf,
+    file: fs::File,
+    hasher: blake3::Hasher,
+    prefix_hash: String,
+}
+
+async fn prepare_receive_state(
     output_dir: &Path,
     header: &FileHeader,
-) -> Result<TransferResumeState, TransferError> {
+    events: &dyn EventSink,
+    buffer_size: usize,
+) -> Result<PreparedReceive, TransferError> {
     if header.chunk_size == 0 {
         return Err(CoreError::Transfer("chunk size must be positive".into()));
     }
 
-    let state =
-        LocalFileStorage::read_resume_state(output_dir, &header.file_name, &header.transfer_id)
-            .await?;
+    let state = if header.resume_requested {
+        match LocalFileStorage::find_resume_state(
+            output_dir,
+            &header.file_name,
+            header.file_size,
+            header.chunk_size,
+        )
+        .await?
+        {
+            Some(state) => match prepare_existing_resume_state(output_dir, header, state).await? {
+                Some(state) => state,
+                None => fresh_resume_state(output_dir, header).await?,
+            },
+            None => fresh_resume_state(output_dir, header).await?,
+        }
+    } else {
+        fresh_resume_state(output_dir, header).await?
+    };
 
-    match state {
-        Some(state) => {
-            if state.file_size != header.file_size
-                || state.chunk_size != header.chunk_size
-                || state.expected_file_hash != header.file_hash
-            {
+    let temp_path =
+        LocalFileStorage::resumable_temp_path(output_dir, &state.file_name, &state.transfer_id)?;
+    let mut hasher = blake3::Hasher::new();
+    if state.bytes_received > 0 {
+        events.on_event(TransferEvent::HashStarted {
+            transfer_id: header.transfer_id.clone(),
+            direction: TransferDirection::Receive,
+            file_name: header.file_name.clone(),
+            bytes_to_hash: state.bytes_received,
+        });
+        let mut prefix_file = fs::File::open(&temp_path).await?;
+        hash_file_prefix(
+            &mut prefix_file,
+            &mut hasher,
+            state.bytes_received,
+            buffer_size,
+        )
+        .await?;
+        events.on_event(TransferEvent::HashCompleted {
+            transfer_id: header.transfer_id.clone(),
+            direction: TransferDirection::Receive,
+            file_name: header.file_name.clone(),
+            bytes_hashed: state.bytes_received,
+        });
+    }
+    let prefix_hash = hasher.finalize().to_hex().to_string();
+    write_resume_state_for_offset(
+        output_dir,
+        header,
+        state.bytes_received,
+        state.next_chunk_index,
+        Some(prefix_hash.clone()),
+    )
+    .await?;
+    let (temp_path, file) =
+        LocalFileStorage::open_resumable_destination(output_dir, &state).await?;
+
+    Ok(PreparedReceive {
+        state,
+        temp_path,
+        file,
+        hasher,
+        prefix_hash,
+    })
+}
+
+async fn prepare_existing_resume_state(
+    output_dir: &Path,
+    header: &FileHeader,
+    mut state: TransferResumeState,
+) -> Result<Option<TransferResumeState>, TransferError> {
+    if state.bytes_received > state.file_size
+        || state.next_chunk_index != next_chunk_index(state.bytes_received, state.chunk_size)
+    {
+        return Ok(None);
+    }
+
+    let old_transfer_id = state.transfer_id.clone();
+    let old_temp_path =
+        LocalFileStorage::resumable_temp_path(output_dir, &state.file_name, &old_transfer_id)?;
+    let temp_len = match fs::metadata(&old_temp_path).await {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(CoreError::from(error)),
+    };
+
+    if temp_len < state.bytes_received {
+        log::warn!(
+            "resume temp length {temp_len} is shorter than recorded length {}; starting fresh",
+            state.bytes_received
+        );
+        return Ok(None);
+    }
+    if temp_len > state.bytes_received {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&old_temp_path)
+            .await?;
+        file.set_len(state.bytes_received).await?;
+        file.sync_data().await?;
+    }
+
+    state.transfer_id = header.transfer_id.clone();
+    LocalFileStorage::rebind_resume_temp(
+        output_dir,
+        &state.file_name,
+        &old_transfer_id,
+        &state.transfer_id,
+    )
+    .await?;
+    if old_transfer_id != state.transfer_id {
+        LocalFileStorage::delete_resume_state(output_dir, &state.file_name, &old_transfer_id)
+            .await?;
+    }
+    state.hash_bytes = 0;
+    state.hash_checkpoint = None;
+    LocalFileStorage::write_resume_state(output_dir, &state).await?;
+
+    Ok(Some(state))
+}
+
+async fn fresh_resume_state(
+    output_dir: &Path,
+    header: &FileHeader,
+) -> Result<TransferResumeState, TransferError> {
+    let state = TransferResumeState {
+        transfer_id: header.transfer_id.clone(),
+        file_name: header.file_name.clone(),
+        file_size: header.file_size,
+        chunk_size: header.chunk_size,
+        bytes_received: 0,
+        next_chunk_index: 0,
+        hash_bytes: 0,
+        hash_checkpoint: None,
+    };
+    LocalFileStorage::delete_resume_temp(output_dir, &state.file_name, &state.transfer_id).await?;
+    LocalFileStorage::write_resume_state(output_dir, &state).await?;
+    let temp_path =
+        LocalFileStorage::resumable_temp_path(output_dir, &state.file_name, &state.transfer_id)?;
+    let file = fs::File::create(temp_path).await?;
+    file.sync_data().await?;
+
+    Ok(state)
+}
+
+async fn receive_existing_final(
+    connection: &mut dyn FrameConnection,
+    header: FileHeader,
+    final_path: PathBuf,
+    events: &dyn EventSink,
+) -> Result<TransferSummary, TransferError> {
+    let metadata = fs::metadata(&final_path).await?;
+    if metadata.len() != header.file_size {
+        return Err(CoreError::Storage(format!(
+            "destination already exists with different size: {}",
+            final_path.display()
+        )));
+    }
+
+    events.on_event(TransferEvent::HashStarted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_to_hash: header.file_size,
+    });
+    let final_hash = hash_file(&final_path).await?;
+    events.on_event(TransferEvent::HashCompleted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_hashed: header.file_size,
+    });
+
+    connection
+        .send_frame(Frame::ResumeStatus(ResumeStatus {
+            transfer_id: header.transfer_id.clone(),
+            next_chunk_index: next_chunk_index(header.file_size, header.chunk_size),
+            bytes_received: header.file_size,
+            prefix_hash: final_hash.clone(),
+        }))
+        .await?;
+
+    match connection.recv_frame().await? {
+        Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
+            if complete.file_hash != final_hash {
                 return Err(CoreError::Storage(format!(
-                    "resume state does not match incoming header for {}",
-                    header.file_name
+                    "destination already exists with different content: {}",
+                    final_path.display()
                 )));
             }
-            Ok(state)
         }
-        None => {
-            let state = TransferResumeState {
-                transfer_id: header.transfer_id.clone(),
-                file_name: header.file_name.clone(),
-                file_size: header.file_size,
-                chunk_size: header.chunk_size,
-                expected_file_hash: header.file_hash.clone(),
-                bytes_received: 0,
-                next_chunk_index: 0,
-            };
-            LocalFileStorage::write_resume_state(output_dir, &state).await?;
-            Ok(state)
+        Frame::Chunk(chunk)
+            if chunk.transfer_id == header.transfer_id && chunk.index == 0 && chunk.offset == 0 =>
+        {
+            return Err(CoreError::Storage(format!(
+                "destination already exists with different content: {}",
+                final_path.display()
+            )));
+        }
+        frame => {
+            return Err(CoreError::Transfer(format!(
+                "unexpected frame for existing destination: {frame:?}"
+            )));
         }
     }
+
+    connection
+        .send_frame(Frame::CompleteAck(CompleteAck {
+            transfer_id: header.transfer_id.clone(),
+        }))
+        .await?;
+
+    events.on_event(TransferEvent::Completed {
+        transfer_id: header.transfer_id.clone(),
+        bytes_transferred: header.file_size,
+    });
+
+    Ok(TransferSummary {
+        transfer_id: header.transfer_id,
+        file_name: header.file_name,
+        bytes_transferred: header.file_size,
+    })
 }
 
 async fn hash_file(path: &Path) -> Result<String, TransferError> {
@@ -593,8 +809,46 @@ async fn hash_file(path: &Path) -> Result<String, TransferError> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn transfer_id_for_hash(file_hash: &str) -> TransferId {
-    TransferId::new(format!("transfer-{file_hash}"))
+async fn hash_file_prefix(
+    file: &mut fs::File,
+    hasher: &mut blake3::Hasher,
+    bytes_to_hash: u64,
+    buffer_size: usize,
+) -> Result<(), TransferError> {
+    file.seek(SeekFrom::Start(0)).await?;
+    let mut remaining = bytes_to_hash;
+    let mut buffer = vec![0_u8; buffer_size.max(1)];
+    while remaining > 0 {
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        let bytes_read = file.read(&mut buffer[..limit]).await?;
+        if bytes_read == 0 {
+            return Err(CoreError::Transfer(format!(
+                "unexpected end while hashing prefix: expected {bytes_to_hash} bytes"
+            )));
+        }
+        hasher.update(&buffer[..bytes_read]);
+        remaining -= bytes_read as u64;
+    }
+
+    Ok(())
+}
+
+fn validate_header(header: &FileHeader) -> Result<(), TransferError> {
+    if header.chunk_size == 0 {
+        return Err(CoreError::Transfer("chunk size must be positive".into()));
+    }
+    LocalFileStorage::resumable_temp_path(Path::new("."), &header.file_name, &header.transfer_id)?;
+    Ok(())
+}
+
+fn random_transfer_id() -> Result<TransferId, TransferError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| CoreError::Transfer(format!("failed to generate transfer id: {error}")))?;
+    Ok(TransferId::new(format!(
+        "transfer-{}",
+        blake3::hash(&bytes).to_hex()
+    )))
 }
 
 fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
@@ -636,7 +890,7 @@ mod tests {
         });
 
         let send_summary = TransferEngine::new(4)
-            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
             .await
             .unwrap();
         let receive_summary = receiver.await.unwrap();
@@ -679,7 +933,12 @@ mod tests {
         });
 
         let send_error = TransferEngine::new(4)
-            .send_file(&mut sender_connection, source_path.clone(), &NoopEventSink)
+            .send_file(
+                &mut sender_connection,
+                source_path.clone(),
+                false,
+                &NoopEventSink,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -703,7 +962,7 @@ mod tests {
         });
 
         let send_summary = TransferEngine::new(4)
-            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
             .await
             .unwrap();
         let receive_summary = receiver.await.unwrap();
@@ -721,7 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integrity_failure_does_not_finalize_file() {
+    async fn corrupted_temp_prefix_restarts_from_zero() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
         let output_dir = root.join("output");
@@ -731,16 +990,16 @@ mod tests {
         let source_bytes = b"abcdefghij";
         tokio::fs::write(&source_path, source_bytes).await.unwrap();
 
-        let file_hash = blake3::hash(source_bytes).to_hex().to_string();
-        let transfer_id = transfer_id_for_hash(&file_hash);
+        let transfer_id = TransferId::new("old-transfer");
         let state = TransferResumeState {
             transfer_id: transfer_id.clone(),
             file_name: "corrupt.txt".into(),
             file_size: source_bytes.len() as u64,
             chunk_size: 5,
-            expected_file_hash: file_hash,
             bytes_received: 5,
             next_chunk_index: 1,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -757,23 +1016,25 @@ mod tests {
                 TransferEngine::new(5)
                     .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
                     .await
+                    .unwrap()
             }
         });
 
-        let send_error = TransferEngine::new(5)
-            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+        let send_summary = TransferEngine::new(5)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
             .await
-            .unwrap_err();
-        let receive_error = receiver.await.unwrap().unwrap_err();
+            .unwrap();
+        let receive_summary = receiver.await.unwrap();
 
-        assert!(matches!(send_error, CoreError::Transfer(_)));
-        assert!(matches!(receive_error, CoreError::Transfer(_)));
-        assert!(
-            !fs::try_exists(output_dir.join("corrupt.txt"))
+        assert_eq!(send_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("corrupt.txt"))
                 .await
-                .unwrap()
+                .unwrap(),
+            source_bytes
         );
-        assert!(fs::try_exists(temp_path).await.unwrap());
+        assert!(!fs::try_exists(temp_path).await.unwrap());
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
@@ -789,16 +1050,16 @@ mod tests {
         let source_bytes = b"abcdefghij";
         tokio::fs::write(&source_path, source_bytes).await.unwrap();
 
-        let file_hash = blake3::hash(source_bytes).to_hex().to_string();
-        let transfer_id = transfer_id_for_hash(&file_hash);
+        let transfer_id = TransferId::new("old-transfer");
         let state = TransferResumeState {
             transfer_id: transfer_id.clone(),
             file_name: "stale-sidecar.txt".into(),
             file_size: source_bytes.len() as u64,
             chunk_size: 5,
-            expected_file_hash: file_hash,
             bytes_received: 0,
             next_chunk_index: 0,
+            hash_bytes: 0,
+            hash_checkpoint: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -820,7 +1081,7 @@ mod tests {
         });
 
         let send_summary = TransferEngine::new(5)
-            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
             .await
             .unwrap();
         let receive_summary = receiver.await.unwrap();
@@ -832,6 +1093,170 @@ mod tests {
                 .await
                 .unwrap(),
             source_bytes
+        );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_resume_ignores_compatible_sidecar() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        let old_transfer_id = TransferId::new("old-transfer");
+        let state = TransferResumeState {
+            transfer_id: old_transfer_id.clone(),
+            file_name: "fresh.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            bytes_received: 5,
+            next_chunk_index: 1,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "fresh.txt", &old_transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abcde").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "fresh.txt",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: false,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("fresh.txt")).await.unwrap(),
+            source_bytes
+        );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn temp_shorter_than_state_rejects_resume_candidate() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        let old_transfer_id = TransferId::new("old-transfer");
+        let state = TransferResumeState {
+            transfer_id: old_transfer_id.clone(),
+            file_name: "short-temp.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            bytes_received: 5,
+            next_chunk_index: 1,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "short-temp.txt", &old_transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abc").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "short-temp.txt",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("short-temp.txt"))
+                .await
+                .unwrap(),
+            source_bytes
+        );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_hash_mismatch_does_not_finalize_file() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "bad-hash.txt",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: false,
+                bytes_to_send: source_bytes,
+                complete_hash: "not-the-right-hash".into(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_error = receiver.await.unwrap().unwrap_err();
+
+        assert!(matches!(receive_error, CoreError::Transfer(_)));
+        assert!(
+            !fs::try_exists(output_dir.join("bad-hash.txt"))
+                .await
+                .unwrap()
         );
 
         tokio::fs::remove_dir_all(root).await.unwrap();
@@ -864,7 +1289,7 @@ mod tests {
         });
 
         let send_summary = TransferEngine::new(4)
-            .send_file(&mut sender_connection, source_path, &NoopEventSink)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
             .await
             .unwrap();
         let receive_summary = receiver.await.unwrap();
@@ -894,6 +1319,72 @@ mod tests {
                 rx: receiver_rx,
             },
         )
+    }
+
+    struct ManualSend<'a> {
+        file_name: &'a str,
+        source_bytes: &'a [u8],
+        chunk_size: u64,
+        resume_requested: bool,
+        bytes_to_send: &'a [u8],
+        complete_hash: String,
+        expected_resume_bytes: u64,
+    }
+
+    async fn manual_send(connection: &mut MemoryFrameConnection, request: ManualSend<'_>) {
+        let transfer_id = TransferId::new("manual-transfer");
+        connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(connection.recv_frame().await.unwrap()).unwrap();
+        connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: request.file_name.into(),
+                file_size: request.source_bytes.len() as u64,
+                chunk_size: request.chunk_size,
+                resume_requested: request.resume_requested,
+            }))
+            .await
+            .unwrap();
+        let resume_status = expect_resume_status(
+            connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            request.chunk_size as usize,
+        )
+        .unwrap();
+        assert_eq!(resume_status.bytes_received, request.expected_resume_bytes);
+
+        let mut offset = resume_status.bytes_received;
+        for (index, chunk) in (resume_status.next_chunk_index..).zip(
+            request.bytes_to_send[resume_status.bytes_received as usize..]
+                .chunks(request.chunk_size as usize),
+        ) {
+            connection
+                .send_frame(Frame::Chunk(Chunk {
+                    transfer_id: transfer_id.clone(),
+                    index,
+                    offset,
+                    bytes: chunk.to_vec(),
+                }))
+                .await
+                .unwrap();
+            offset += chunk.len() as u64;
+        }
+        connection
+            .send_frame(Frame::Complete(Complete {
+                transfer_id: transfer_id.clone(),
+                file_hash: request.complete_hash.clone(),
+            }))
+            .await
+            .unwrap();
+        if request.complete_hash == blake3::hash(request.source_bytes).to_hex().as_str() {
+            expect_complete_ack(connection.recv_frame().await.unwrap(), &transfer_id).unwrap();
+        }
     }
 
     #[async_trait]

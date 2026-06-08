@@ -47,7 +47,7 @@ pub enum Frame {
     Hello(Hello),
     /// Confirms that the receiver is ready for file metadata.
     Ready(Ready),
-    /// Describes the file and its expected whole-file hash.
+    /// Describes the file and whether receiver-side resume may be used.
     FileHeader(FileHeader),
     /// Tells the sender where this receiver can resume from.
     ResumeStatus(ResumeStatus),
@@ -125,8 +125,8 @@ pub struct FileHeader {
     pub file_size: u64,
     /// Sender chunk size in bytes.
     pub chunk_size: u64,
-    /// Expected BLAKE3 hash of the complete plaintext file, hex-encoded.
-    pub file_hash: String,
+    /// Whether the receiver may advertise compatible resume state.
+    pub resume_requested: bool,
 }
 
 /// Receiver resume position for a transfer.
@@ -138,6 +138,8 @@ pub struct ResumeStatus {
     pub next_chunk_index: u64,
     /// Number of plaintext bytes already stored by the receiver.
     pub bytes_received: u64,
+    /// BLAKE3 hash of the stored prefix, hex-encoded.
+    pub prefix_hash: String,
 }
 
 /// Sequential file data frame.
@@ -282,13 +284,14 @@ fn encode_frame(frame: &Frame) -> Result<(FrameType, Vec<u8>), ProtocolError> {
             write_string(&mut payload, &header.file_name)?;
             write_u64(&mut payload, header.file_size);
             write_u64(&mut payload, header.chunk_size);
-            write_string(&mut payload, &header.file_hash)?;
+            write_bool(&mut payload, header.resume_requested);
             FrameType::FileHeader
         }
         Frame::ResumeStatus(status) => {
             write_string(&mut payload, &status.transfer_id.0)?;
             write_u64(&mut payload, status.next_chunk_index);
             write_u64(&mut payload, status.bytes_received);
+            write_string(&mut payload, &status.prefix_hash)?;
             FrameType::ResumeStatus
         }
         Frame::Chunk(chunk) => {
@@ -330,12 +333,13 @@ fn decode_frame(frame_type: FrameType, payload: &[u8]) -> Result<Frame, Protocol
             file_name: reader.read_string()?,
             file_size: reader.read_u64()?,
             chunk_size: reader.read_u64()?,
-            file_hash: reader.read_string()?,
+            resume_requested: reader.read_bool()?,
         }),
         FrameType::ResumeStatus => Frame::ResumeStatus(ResumeStatus {
             transfer_id: TransferId::new(reader.read_string()?),
             next_chunk_index: reader.read_u64()?,
             bytes_received: reader.read_u64()?,
+            prefix_hash: reader.read_string()?,
         }),
         FrameType::Chunk => Frame::Chunk(Chunk {
             transfer_id: TransferId::new(reader.read_string()?),
@@ -390,6 +394,10 @@ fn write_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_be_bytes());
 }
 
+fn write_bool(output: &mut Vec<u8>, value: bool) {
+    output.push(u8::from(value));
+}
+
 fn write_peer_role(output: &mut Vec<u8>, role: PeerRole) {
     output.push(match role {
         PeerRole::Sender => 1,
@@ -435,6 +443,14 @@ impl<'a> PayloadReader<'a> {
         Ok(u64::from_be_bytes(
             bytes.try_into().expect("slice length was checked"),
         ))
+    }
+
+    fn read_bool(&mut self) -> Result<bool, ProtocolError> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(CoreError::Protocol(format!("invalid boolean {value}"))),
+        }
     }
 
     fn read_peer_role(&mut self) -> Result<PeerRole, ProtocolError> {
@@ -493,7 +509,7 @@ mod tests {
             file_name: "hello.txt".into(),
             file_size: 5,
             chunk_size: 1024,
-            file_hash: "abc123".into(),
+            resume_requested: true,
         });
 
         write_frame(&mut writer, &frame).await.unwrap();
@@ -528,12 +544,13 @@ mod tests {
                 file_name: "hello.txt".into(),
                 file_size: 128,
                 chunk_size: 64,
-                file_hash: "abc123".into(),
+                resume_requested: true,
             }),
             Frame::ResumeStatus(ResumeStatus {
                 transfer_id: TransferId::new("transfer-1"),
                 next_chunk_index: 2,
                 bytes_received: 128,
+                prefix_hash: "abc123".into(),
             }),
             Frame::Chunk(Chunk {
                 transfer_id: TransferId::new("transfer-1"),
