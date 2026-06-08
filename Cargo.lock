@@ -452,6 +452,7 @@ dependencies = [
  "async-trait",
  "envoix-error",
  "envoix-protocol",
+ "envoix-types",
 ]
 
 [[package]]
@@ -462,6 +463,7 @@ dependencies = [
  "envoix-error",
  "envoix-protocol",
  "envoix-transport",
+ "envoix-types",
  "quinn",
  "rcgen",
  "rustls",

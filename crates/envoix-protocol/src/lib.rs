@@ -230,13 +230,41 @@ where
         )));
     }
 
-    writer.write_all(MAGIC).await?;
-    writer.write_all(&WIRE_VERSION.to_be_bytes()).await?;
-    writer.write_all(&[frame_type as u8, 0]).await?;
-    writer
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await?;
+    write_frame_header(writer, frame_type, payload.len()).await?;
     writer.write_all(&payload).await?;
+    Ok(())
+}
+
+/// Writes a chunk frame directly from a borrowed payload.
+pub async fn write_chunk_frame<W>(
+    writer: &mut W,
+    transfer_id: &TransferId,
+    index: u64,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let transfer_id_len = u32::try_from(transfer_id.0.len())
+        .map_err(|_| CoreError::Protocol("field length exceeds u32".into()))?;
+    let bytes_len = u32::try_from(bytes.len())
+        .map_err(|_| CoreError::Protocol("field length exceeds u32".into()))?;
+    let payload_len = 4_usize
+        .checked_add(transfer_id.0.len())
+        .and_then(|len| len.checked_add(8))
+        .and_then(|len| len.checked_add(8))
+        .and_then(|len| len.checked_add(4))
+        .and_then(|len| len.checked_add(bytes.len()))
+        .ok_or_else(|| CoreError::Protocol("frame length overflow".into()))?;
+
+    write_frame_header(writer, FrameType::Chunk, payload_len).await?;
+    writer.write_all(&transfer_id_len.to_be_bytes()).await?;
+    writer.write_all(transfer_id.0.as_bytes()).await?;
+    writer.write_all(&index.to_be_bytes()).await?;
+    writer.write_all(&offset.to_be_bytes()).await?;
+    writer.write_all(&bytes_len.to_be_bytes()).await?;
+    writer.write_all(bytes).await?;
     Ok(())
 }
 
@@ -246,6 +274,29 @@ where
     W: AsyncWrite + Unpin,
 {
     writer.flush().await?;
+    Ok(())
+}
+
+async fn write_frame_header<W>(
+    writer: &mut W,
+    frame_type: FrameType,
+    payload_len: usize,
+) -> Result<(), ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if payload_len > MAX_FRAME_SIZE {
+        return Err(CoreError::Protocol(format!(
+            "frame length {payload_len} exceeds maximum {MAX_FRAME_SIZE}",
+        )));
+    }
+
+    writer.write_all(MAGIC).await?;
+    writer.write_all(&WIRE_VERSION.to_be_bytes()).await?;
+    writer.write_all(&[frame_type as u8, 0]).await?;
+    writer
+        .write_all(&(payload_len as u32).to_be_bytes())
+        .await?;
     Ok(())
 }
 
@@ -601,6 +652,29 @@ mod tests {
 
         assert!(encoded.ends_with(br#"{"not":"json-expanded"}"#));
         assert_eq!(read_frame(&mut encoded.as_slice()).await.unwrap(), frame);
+    }
+
+    #[tokio::test]
+    async fn direct_chunk_writer_round_trips() {
+        let expected = Frame::Chunk(Chunk {
+            transfer_id: TransferId::new("transfer-1"),
+            index: 7,
+            offset: 1024,
+            bytes: b"hello".to_vec(),
+        });
+        let mut encoded = Vec::new();
+
+        write_chunk_frame(
+            &mut encoded,
+            &TransferId::new("transfer-1"),
+            7,
+            1024,
+            b"hello",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read_frame(&mut encoded.as_slice()).await.unwrap(), expected);
     }
 
     #[tokio::test]

@@ -222,16 +222,11 @@ impl TransferEngine {
                 break;
             }
 
+            hasher.update(&buffer[..bytes_read]);
             connection
-                .send_frame(Frame::Chunk(Chunk {
-                    transfer_id: transfer_id.clone(),
-                    index,
-                    offset,
-                    bytes: buffer[..bytes_read].to_vec(),
-                }))
+                .send_chunk(&transfer_id, index, offset, &buffer[..bytes_read])
                 .await?;
 
-            hasher.update(&buffer[..bytes_read]);
             offset += bytes_read as u64;
             index += 1;
             events.on_event(TransferEvent::Progress {
