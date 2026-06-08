@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
     ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
@@ -42,9 +42,15 @@ enum Command {
         /// Receiver address, using the port printed by `envoix receive`.
         #[arg(long)]
         peer: Option<SocketAddr>,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
+        /// Start a new transfer and ignore compatible receiver-side resume state.
+        #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
+        resume: bool,
         /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
         token: String,
@@ -56,6 +62,9 @@ enum Command {
         /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
@@ -89,11 +98,13 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
         Command::Send {
             peer,
+            config,
             auto,
+            resume,
             token,
             file,
         } => {
-            let client = client_for_token(token)?;
+            let client = client_for_token(token, config.as_deref())?;
             let summary = if auto {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
@@ -105,6 +116,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         SendRequest {
                             file_path: file,
                             connection_policy: ConnectionPolicy::Auto,
+                            resume,
                         },
                         Box::new(NoopClientEventSink),
                     )
@@ -120,6 +132,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         SendFileRequest {
                             peer_addr: peer,
                             file_path: file,
+                            resume,
                         },
                         Box::new(ConsoleEventSink::new()),
                     )
@@ -132,11 +145,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         }
         Command::Receive {
             output,
+            config,
             auto,
             token,
             ip_version,
         } => {
-            let client = client_for_token(token)?;
+            let client = client_for_token(token, config.as_deref())?;
             let summary = if auto {
                 client
                     .receive(
@@ -177,11 +191,16 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
     addr.parse().expect("default receive address is valid")
 }
 
-fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
+fn client_for_token(
+    token: String,
+    config_path: Option<&std::path::Path>,
+) -> Result<EnvoixClient, envoix_client::PublicError> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
-    Ok(EnvoixClient::new(ClientConfig::new(
-        PairingConfig::spake2_shared_token(token)?,
-    )))
+    let pairing = PairingConfig::spake2_shared_token(token)?;
+    Ok(EnvoixClient::new(ClientConfig::from_runtime_sources(
+        pairing,
+        config_path,
+    )?))
 }
 
 #[derive(Debug, Default)]
@@ -233,6 +252,22 @@ impl EventSink for ConsoleEventSink {
                     state.last_rendered_at = Instant::now();
                 }
             }
+            TransferEvent::HashStarted {
+                direction,
+                file_name,
+                bytes_to_hash,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_to_hash, false);
+            }
+            TransferEvent::HashCompleted {
+                direction,
+                file_name,
+                bytes_hashed,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_hashed, true);
+            }
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
@@ -244,6 +279,28 @@ impl EventSink for ConsoleEventSink {
                 }
             }
         }
+    }
+}
+
+fn render_hash_line(direction: TransferDirection, file_name: &str, bytes_hashed: u64, done: bool) {
+    let verb = match direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let status = if done { "verified" } else { "verifying" };
+    let line = format!(
+        "{:<24} {:>9} {}",
+        format!("{verb} {}", display_file_name(file_name)),
+        format_bytes(bytes_hashed),
+        status,
+    );
+
+    let mut stderr = io::stderr().lock();
+    if done {
+        let _ = writeln!(stderr, "\r{line:<80}");
+    } else {
+        let _ = write!(stderr, "\r{line:<80}");
+        let _ = stderr.flush();
     }
 }
 
@@ -362,11 +419,14 @@ mod tests {
             cli.command,
             Command::Send {
                 peer,
+                config: None,
                 auto,
+                resume,
                 token,
                 file
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
+                && resume
                 && token == "abcdefghijkl"
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -388,11 +448,30 @@ mod tests {
             cli.command,
             Command::Send {
                 peer: None,
+                config: None,
                 auto: true,
+                resume: true,
                 token,
                 file
             } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
         ));
+    }
+
+    #[test]
+    fn parses_send_fresh_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--fresh",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Send { resume: false, .. }));
     }
 
     #[test]
@@ -411,6 +490,7 @@ mod tests {
             cli.command,
             Command::Receive {
                 output,
+                config: None,
                 auto,
                 token,
                 ip_version
@@ -465,6 +545,30 @@ mod tests {
                 ip_version: IpVersion::Ipv6,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_explicit_config_path() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--config",
+            "envoix.toml",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                config,
+                ..
+            } if config == Some(std::path::PathBuf::from("envoix.toml"))
         ));
     }
 

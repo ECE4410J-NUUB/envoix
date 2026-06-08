@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use envoix_error::CoreError;
-use envoix_protocol::{Frame, read_frame, write_frame};
+use envoix_protocol::{Frame, read_frame, write_chunk_frame, write_frame};
 use envoix_transport::{
     ConnectionCandidate, FrameConnection, TransportDialer, TransportError, TransportListener,
 };
+use envoix_types::TransferId;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -122,6 +123,16 @@ struct QuicFrameConnection {
 impl FrameConnection for QuicFrameConnection {
     async fn send_frame(&mut self, frame: Frame) -> Result<(), TransportError> {
         write_frame(&mut self.send, &frame).await
+    }
+
+    async fn send_chunk(
+        &mut self,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), TransportError> {
+        write_chunk_frame(&mut self.send, transfer_id, index, offset, bytes).await
     }
 
     async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
