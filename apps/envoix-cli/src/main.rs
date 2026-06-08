@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
     ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
@@ -48,8 +48,8 @@ enum Command {
         /// Use automatic discovery, pairing, and connection setup.
         #[arg(long)]
         auto: bool,
-        /// Resume from compatible receiver-side state.
-        #[arg(long)]
+        /// Start a new transfer and ignore compatible receiver-side resume state.
+        #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
         resume: bool,
         /// Shared ASCII pairing token, at least 12 bytes.
         #[arg(long)]
@@ -426,7 +426,7 @@ mod tests {
                 file
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
-                && !resume
+                && resume
                 && token == "abcdefghijkl"
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -450,7 +450,7 @@ mod tests {
                 peer: None,
                 config: None,
                 auto: true,
-                resume: false,
+                resume: true,
                 token,
                 file
             } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
@@ -458,20 +458,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_send_resume_command() {
+    fn parses_send_fresh_command() {
         let cli = Cli::try_parse_from([
             "envoix",
             "send",
             "--peer",
             "[::1]:9000",
-            "--resume",
+            "--fresh",
             "--token",
             "abcdefghijkl",
             "hello.txt",
         ])
         .unwrap();
 
-        assert!(matches!(cli.command, Command::Send { resume: true, .. }));
+        assert!(matches!(cli.command, Command::Send { resume: false, .. }));
     }
 
     #[test]
