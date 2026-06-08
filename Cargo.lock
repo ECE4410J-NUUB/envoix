@@ -403,6 +403,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-rendezvous"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "envoix-session"
 version = "0.1.0"
 dependencies = [
