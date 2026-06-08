@@ -1,4 +1,4 @@
-//! QR-based pairing invite payload — serialization, encoding, and validation.
+//! QR-based pairing invite payload - serialization, encoding, and validation.
 //!
 //! Invite strings have the form `envoix:<base64url>` where the base64url payload
 //! is a JSON-encoded [`QrInvitePayload`].  The `envoix:` prefix makes the string
@@ -35,18 +35,18 @@ const MIN_TOKEN_LEN: usize = 12;
 /// Versioned invite payload carried inside a QR code or pasted as plain text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QrInvitePayload {
-    /// Payload schema version — must equal [`PAYLOAD_VERSION`].
+    /// Payload schema version - must equal [`PAYLOAD_VERSION`].
     pub version: u32,
     /// Wire protocol version the receiver is running.
     pub protocol_version: u32,
-    /// SPAKE2 shared token (≥12 ASCII bytes).
+    /// SPAKE2 shared token (at least MIN_TOKEN_LEN ASCII bytes).
     pub token: String,
     /// Network candidates the sender should try, e.g. `["192.168.1.5:54321"]`.
     pub candidates: Vec<String>,
     /// Expiry as a Unix timestamp in seconds.  Senders reject payloads where
-    /// `expires_at ≤ now`.
+    /// `expires_at <= now`.
     pub expires_at: u64,
-    /// Reserved feature flags — set to 0 for this version.
+    /// Reserved feature flags - set to 0 for this version.
     pub flags: u32,
 }
 
@@ -180,11 +180,9 @@ impl QrInvitePayload {
     }
 }
 
-/// Generates a random pairing token as an 18-character lowercase hex string.
+/// Generates a random pairing token as a lowercase hex string.
 ///
-/// 9 random bytes → 18 hex chars, which satisfies the ≥12 ASCII-byte
-/// requirement of the SPAKE2 auth layer.  Returns [`QrError::Entropy`]
-/// only if the OS entropy source is unavailable.
+/// Returns [`QrError::Entropy`] only if the OS entropy source is unavailable.
 pub fn generate_token() -> Result<String, QrError> {
     let mut bytes = [0u8; 9];
     getrandom::fill(&mut bytes).map_err(|e| QrError::Entropy(e.to_string()))?;
@@ -302,7 +300,7 @@ mod tests {
     #[test]
     fn expired_payload_is_rejected() {
         let payload = valid_payload(0); // expires_at = 300
-        let err = payload.validate(300).unwrap_err(); // now == expires_at → expired
+        let err = payload.validate(300).unwrap_err(); // now == expires_at -> expired
         assert_eq!(err, QrError::Expired);
     }
 
@@ -401,7 +399,7 @@ mod tests {
     // --- generate_token ---
 
     // Verify all structural requirements in a single test: length, charset,
-    // and SPAKE2 minimum — these are the same property viewed from three angles.
+    // and SPAKE2 minimum - these are the same property viewed from three angles.
     #[test]
     fn generated_token_is_valid_hex_and_meets_spake2_minimum() {
         let token = generate_token().unwrap();

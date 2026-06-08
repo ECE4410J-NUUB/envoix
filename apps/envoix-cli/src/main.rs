@@ -48,7 +48,7 @@ enum Command {
         /// Use automatic discovery (placeholder). Cannot be combined with --invite.
         #[arg(long, conflicts_with = "invite")]
         auto: bool,
-        /// Shared ASCII pairing token (≥12 bytes). Required unless --invite is set.
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --invite is set.
         #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
         token: Option<String>,
         /// Invite string printed by `envoix receive --auto`; sets peer and token automatically.
@@ -65,7 +65,7 @@ enum Command {
         /// Generate a random token and print a QR invite; cannot be combined with --token.
         #[arg(long)]
         auto: bool,
-        /// Shared ASCII pairing token (≥12 bytes). Required unless --auto is set.
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --auto is set.
         #[arg(long, required_unless_present = "auto", conflicts_with = "auto")]
         token: Option<String>,
         /// Address family to bind for receiving.
