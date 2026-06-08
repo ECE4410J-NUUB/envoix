@@ -147,14 +147,14 @@ impl LocalFileStorage {
             let bytes = match fs::read(&path).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    log::warn!("failed to read resume state {}: {error}", path.display());
+                    tracing::warn!("failed to read resume state {}: {error}", path.display());
                     continue;
                 }
             };
             let state = match serde_json::from_slice::<TransferResumeState>(&bytes) {
                 Ok(state) => state,
                 Err(error) => {
-                    log::warn!("invalid resume state {}: {error}", path.display());
+                    tracing::warn!("invalid resume state {}: {error}", path.display());
                     continue;
                 }
             };
