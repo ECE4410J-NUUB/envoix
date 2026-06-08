@@ -1,8 +1,8 @@
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -213,6 +213,9 @@ fn spawn_receiver(output_dir: &Path, token: &str) -> SpawnedReceiver {
 struct SpawnedAutoReceiver {
     child: Child,
     invite_str: String,
+    /// Drains receiver stderr after the invite line so the pipe buffer never
+    /// fills up and blocks the child process.
+    _stderr_drain: thread::JoinHandle<()>,
 }
 
 fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
@@ -223,27 +226,31 @@ fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let invite_str = read_invite_str(&mut child);
-    SpawnedAutoReceiver { child, invite_str }
+    // Take ownership of stderr so we can hand the handle to the drain thread
+    // after extracting the invite.  Once taken, child.stderr is None, which
+    // is fine: read_stderr() on failure will just return an empty string.
+    let stderr = child.stderr.take().unwrap();
+    let (invite_str, drain) = extract_invite_and_drain(stderr);
+    SpawnedAutoReceiver { child, invite_str, _stderr_drain: drain }
 }
 
-/// Reads stderr line by line until it finds the `invite: envoix:...` line.
-fn read_invite_str(child: &mut Child) -> String {
-    let stderr = child.stderr.as_mut().unwrap();
-    let mut line = String::new();
-    let mut byte = [0_u8; 1];
-
-    loop {
-        stderr.read_exact(&mut byte).unwrap();
-        if byte[0] == b'\n' {
-            if let Some(invite) = line.strip_prefix("invite: ") {
-                return invite.trim().to_string();
-            }
-            line.clear();
-        } else {
-            line.push(byte[0] as char);
+/// Scans `stderr` line by line for the `invite: envoix:...` line, then
+/// spawns a thread that drains any remaining output so the pipe buffer cannot
+/// fill and deadlock the child.
+fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<()>) {
+    let mut reader = BufReader::new(stderr);
+    let invite = loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("reading receiver stderr");
+        if let Some(s) = line.trim_end_matches(['\n', '\r']).strip_prefix("invite: ") {
+            break s.trim().to_string();
         }
-    }
+    };
+    let drain = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while reader.read(&mut buf).unwrap_or(0) > 0 {}
+    });
+    (invite, drain)
 }
 
 fn run_send_with_invite(invite: &str, source_path: &Path) -> Output {
