@@ -2,7 +2,7 @@
 
 Tracks: Issue #5  
 Branch: `feat/qr-pairing`  
-Status: in progress
+Status: complete
 
 ---
 
