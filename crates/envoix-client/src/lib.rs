@@ -45,17 +45,13 @@ impl ClientConfig {
         pairing: PairingConfig,
         config_path: Option<&Path>,
     ) -> Result<Self, PublicError> {
-        Self::from_runtime_sources_with_env(
-            pairing,
-            config_path,
-            std::env::var_os(ENVOIX_CHUNK_SIZE),
-        )
+        Self::from_runtime_sources_with_env(pairing, config_path, &ProcessEnv)
     }
 
     fn from_runtime_sources_with_env(
         pairing: PairingConfig,
         config_path: Option<&Path>,
-        env_chunk_size: Option<std::ffi::OsString>,
+        env: &dyn EnvSource,
     ) -> Result<Self, PublicError> {
         let mut config = Self::new(pairing);
 
@@ -66,12 +62,7 @@ impl ClientConfig {
             }
         }
 
-        if let Some(chunk_size) = env_chunk_size {
-            let chunk_size = chunk_size.into_string().map_err(|_| {
-                CoreError::InvalidInput(format!("{ENVOIX_CHUNK_SIZE} is not UTF-8"))
-            })?;
-            config.chunk_size = parse_chunk_size(&chunk_size)?;
-        }
+        apply_env_overrides(&mut config, env)?;
 
         config.validate()?;
         Ok(config)
@@ -101,6 +92,49 @@ impl RuntimeConfig {
             CoreError::InvalidInput(format!("invalid config {}: {error}", path.display()))
         })
     }
+}
+
+trait EnvSource {
+    fn get(&self, name: &'static str) -> Result<Option<String>, PublicError>;
+}
+
+struct ProcessEnv;
+
+impl EnvSource for ProcessEnv {
+    fn get(&self, name: &'static str) -> Result<Option<String>, PublicError> {
+        std::env::var_os(name)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| CoreError::InvalidInput(format!("{name} is not UTF-8")))
+            })
+            .transpose()
+    }
+}
+
+struct EnvOverride {
+    name: &'static str,
+    apply: fn(&mut ClientConfig, &str) -> Result<(), PublicError>,
+}
+
+const ENV_OVERRIDES: &[EnvOverride] = &[EnvOverride {
+    name: ENVOIX_CHUNK_SIZE,
+    apply: apply_chunk_size_override,
+}];
+
+fn apply_env_overrides(config: &mut ClientConfig, env: &dyn EnvSource) -> Result<(), PublicError> {
+    for override_ in ENV_OVERRIDES {
+        if let Some(value) = env.get(override_.name)? {
+            (override_.apply)(config, &value)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_chunk_size_override(config: &mut ClientConfig, value: &str) -> Result<(), PublicError> {
+    config.chunk_size = parse_chunk_size(value)?;
+    Ok(())
 }
 
 /// Request to send one local file to a peer.
@@ -294,19 +328,19 @@ fn auto_not_implemented() -> PublicError {
 
 fn parse_chunk_size(value: &str) -> Result<usize, PublicError> {
     let value = value.trim();
-    let (number, unit) = if let Some(number) = value.strip_suffix("KiB") {
+    let (number, unit) = if let Some(number) = value.strip_suffix("KB") {
         (number, 1024_usize)
-    } else if let Some(number) = value.strip_suffix("Ki") {
+    } else if let Some(number) = value.strip_suffix('K') {
         (number, 1024_usize)
-    } else if let Some(number) = value.strip_suffix("MiB") {
+    } else if let Some(number) = value.strip_suffix("MB") {
         (number, 1024_usize * 1024)
-    } else if let Some(number) = value.strip_suffix("Mi") {
+    } else if let Some(number) = value.strip_suffix('M') {
         (number, 1024_usize * 1024)
     } else if let Some(number) = value.strip_suffix('B') {
         (number, 1_usize)
     } else {
         return Err(CoreError::InvalidInput(format!(
-            "chunk size {value:?} must include B, KiB, or MiB"
+            "chunk size {value:?} must include B, K, KB, M, or MB"
         )));
     };
 
@@ -331,6 +365,11 @@ fn validate_chunk_size(chunk_size: usize) -> Result<(), PublicError> {
         return Err(CoreError::InvalidInput(format!(
             "chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes"
         )));
+    }
+    if !chunk_size.is_power_of_two() {
+        return Err(CoreError::InvalidInput(
+            "chunk size must be a power of two".into(),
+        ));
     }
 
     Ok(())
@@ -363,23 +402,33 @@ mod tests {
 
     #[test]
     fn parses_human_readable_chunk_sizes() {
-        assert_eq!(parse_chunk_size("16KiB").unwrap(), 16 * 1024);
-        assert_eq!(parse_chunk_size("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_chunk_size("16K").unwrap(), 16 * 1024);
+        assert_eq!(parse_chunk_size("16KB").unwrap(), 16 * 1024);
+        assert_eq!(parse_chunk_size("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_chunk_size("1MB").unwrap(), 1024 * 1024);
         assert_eq!(parse_chunk_size("16384B").unwrap(), 16 * 1024);
     }
 
     #[test]
-    fn rejects_bare_or_out_of_range_chunk_sizes() {
+    fn rejects_bare_out_of_range_or_non_power_of_two_chunk_sizes() {
         assert!(matches!(
             parse_chunk_size("65536"),
             Err(CoreError::InvalidInput(_))
         ));
         assert!(matches!(
-            parse_chunk_size("15KiB"),
+            parse_chunk_size("15K"),
             Err(CoreError::InvalidInput(_))
         ));
         assert!(matches!(
-            parse_chunk_size("17MiB"),
+            parse_chunk_size("17M"),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_chunk_size("24K"),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_chunk_size("1MiB"),
             Err(CoreError::InvalidInput(_))
         ));
     }
@@ -387,11 +436,14 @@ mod tests {
     #[test]
     fn config_file_overrides_default_chunk_size() {
         let config_path = unique_test_path("config-overrides-default.toml");
-        std::fs::write(&config_path, "chunk_size = \"1MiB\"\n").unwrap();
+        std::fs::write(&config_path, "chunk_size = \"1M\"\n").unwrap();
 
-        let config =
-            ClientConfig::from_runtime_sources_with_env(test_pairing(), Some(&config_path), None)
-                .unwrap();
+        let config = ClientConfig::from_runtime_sources_with_env(
+            test_pairing(),
+            Some(&config_path),
+            &TestEnv::default(),
+        )
+        .unwrap();
 
         assert_eq!(config.chunk_size, 1024 * 1024);
         std::fs::remove_file(config_path).unwrap();
@@ -400,14 +452,12 @@ mod tests {
     #[test]
     fn env_chunk_size_overrides_config_file() {
         let config_path = unique_test_path("env-overrides-config.toml");
-        std::fs::write(&config_path, "chunk_size = \"1MiB\"\n").unwrap();
+        std::fs::write(&config_path, "chunk_size = \"1M\"\n").unwrap();
+        let env = TestEnv::new([(ENVOIX_CHUNK_SIZE, "4M")]);
 
-        let config = ClientConfig::from_runtime_sources_with_env(
-            test_pairing(),
-            Some(&config_path),
-            Some("4MiB".into()),
-        )
-        .unwrap();
+        let config =
+            ClientConfig::from_runtime_sources_with_env(test_pairing(), Some(&config_path), &env)
+                .unwrap();
 
         assert_eq!(config.chunk_size, 4 * 1024 * 1024);
         std::fs::remove_file(config_path).unwrap();
@@ -415,9 +465,10 @@ mod tests {
 
     #[test]
     fn invalid_env_chunk_size_fails_early() {
+        let env = TestEnv::new([(ENVOIX_CHUNK_SIZE, "65536")]);
+
         let error =
-            ClientConfig::from_runtime_sources_with_env(test_pairing(), None, Some("65536".into()))
-                .unwrap_err();
+            ClientConfig::from_runtime_sources_with_env(test_pairing(), None, &env).unwrap_err();
 
         assert!(matches!(error, CoreError::InvalidInput(_)));
     }
@@ -428,5 +479,31 @@ mod tests {
 
     fn unique_test_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("envoix-client-test-{}-{name}", std::process::id()))
+    }
+
+    #[derive(Default)]
+    struct TestEnv {
+        values: Vec<(&'static str, String)>,
+    }
+
+    impl TestEnv {
+        fn new<const N: usize>(values: [(&'static str, &str); N]) -> Self {
+            Self {
+                values: values
+                    .into_iter()
+                    .map(|(name, value)| (name, value.to_owned()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl EnvSource for TestEnv {
+        fn get(&self, name: &'static str) -> Result<Option<String>, PublicError> {
+            Ok(self
+                .values
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, value)| value.clone()))
+        }
     }
 }
