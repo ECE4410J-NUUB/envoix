@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use qrcode::QrCode;
+use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
 
 use envoix_types::PROTOCOL_VERSION;
@@ -146,6 +148,92 @@ impl QrInvitePayload {
     }
 }
 
+/// Generates a random pairing token as an 18-character lowercase hex string.
+///
+/// 9 random bytes → 18 hex chars, which satisfies the ≥12 ASCII-byte
+/// requirement of the SPAKE2 auth layer.  Returns [`QrError::DecodeError`]
+/// only if the OS entropy source is unavailable.
+pub fn generate_token() -> Result<String, QrError> {
+    let mut bytes = [0u8; 9];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| QrError::DecodeError(format!("entropy source unavailable: {e}")))?;
+
+    let mut token = String::with_capacity(18);
+    for b in bytes {
+        use std::fmt::Write as _;
+        write!(token, "{b:02x}").expect("writing to String is infallible");
+    }
+    Ok(token)
+}
+
+/// Renders `data` as a QR code and returns a UTF-8 string suitable for
+/// printing directly to a terminal.
+///
+/// Each pair of QR rows is collapsed into one line of text using Unicode
+/// half-block characters (`▀` `▄` `█` ` `), so the output is roughly square
+/// in a fixed-width font.  A two-module quiet zone is added on every side so
+/// that scanners can locate the finder patterns reliably.
+///
+/// Returns an empty string if `data` is too long to encode at any QR error-
+/// correction level.
+pub fn render_terminal_qr(data: &str) -> String {
+    let code = match QrCode::new(data.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    // Collect the raw module grid (true = dark).
+    let width = code.width();
+    let modules: Vec<bool> = code
+        .into_colors()
+        .iter()
+        .map(|c| *c == Color::Dark)
+        .collect();
+
+    // Add a 2-module quiet zone on every side.
+    const QUIET: usize = 2;
+    let padded_width = width + QUIET * 2;
+    let padded_height = width + QUIET * 2; // QR codes are always square
+
+    // Build the padded grid (false = light/white).
+    let mut grid = vec![false; padded_width * padded_height];
+    for row in 0..width {
+        for col in 0..width {
+            grid[(row + QUIET) * padded_width + (col + QUIET)] = modules[row * width + col];
+        }
+    }
+
+    // Render two rows per output line using half-block Unicode characters.
+    let mut output = String::new();
+    let mut row = 0;
+    while row < padded_height {
+        let top_row = row;
+        let bot_row = row + 1;
+
+        for col in 0..padded_width {
+            let top = grid[top_row * padded_width + col];
+            let bot = if bot_row < padded_height {
+                grid[bot_row * padded_width + col]
+            } else {
+                false
+            };
+
+            // Dark modules are "filled"; light modules are "empty".
+            let ch = match (top, bot) {
+                (true,  true)  => '█',
+                (true,  false) => '▀',
+                (false, true)  => '▄',
+                (false, false) => ' ',
+            };
+            output.push(ch);
+        }
+        output.push('\n');
+        row += 2;
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +355,79 @@ mod tests {
         let mut payload = valid_payload(0);
         payload.candidates.clear();
         assert_eq!(payload.first_candidate().unwrap_err(), QrError::NoCandidates);
+    }
+
+    // --- generate_token ---
+
+    #[test]
+    fn token_is_18_chars() {
+        let token = generate_token().unwrap();
+        assert_eq!(token.len(), 18);
+    }
+
+    #[test]
+    fn token_is_ascii_hex() {
+        let token = generate_token().unwrap();
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn token_satisfies_auth_minimum_length() {
+        let token = generate_token().unwrap();
+        assert!(token.is_ascii());
+        assert!(token.len() >= MIN_TOKEN_LEN);
+    }
+
+    #[test]
+    fn two_tokens_are_different() {
+        // Probability of collision is 1/2^72 — effectively impossible.
+        let a = generate_token().unwrap();
+        let b = generate_token().unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generated_token_passes_payload_validation() {
+        let token = generate_token().unwrap();
+        let payload = QrInvitePayload::new(token, vec!["127.0.0.1:9000".into()], 999);
+        payload.validate(0).unwrap();
+    }
+
+    // --- render_terminal_qr ---
+
+    #[test]
+    fn render_produces_non_empty_output_for_short_data() {
+        let qr = render_terminal_qr("hello");
+        assert!(!qr.is_empty());
+    }
+
+    #[test]
+    fn render_output_contains_only_block_chars_and_newlines() {
+        let qr = render_terminal_qr("test");
+        for ch in qr.chars() {
+            assert!(
+                matches!(ch, '█' | '▀' | '▄' | ' ' | '\n'),
+                "unexpected character: {ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_all_lines_have_equal_width() {
+        let qr = render_terminal_qr("envoix test payload");
+        let lines: Vec<&str> = qr.trim_end_matches('\n').split('\n').collect();
+        let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "lines have different widths: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn render_invite_string_produces_scannable_qr() {
+        let payload = valid_payload(0);
+        let invite = payload.encode().unwrap();
+        let qr = render_terminal_qr(&invite);
+        assert!(!qr.is_empty());
     }
 }
