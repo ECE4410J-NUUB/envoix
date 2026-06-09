@@ -1,10 +1,12 @@
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use envoix_qr::QrInvitePayload;
 
 const TOKEN: &str = "abcdefghijkl";
 const WRONG_TOKEN: &str = "mnopqrstuvwx";
@@ -50,6 +52,100 @@ fn cli_wrong_token_does_not_finalize_or_create_sidecar() {
     assert_no_sidecars(&output_dir);
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn qr_invite_loopback() {
+    let root = unique_test_dir();
+    let source_dir = root.join("source");
+    let output_dir = root.join("received");
+    fs::create_dir_all(&source_dir).unwrap();
+
+    let source_path = source_dir.join("qr_test.txt");
+    let source_text = b"hello via QR invite";
+    fs::write(&source_path, source_text).unwrap();
+
+    let mut receiver = spawn_receiver_auto(&output_dir);
+
+    let send_output = retry_send(|| run_send_with_invite(&receiver.invite_str, &source_path));
+
+    if !send_output.status.success() {
+        let _ = receiver.child.kill();
+        panic!(
+            "send --invite failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&send_output.stdout),
+            String::from_utf8_lossy(&send_output.stderr)
+        );
+    }
+
+    let receiver_status = wait_for_child(&mut receiver.child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = receiver.child.kill();
+            panic!("receiver did not exit after QR invite transfer");
+        })
+        .unwrap();
+
+    if !receiver_status.success() {
+        panic!("receiver failed\nstderr:\n{}", read_stderr(receiver.child));
+    }
+
+    assert_eq!(
+        fs::read(output_dir.join("qr_test.txt")).unwrap(),
+        source_text
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+// The next two tests pass a nonexistent file ("ignored.txt") on purpose: invite
+// validation must reject the invite before the sender ever opens the file or
+// dials the peer, so a missing file never matters.
+
+#[test]
+fn send_with_expired_invite_fails() {
+    let expired = QrInvitePayload::new(
+        "abcdefghijkl".into(),
+        vec!["127.0.0.1:9000".into()],
+        0, // expires_at = 0 → always in the past
+    )
+    .encode();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_envoix"))
+        .args(["send", "--invite", &expired, "ignored.txt"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected non-zero exit for expired invite");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expired"),
+        "expected 'expired' in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn send_with_version_mismatched_invite_fails() {
+    let mut payload = QrInvitePayload::new(
+        "abcdefghijkl".into(),
+        vec!["127.0.0.1:9000".into()],
+        u64::MAX,
+    );
+    payload.version = 99;
+    let invite = payload.encode();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_envoix"))
+        .args(["send", "--invite", &invite, "ignored.txt"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for version-mismatched invite"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("version"),
+        "expected 'version' in stderr, got: {stderr}"
+    );
 }
 
 fn run_cli_loopback() {
@@ -114,11 +210,72 @@ fn spawn_receiver(output_dir: &Path, token: &str) -> SpawnedReceiver {
     SpawnedReceiver { child, bound_addr }
 }
 
+struct SpawnedAutoReceiver {
+    child: Child,
+    invite_str: String,
+    /// Drains receiver stderr after the invite line so the pipe buffer never
+    /// fills up and blocks the child process.
+    _stderr_drain: thread::JoinHandle<()>,
+}
+
+fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_envoix"))
+        .args(["receive", "--auto", "--output"])
+        .arg(output_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Take ownership of stderr so we can hand the handle to the drain thread
+    // after extracting the invite.  Once taken, child.stderr is None, which
+    // is fine: read_stderr() on failure will just return an empty string.
+    let stderr = child.stderr.take().unwrap();
+    let (invite_str, drain) = extract_invite_and_drain(stderr);
+    SpawnedAutoReceiver { child, invite_str, _stderr_drain: drain }
+}
+
+/// Scans `stderr` line by line for the `invite: envoix:...` line, then
+/// spawns a thread that drains any remaining output so the pipe buffer cannot
+/// fill and deadlock the child.
+fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<()>) {
+    let mut reader = BufReader::new(stderr);
+    let invite = loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("reading receiver stderr");
+        if let Some(s) = line.trim_end_matches(['\n', '\r']).strip_prefix("invite: ") {
+            break s.trim().to_string();
+        }
+    };
+    let drain = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while reader.read(&mut buf).unwrap_or(0) > 0 {}
+    });
+    (invite, drain)
+}
+
+fn run_send_with_invite(invite: &str, source_path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_envoix"))
+        .arg("send")
+        .arg("--invite")
+        .arg(invite)
+        .arg(source_path)
+        .output()
+        .unwrap()
+}
+
 fn run_send_with_retries(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Output {
+    retry_send(|| run_send_once(listen_addr, source_path, token))
+}
+
+/// Runs a send closure, retrying while the receiver's QUIC listener is still
+/// coming up.  Both the manual `--peer` and the QR `--invite` flows print the
+/// receiver address from the same point, so both can race the listener and
+/// need this guard against transient "Connection refused".
+fn retry_send(mut send: impl FnMut() -> Output) -> Output {
     let deadline = Instant::now() + Duration::from_secs(3);
 
     loop {
-        let output = run_send_once(listen_addr, source_path, token);
+        let output = send();
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.success() || !stderr.contains("Connection refused") {
             return output;

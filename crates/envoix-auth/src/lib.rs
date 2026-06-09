@@ -8,8 +8,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
-/// Minimum accepted shared-token length for prototype pairing.
-pub const MIN_SHARED_TOKEN_LEN: usize = 12;
+pub use envoix_types::MIN_SHARED_TOKEN_LEN;
 
 /// Domain label used for SPAKE2 transcript and QUIC exporter binding.
 pub const SPAKE2_DOMAIN: &[u8] = b"envoix-auth-spake2-v1";

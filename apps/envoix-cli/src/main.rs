@@ -1,33 +1,36 @@
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
-    ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    ReceiveFileRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
     TransferDirection, TransferEvent,
 };
+use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
 const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
+/// Lifetime of a generated QR invite before it is considered expired.
+const INVITE_TTL_SECS: u64 = 300;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "envoix",
     version,
     about = "Secure file transfer CLI",
-    after_help = "Typical flow:
-1. Run `envoix receive --output ./received --token <token> --ip-version ipv4`.
-2. Copy the printed port and run `envoix send --peer <receiver-ip>:<port> --token <token> <file>`.
+    after_help = "Manual flow:
+    envoix receive --output ./received --token <token>
+    envoix send --peer <receiver-ip>:<port> --token <token> <file>
 
-Future automatic flow:
-    envoix receive --auto --output ./received --token <token>
-    envoix send --auto --token <token> <file>
+QR flow (no manual token or address needed):
+    envoix receive --auto --output ./received
+    envoix send --invite <invite-string> <file>
 "
 )]
 struct Cli {
@@ -39,21 +42,24 @@ struct Cli {
 enum Command {
     /// Send one file to a receiver address printed by `envoix receive`.
     Send {
-        /// Receiver address, using the port printed by `envoix receive`.
-        #[arg(long)]
+        /// Receiver address (manual mode). Cannot be combined with --invite.
+        #[arg(long, conflicts_with = "invite")]
         peer: Option<SocketAddr>,
         /// Explicit TOML config file path.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Use automatic discovery, pairing, and connection setup.
-        #[arg(long)]
+        /// Use automatic discovery (placeholder). Cannot be combined with --invite.
+        #[arg(long, conflicts_with = "invite")]
         auto: bool,
         /// Start a new transfer and ignore compatible receiver-side resume state.
         #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
         resume: bool,
-        /// Shared ASCII pairing token, at least 12 bytes.
-        #[arg(long)]
-        token: String,
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --invite is set.
+        #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
+        token: Option<String>,
+        /// Invite string printed by `envoix receive --auto`; sets peer and token automatically.
+        #[arg(long, conflicts_with_all = ["peer", "auto", "token"])]
+        invite: Option<String>,
         /// File to send.
         file: PathBuf,
     },
@@ -65,12 +71,12 @@ enum Command {
         /// Explicit TOML config file path.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Use automatic discovery, pairing, and connection setup.
+        /// Generate a random token and print a QR invite; cannot be combined with --token.
         #[arg(long)]
         auto: bool,
-        /// Shared ASCII pairing token, at least 12 bytes.
-        #[arg(long)]
-        token: String,
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --auto is set.
+        #[arg(long, required_unless_present = "auto", conflicts_with = "auto")]
+        token: Option<String>,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
         ip_version: IpVersion,
@@ -119,16 +125,34 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             auto,
             resume,
             token,
+            invite,
             file,
         } => {
-            let client = client_for_token(token, config.as_deref())?;
-            let summary = if auto {
+            let summary = if let Some(invite_str) = invite {
+                let resolved = resolve_invite(&invite_str)?;
+                eprintln!(
+                    "connecting to {} (invite expires in {})",
+                    resolved.peer_addr,
+                    format_duration(Duration::from_secs(resolved.expires_in))
+                );
+                client_for_token(resolved.token, config.as_deref())?
+                    .send_file(
+                        SendFileRequest {
+                            peer_addr: resolved.peer_addr,
+                            file_path: file,
+                            resume,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                    )
+                    .await?
+            } else if auto {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
                         "use either --auto or --peer, not both".into(),
                     ));
                 }
-                client
+                let token = token.expect("clap ensures --token is present with --auto");
+                client_for_token(token, config.as_deref())?
                     .send(
                         SendRequest {
                             file_path: file,
@@ -141,10 +165,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
-                        "send requires --peer unless --auto is set".into(),
+                        "send requires --peer unless --auto or --invite is set".into(),
                     )
                 })?;
-                client
+                let token = token.expect("clap ensures --token is present without --invite");
+                client_for_token(token, config.as_deref())?
                     .send_file(
                         SendFileRequest {
                             peer_addr: peer,
@@ -167,19 +192,38 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             token,
             ip_version,
         } => {
-            let client = client_for_token(token, config.as_deref())?;
             let summary = if auto {
+                // clap guarantees --token is absent here (conflicts_with = "auto").
+                let generated = generate_token().map_err(|e| {
+                    envoix_client::PublicError::InvalidInput(format!(
+                        "failed to generate token: {e}"
+                    ))
+                })?;
+                let client = client_for_token(generated.clone(), config.as_deref())?;
+                let expires_at = unix_now() + INVITE_TTL_SECS;
                 client
-                    .receive(
-                        ReceiveRequest {
+                    .receive_file_with_bound_addr(
+                        ReceiveFileRequest {
+                            listen_addr: receive_addr_for(ip_version),
                             output_dir: output,
-                            connection_policy: ConnectionPolicy::Auto,
                         },
-                        Box::new(NoopClientEventSink),
+                        Box::new(ConsoleEventSink::new()),
+                        |bound_addr| {
+                            let candidates = build_candidates(bound_addr, ip_version);
+                            let payload = QrInvitePayload::new(generated, candidates, expires_at);
+                            let invite = payload.encode();
+                            if let Some(qr) = render_terminal_qr(&invite) {
+                                eprint!("{qr}");
+                            }
+                            eprintln!("invite: {invite}");
+                            eprintln!("waiting for sender...");
+                        },
                     )
                     .await?
             } else {
-                client
+                // clap guarantees --token is present here (required_unless_present = "auto").
+                let token = token.expect("clap requires --token unless --auto is set");
+                client_for_token(token, config.as_deref())?
                     .receive_file_with_bound_addr(
                         ReceiveFileRequest {
                             listen_addr: receive_addr_for(ip_version),
@@ -206,6 +250,77 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
         IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
     };
     addr.parse().expect("default receive address is valid")
+}
+
+/// Resolved fields extracted from a validated QR invite.
+struct ResolvedInvite {
+    peer_addr: SocketAddr,
+    token: String,
+    expires_in: u64,
+}
+
+/// Decodes and validates an invite string, returning the fields the sender needs.
+///
+/// Validation (including expiry and version checks) runs before any connection
+/// is attempted, so a stale or incompatible invite fails fast.
+fn resolve_invite(invite: &str) -> Result<ResolvedInvite, envoix_client::PublicError> {
+    let to_err =
+        |e| envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"));
+
+    let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
+    let now = unix_now();
+    payload.validate(now).map_err(to_err)?;
+    let peer_addr = payload.first_candidate().map_err(to_err)?;
+
+    Ok(ResolvedInvite {
+        peer_addr,
+        token: payload.token,
+        expires_in: payload.expires_at.saturating_sub(now),
+    })
+}
+
+/// Current Unix time in whole seconds.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Builds the candidate list for a QR invite from the listener's bound address.
+///
+/// Uses a UDP socket trick to find the machine's outbound LAN IP, then pairs
+/// it with the bound port.  On networks with no usable route (e.g. an offline
+/// LAN), detection fails and the bound IP is an unspecified address that a
+/// peer cannot dial, so we warn the user to supply a reachable address out of
+/// band.
+fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String> {
+    let port = bound_addr.port();
+    let ip = detect_local_ip(ip_version).unwrap_or(bound_addr.ip());
+    if ip.is_unspecified() {
+        eprintln!(
+            "warning: could not detect a reachable local IP; the invite contains \
+             {ip} which a sender cannot dial. Share a reachable address manually."
+        );
+    }
+    vec![SocketAddr::new(ip, port).to_string()]
+}
+
+/// Probes the OS routing table to find the preferred outbound LAN IP without
+/// sending any packets (connect on UDP never transmits data).
+fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
+    match ip_version {
+        IpVersion::Ipv4 => {
+            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+            socket.connect("8.8.8.8:80").ok()?;
+            Some(socket.local_addr().ok()?.ip())
+        }
+        IpVersion::Ipv6 => {
+            let socket = UdpSocket::bind("[::]:0").ok()?;
+            socket.connect("[2001:4860:4860::8888]:80").ok()?;
+            Some(socket.local_addr().ok()?.ip())
+        }
+    }
 }
 
 fn client_for_token(
@@ -439,12 +554,13 @@ mod tests {
                 config: None,
                 auto,
                 resume,
-                token,
-                file
+                ref token,
+                invite: None,
+                ref file,
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
                 && resume
-                && token == "abcdefghijkl"
+                && token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
         ));
     }
@@ -468,9 +584,11 @@ mod tests {
                 config: None,
                 auto: true,
                 resume: true,
-                token,
-                file
-            } if token == "abcdefghijkl" && file == std::path::Path::new("hello.txt")
+                ref token,
+                invite: None,
+                ref file,
+            } if token.as_deref() == Some("abcdefghijkl")
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -509,7 +627,7 @@ mod tests {
                 output,
                 config: None,
                 auto,
-                token,
+                token: Some(ref token),
                 ip_version
             } if output == std::path::Path::new("received")
                 && !auto
@@ -520,10 +638,25 @@ mod tests {
 
     #[test]
     fn parses_receive_auto_command() {
+        let cli = Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"])
+            .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                output,
+                auto: true,
+                token: None,
+                ..
+            } if output == std::path::Path::new("received")
+        ));
+    }
+
+    #[test]
+    fn parses_receive_with_explicit_token() {
         let cli = Cli::try_parse_from([
             "envoix",
             "receive",
-            "--auto",
             "--output",
             "received",
             "--token",
@@ -534,11 +667,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Receive {
-                output,
-                auto: true,
-                token,
+                auto: false,
+                token: Some(ref t),
                 ..
-            } if output == std::path::Path::new("received") && token == "abcdefghijkl"
+            } if t == "abcdefghijkl"
         ));
     }
 
@@ -562,6 +694,32 @@ mod tests {
                 ip_version: IpVersion::Ipv6,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_send_invite_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--invite",
+            "envoix:dGVzdA",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                peer: None,
+                config: None,
+                auto: false,
+                resume: true,
+                token: None,
+                ref invite,
+                ref file,
+            } if invite.as_deref() == Some("envoix:dGVzdA")
+                && file == std::path::Path::new("hello.txt")
         ));
     }
 
@@ -598,5 +756,29 @@ mod tests {
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn rejects_receive_auto_with_token() {
+        assert!(Cli::try_parse_from([
+            "envoix", "receive", "--auto", "--output", "recv", "--token", "abcdefghijkl",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_send_invite_with_peer() {
+        assert!(Cli::try_parse_from([
+            "envoix", "send", "--invite", "envoix:dGVzdA", "--peer", "127.0.0.1:9000", "f.txt",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_send_invite_with_token() {
+        assert!(Cli::try_parse_from([
+            "envoix", "send", "--invite", "envoix:dGVzdA", "--token", "abcdefghijkl", "f.txt",
+        ])
+        .is_err());
     }
 }

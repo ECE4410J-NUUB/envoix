@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Wire protocol version used by the resumable transfer flow.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Minimum byte length for a SPAKE2 shared pairing token.
+pub const MIN_SHARED_TOKEN_LEN: usize = 12;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct TransferId(pub String);
 

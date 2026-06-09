@@ -372,6 +372,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "envoix-client",
+ "envoix-qr",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -413,6 +414,19 @@ dependencies = [
  "num_enum",
  "serde",
  "tokio",
+]
+
+[[package]]
+name = "envoix-qr"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "envoix-types",
+ "getrandom 0.3.4",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -862,6 +876,12 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quinn"
