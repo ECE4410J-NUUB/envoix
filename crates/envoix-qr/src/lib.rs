@@ -246,7 +246,7 @@ pub fn render_terminal_qr(data: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    const TOKEN: &str = "abcdefghijkl"; // exactly 12 ASCII bytes
+    const TOKEN: &str = "abcdefghijkl"; // exactly MIN_SHARED_TOKEN_LEN bytes
 
     fn valid_payload(now: u64) -> QrInvitePayload {
         QrInvitePayload::new(TOKEN.into(), vec!["127.0.0.1:9000".into()], now + 300)
