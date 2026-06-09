@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
     ReceiveFileRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
@@ -45,9 +45,15 @@ enum Command {
         /// Receiver address (manual mode). Cannot be combined with --invite.
         #[arg(long, conflicts_with = "invite")]
         peer: Option<SocketAddr>,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Use automatic discovery (placeholder). Cannot be combined with --invite.
         #[arg(long, conflicts_with = "invite")]
         auto: bool,
+        /// Start a new transfer and ignore compatible receiver-side resume state.
+        #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
+        resume: bool,
         /// Shared ASCII pairing token (>=12 bytes). Required unless --invite is set.
         #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
         token: Option<String>,
@@ -62,6 +68,9 @@ enum Command {
         /// Directory where the received file and resume state are stored.
         #[arg(long)]
         output: PathBuf,
+        /// Explicit TOML config file path.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Generate a random token and print a QR invite; cannot be combined with --token.
         #[arg(long)]
         auto: bool,
@@ -82,6 +91,7 @@ enum IpVersion {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_tracing();
     match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -91,11 +101,29 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to
+/// `warn` for the workspace and `error` for everything else so that library
+/// warnings (e.g. resume-state corruption notices) reach the terminal
+/// without flooding it.  Output goes to stderr to keep stdout clean for
+/// future machine-consumable formats.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("envoix=warn,warn"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .with_target(false)
+        .init();
+}
+
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     match cli.command {
         Command::Send {
             peer,
+            config,
             auto,
+            resume,
             token,
             invite,
             file,
@@ -107,11 +135,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     resolved.peer_addr,
                     format_duration(Duration::from_secs(resolved.expires_in))
                 );
-                client_for_token(resolved.token)?
+                client_for_token(resolved.token, config.as_deref())?
                     .send_file(
                         SendFileRequest {
                             peer_addr: resolved.peer_addr,
                             file_path: file,
+                            resume,
                         },
                         Box::new(ConsoleEventSink::new()),
                     )
@@ -123,11 +152,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     ));
                 }
                 let token = token.expect("clap ensures --token is present with --auto");
-                client_for_token(token)?
+                client_for_token(token, config.as_deref())?
                     .send(
                         SendRequest {
                             file_path: file,
                             connection_policy: ConnectionPolicy::Auto,
+                            resume,
                         },
                         Box::new(NoopClientEventSink),
                     )
@@ -139,11 +169,12 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     )
                 })?;
                 let token = token.expect("clap ensures --token is present without --invite");
-                client_for_token(token)?
+                client_for_token(token, config.as_deref())?
                     .send_file(
                         SendFileRequest {
                             peer_addr: peer,
                             file_path: file,
+                            resume,
                         },
                         Box::new(ConsoleEventSink::new()),
                     )
@@ -156,6 +187,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         }
         Command::Receive {
             output,
+            config,
             auto,
             token,
             ip_version,
@@ -167,7 +199,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         "failed to generate token: {e}"
                     ))
                 })?;
-                let client = client_for_token(generated.clone())?;
+                let client = client_for_token(generated.clone(), config.as_deref())?;
                 let expires_at = unix_now() + INVITE_TTL_SECS;
                 client
                     .receive_file_with_bound_addr(
@@ -191,7 +223,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             } else {
                 // clap guarantees --token is present here (required_unless_present = "auto").
                 let token = token.expect("clap requires --token unless --auto is set");
-                client_for_token(token)?
+                client_for_token(token, config.as_deref())?
                     .receive_file_with_bound_addr(
                         ReceiveFileRequest {
                             listen_addr: receive_addr_for(ip_version),
@@ -291,11 +323,16 @@ fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
     }
 }
 
-fn client_for_token(token: String) -> Result<EnvoixClient, envoix_client::PublicError> {
+fn client_for_token(
+    token: String,
+    config_path: Option<&std::path::Path>,
+) -> Result<EnvoixClient, envoix_client::PublicError> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
-    Ok(EnvoixClient::new(ClientConfig::new(
-        PairingConfig::spake2_shared_token(token)?,
-    )))
+    let pairing = PairingConfig::spake2_shared_token(token)?;
+    Ok(EnvoixClient::new(ClientConfig::from_runtime_sources(
+        pairing,
+        config_path,
+    )?))
 }
 
 #[derive(Debug, Default)]
@@ -347,6 +384,22 @@ impl EventSink for ConsoleEventSink {
                     state.last_rendered_at = Instant::now();
                 }
             }
+            TransferEvent::HashStarted {
+                direction,
+                file_name,
+                bytes_to_hash,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_to_hash, false);
+            }
+            TransferEvent::HashCompleted {
+                direction,
+                file_name,
+                bytes_hashed,
+                ..
+            } => {
+                render_hash_line(direction, &file_name, bytes_hashed, true);
+            }
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
@@ -358,6 +411,28 @@ impl EventSink for ConsoleEventSink {
                 }
             }
         }
+    }
+}
+
+fn render_hash_line(direction: TransferDirection, file_name: &str, bytes_hashed: u64, done: bool) {
+    let verb = match direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let status = if done { "verified" } else { "verifying" };
+    let line = format!(
+        "{:<24} {:>9} {}",
+        format!("{verb} {}", display_file_name(file_name)),
+        format_bytes(bytes_hashed),
+        status,
+    );
+
+    let mut stderr = io::stderr().lock();
+    if done {
+        let _ = writeln!(stderr, "\r{line:<80}");
+    } else {
+        let _ = write!(stderr, "\r{line:<80}");
+        let _ = stderr.flush();
     }
 }
 
@@ -476,12 +551,15 @@ mod tests {
             cli.command,
             Command::Send {
                 peer,
+                config: None,
                 auto,
+                resume,
                 ref token,
                 invite: None,
                 ref file,
             } if peer == Some("[::1]:9000".parse().unwrap())
                 && !auto
+                && resume
                 && token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -503,13 +581,32 @@ mod tests {
             cli.command,
             Command::Send {
                 peer: None,
+                config: None,
                 auto: true,
+                resume: true,
                 ref token,
                 invite: None,
                 ref file,
             } if token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
         ));
+    }
+
+    #[test]
+    fn parses_send_fresh_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--fresh",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Send { resume: false, .. }));
     }
 
     #[test]
@@ -528,6 +625,7 @@ mod tests {
             cli.command,
             Command::Receive {
                 output,
+                config: None,
                 auto,
                 token: Some(ref token),
                 ip_version
@@ -614,12 +712,38 @@ mod tests {
             cli.command,
             Command::Send {
                 peer: None,
+                config: None,
                 auto: false,
+                resume: true,
                 token: None,
                 ref invite,
                 ref file,
             } if invite.as_deref() == Some("envoix:dGVzdA")
                 && file == std::path::Path::new("hello.txt")
+        ));
+    }
+
+    #[test]
+    fn parses_explicit_config_path() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--peer",
+            "[::1]:9000",
+            "--config",
+            "envoix.toml",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send {
+                config,
+                ..
+            } if config == Some(std::path::PathBuf::from("envoix.toml"))
         ));
     }
 

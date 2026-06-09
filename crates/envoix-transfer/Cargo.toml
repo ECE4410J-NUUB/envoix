@@ -12,5 +12,6 @@ envoix-storage.workspace = true
 envoix-transport.workspace = true
 envoix-types.workspace = true
 blake3.workspace = true
-log.workspace = true
+getrandom.workspace = true
 tokio.workspace = true
+tracing.workspace = true
