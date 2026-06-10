@@ -67,7 +67,8 @@ fn qr_invite_loopback() {
 
     let mut receiver = spawn_receiver_auto(&output_dir);
 
-    let send_output = retry_send(|| run_send_with_invite(&receiver.invite_str, &source_path));
+    let invite = loopback_invite_for(&receiver.invite_str);
+    let send_output = retry_send(|| run_send_with_invite(&invite, &source_path));
 
     if !send_output.status.success() {
         let _ = receiver.child.kill();
@@ -114,7 +115,10 @@ fn send_with_expired_invite_fails() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "expected non-zero exit for expired invite");
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for expired invite"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("expired"),
@@ -231,7 +235,11 @@ fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
     // is fine: read_stderr() on failure will just return an empty string.
     let stderr = child.stderr.take().unwrap();
     let (invite_str, drain) = extract_invite_and_drain(stderr);
-    SpawnedAutoReceiver { child, invite_str, _stderr_drain: drain }
+    SpawnedAutoReceiver {
+        child,
+        invite_str,
+        _stderr_drain: drain,
+    }
 }
 
 /// Scans `stderr` line by line for the `invite: envoix:...` line, then
@@ -241,7 +249,9 @@ fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<
     let mut reader = BufReader::new(stderr);
     let invite = loop {
         let mut line = String::new();
-        reader.read_line(&mut line).expect("reading receiver stderr");
+        reader
+            .read_line(&mut line)
+            .expect("reading receiver stderr");
         if let Some(s) = line.trim_end_matches(['\n', '\r']).strip_prefix("invite: ") {
             break s.trim().to_string();
         }
@@ -300,6 +310,13 @@ fn run_send_once(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Ou
 
 fn loopback_addr_for(bound_addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr.port())
+}
+
+fn loopback_invite_for(invite: &str) -> String {
+    let mut payload = QrInvitePayload::decode(invite).unwrap();
+    let peer_addr = payload.first_candidate().unwrap();
+    payload.candidates = vec![loopback_addr_for(peer_addr).to_string()];
+    payload.encode()
 }
 
 fn read_bound_addr(child: &mut Child) -> SocketAddr {

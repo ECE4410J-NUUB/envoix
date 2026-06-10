@@ -3,7 +3,7 @@
 use envoix_error::CoreError;
 use envoix_protocol::{AuthFrame, Frame, Spake2Confirm, Spake2Message, Spake2Start};
 use envoix_transport::FrameConnection;
-use envoix_types::{PROTOCOL_VERSION, PeerRole};
+use envoix_types::{PROTOCOL_VERSION, PeerRole, is_valid_shared_token};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
@@ -171,7 +171,7 @@ fn validate_shared_token(token: &str) -> Result<(), AuthError> {
             "SPAKE2 shared token must be ASCII".into(),
         ));
     }
-    if token.len() < MIN_SHARED_TOKEN_LEN {
+    if !is_valid_shared_token(token) {
         return Err(CoreError::InvalidInput(format!(
             "SPAKE2 shared token must be at least {MIN_SHARED_TOKEN_LEN} ASCII bytes"
         )));

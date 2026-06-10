@@ -20,7 +20,7 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
 
-use envoix_types::{MIN_SHARED_TOKEN_LEN, PROTOCOL_VERSION};
+use envoix_types::{MIN_SHARED_TOKEN_LEN, PROTOCOL_VERSION, is_valid_shared_token};
 
 /// Prefix prepended to every encoded invite string.
 pub const INVITE_PREFIX: &str = "envoix:";
@@ -74,7 +74,9 @@ pub enum QrError {
     #[error("entropy source unavailable: {0}")]
     Entropy(String),
 
-    #[error("unsupported feature flags 0x{0:08x}; sender and receiver versions may be incompatible")]
+    #[error(
+        "unsupported feature flags 0x{0:08x}; sender and receiver versions may be incompatible"
+    )]
     UnsupportedFlags(u32),
 }
 
@@ -84,8 +86,7 @@ impl QrInvitePayload {
     /// Serialization is infallible for this struct (only primitives, `String`,
     /// and `Vec<String>`), so this does not return a `Result`.
     pub fn encode(&self) -> String {
-        let json =
-            serde_json::to_string(self).expect("QrInvitePayload always serializes to JSON");
+        let json = serde_json::to_string(self).expect("QrInvitePayload always serializes to JSON");
         let b64 = URL_SAFE_NO_PAD.encode(json.as_bytes());
         format!("{INVITE_PREFIX}{b64}")
     }
@@ -136,14 +137,14 @@ impl QrInvitePayload {
             return Err(QrError::NoCandidates);
         }
 
-        if !self.token.is_ascii() || self.token.len() < MIN_SHARED_TOKEN_LEN {
+        if !is_valid_shared_token(&self.token) {
             return Err(QrError::WeakToken);
         }
 
         for candidate in &self.candidates {
-            candidate.parse::<SocketAddr>().map_err(|_| {
-                QrError::MalformedAddress(candidate.clone())
-            })?;
+            candidate
+                .parse::<SocketAddr>()
+                .map_err(|_| QrError::MalformedAddress(candidate.clone()))?;
         }
 
         if self.flags != 0 {
@@ -394,7 +395,10 @@ mod tests {
     fn first_candidate_on_empty_list_returns_error() {
         let mut payload = valid_payload(0);
         payload.candidates.clear();
-        assert_eq!(payload.first_candidate().unwrap_err(), QrError::NoCandidates);
+        assert_eq!(
+            payload.first_candidate().unwrap_err(),
+            QrError::NoCandidates
+        );
     }
 
     // --- generate_token ---

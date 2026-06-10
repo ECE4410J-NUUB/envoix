@@ -108,8 +108,8 @@ async fn main() -> ExitCode {
 /// future machine-consumable formats.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("envoix=warn,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("envoix=warn,warn"));
     fmt()
         .with_env_filter(filter)
         .with_writer(io::stderr)
@@ -264,8 +264,7 @@ struct ResolvedInvite {
 /// Validation (including expiry and version checks) runs before any connection
 /// is attempted, so a stale or incompatible invite fails fast.
 fn resolve_invite(invite: &str) -> Result<ResolvedInvite, envoix_client::PublicError> {
-    let to_err =
-        |e| envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"));
+    let to_err = |e| envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"));
 
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
     let now = unix_now();
@@ -309,18 +308,13 @@ fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String
 /// Probes the OS routing table to find the preferred outbound LAN IP without
 /// sending any packets (connect on UDP never transmits data).
 fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
-    match ip_version {
-        IpVersion::Ipv4 => {
-            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-            socket.connect("8.8.8.8:80").ok()?;
-            Some(socket.local_addr().ok()?.ip())
-        }
-        IpVersion::Ipv6 => {
-            let socket = UdpSocket::bind("[::]:0").ok()?;
-            socket.connect("[2001:4860:4860::8888]:80").ok()?;
-            Some(socket.local_addr().ok()?.ip())
-        }
-    }
+    let (bind_addr, probe_addr) = match ip_version {
+        IpVersion::Ipv4 => ("0.0.0.0:0", "8.8.8.8:80"),
+        IpVersion::Ipv6 => ("[::]:0", "[2001:4860:4860::8888]:80"),
+    };
+    let socket = UdpSocket::bind(bind_addr).ok()?;
+    socket.connect(probe_addr).ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 fn client_for_token(
@@ -638,8 +632,8 @@ mod tests {
 
     #[test]
     fn parses_receive_auto_command() {
-        let cli = Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"]).unwrap();
 
         assert!(matches!(
             cli.command,
@@ -699,14 +693,8 @@ mod tests {
 
     #[test]
     fn parses_send_invite_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--invite",
-            "envoix:dGVzdA",
-            "hello.txt",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["envoix", "send", "--invite", "envoix:dGVzdA", "hello.txt"])
+            .unwrap();
 
         assert!(matches!(
             cli.command,
@@ -760,25 +748,49 @@ mod tests {
 
     #[test]
     fn rejects_receive_auto_with_token() {
-        assert!(Cli::try_parse_from([
-            "envoix", "receive", "--auto", "--output", "recv", "--token", "abcdefghijkl",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "receive",
+                "--auto",
+                "--output",
+                "recv",
+                "--token",
+                "abcdefghijkl",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_send_invite_with_peer() {
-        assert!(Cli::try_parse_from([
-            "envoix", "send", "--invite", "envoix:dGVzdA", "--peer", "127.0.0.1:9000", "f.txt",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "send",
+                "--invite",
+                "envoix:dGVzdA",
+                "--peer",
+                "127.0.0.1:9000",
+                "f.txt",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_send_invite_with_token() {
-        assert!(Cli::try_parse_from([
-            "envoix", "send", "--invite", "envoix:dGVzdA", "--token", "abcdefghijkl", "f.txt",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "envoix",
+                "send",
+                "--invite",
+                "envoix:dGVzdA",
+                "--token",
+                "abcdefghijkl",
+                "f.txt",
+            ])
+            .is_err()
+        );
     }
 }

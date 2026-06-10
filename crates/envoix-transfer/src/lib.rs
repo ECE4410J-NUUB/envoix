@@ -295,14 +295,14 @@ impl TransferEngine {
         let mut file = prepared.file;
         let mut hasher = prepared.hasher;
 
-        connection
-            .send_frame(Frame::ResumeStatus(ResumeStatus {
-                transfer_id: header.transfer_id.clone(),
-                next_chunk_index: prepared.state.next_chunk_index,
-                bytes_received: prepared.state.bytes_received,
-                prefix_hash: prepared.prefix_hash,
-            }))
-            .await?;
+        send_resume_status(
+            connection,
+            &header.transfer_id,
+            prepared.state.next_chunk_index,
+            prepared.state.bytes_received,
+            prepared.prefix_hash,
+        )
+        .await?;
 
         events.on_event(TransferEvent::Started {
             transfer_id: header.transfer_id.clone(),
@@ -413,11 +413,7 @@ impl TransferEngine {
                         &header.transfer_id,
                     )
                     .await?;
-                    connection
-                        .send_frame(Frame::CompleteAck(CompleteAck {
-                            transfer_id: header.transfer_id.clone(),
-                        }))
-                        .await?;
+                    send_complete_ack(connection, &header.transfer_id).await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
                         bytes_transferred: expected_offset,
@@ -588,26 +584,15 @@ async fn prepare_receive_state(
         LocalFileStorage::resumable_temp_path(output_dir, &state.file_name, &state.transfer_id)?;
     let mut hasher = blake3::Hasher::new();
     if state.bytes_received > 0 {
-        events.on_event(TransferEvent::HashStarted {
-            transfer_id: header.transfer_id.clone(),
-            direction: TransferDirection::Receive,
-            file_name: header.file_name.clone(),
-            bytes_to_hash: state.bytes_received,
-        });
-        let mut prefix_file = fs::File::open(&temp_path).await?;
-        hash_file_prefix(
-            &mut prefix_file,
+        hash_receive_prefix_with_events(
+            &temp_path,
             &mut hasher,
+            events,
+            header,
             state.bytes_received,
             buffer_size,
         )
         .await?;
-        events.on_event(TransferEvent::HashCompleted {
-            transfer_id: header.transfer_id.clone(),
-            direction: TransferDirection::Receive,
-            file_name: header.file_name.clone(),
-            bytes_hashed: state.bytes_received,
-        });
     }
     let prefix_hash = hasher.finalize().to_hex().to_string();
     write_resume_state_for_offset(
@@ -733,28 +718,16 @@ async fn receive_existing_final(
         )));
     }
 
-    events.on_event(TransferEvent::HashStarted {
-        transfer_id: header.transfer_id.clone(),
-        direction: TransferDirection::Receive,
-        file_name: header.file_name.clone(),
-        bytes_to_hash: header.file_size,
-    });
-    let final_hash = hash_file(&final_path).await?;
-    events.on_event(TransferEvent::HashCompleted {
-        transfer_id: header.transfer_id.clone(),
-        direction: TransferDirection::Receive,
-        file_name: header.file_name.clone(),
-        bytes_hashed: header.file_size,
-    });
+    let final_hash = hash_receive_file_with_events(&final_path, events, &header).await?;
 
-    connection
-        .send_frame(Frame::ResumeStatus(ResumeStatus {
-            transfer_id: header.transfer_id.clone(),
-            next_chunk_index: next_chunk_index(header.file_size, header.chunk_size),
-            bytes_received: header.file_size,
-            prefix_hash: final_hash.clone(),
-        }))
-        .await?;
+    send_resume_status(
+        connection,
+        &header.transfer_id,
+        next_chunk_index(header.file_size, header.chunk_size),
+        header.file_size,
+        final_hash.clone(),
+    )
+    .await?;
 
     match connection.recv_frame().await? {
         Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
@@ -780,11 +753,7 @@ async fn receive_existing_final(
         }
     }
 
-    connection
-        .send_frame(Frame::CompleteAck(CompleteAck {
-            transfer_id: header.transfer_id.clone(),
-        }))
-        .await?;
+    send_complete_ack(connection, &header.transfer_id).await?;
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
@@ -796,6 +765,78 @@ async fn receive_existing_final(
         file_name: header.file_name,
         bytes_transferred: header.file_size,
     })
+}
+
+async fn hash_receive_file_with_events(
+    path: &Path,
+    events: &dyn EventSink,
+    header: &FileHeader,
+) -> Result<String, TransferError> {
+    emit_receive_hash_started(events, header, header.file_size);
+    let hash = hash_file(path).await?;
+    emit_receive_hash_completed(events, header, header.file_size);
+    Ok(hash)
+}
+
+async fn hash_receive_prefix_with_events(
+    path: &Path,
+    hasher: &mut blake3::Hasher,
+    events: &dyn EventSink,
+    header: &FileHeader,
+    bytes_to_hash: u64,
+    buffer_size: usize,
+) -> Result<(), TransferError> {
+    emit_receive_hash_started(events, header, bytes_to_hash);
+    let mut file = fs::File::open(path).await?;
+    hash_file_prefix(&mut file, hasher, bytes_to_hash, buffer_size).await?;
+    emit_receive_hash_completed(events, header, bytes_to_hash);
+    Ok(())
+}
+
+fn emit_receive_hash_started(events: &dyn EventSink, header: &FileHeader, bytes_to_hash: u64) {
+    events.on_event(TransferEvent::HashStarted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_to_hash,
+    });
+}
+
+fn emit_receive_hash_completed(events: &dyn EventSink, header: &FileHeader, bytes_hashed: u64) {
+    events.on_event(TransferEvent::HashCompleted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_hashed,
+    });
+}
+
+async fn send_resume_status(
+    connection: &mut dyn FrameConnection,
+    transfer_id: &TransferId,
+    next_chunk_index: u64,
+    bytes_received: u64,
+    prefix_hash: String,
+) -> Result<(), TransferError> {
+    connection
+        .send_frame(Frame::ResumeStatus(ResumeStatus {
+            transfer_id: transfer_id.clone(),
+            next_chunk_index,
+            bytes_received,
+            prefix_hash,
+        }))
+        .await
+}
+
+async fn send_complete_ack(
+    connection: &mut dyn FrameConnection,
+    transfer_id: &TransferId,
+) -> Result<(), TransferError> {
+    connection
+        .send_frame(Frame::CompleteAck(CompleteAck {
+            transfer_id: transfer_id.clone(),
+        }))
+        .await
 }
 
 async fn hash_file(path: &Path) -> Result<String, TransferError> {
