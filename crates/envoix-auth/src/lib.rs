@@ -51,7 +51,10 @@ impl PairingConfig {
     /// Validates pairing config invariants that are independent of transport.
     pub fn validate(&self) -> Result<(), AuthError> {
         match self {
-            Self::Spake2SharedToken { token } => validate_shared_token(token),
+            Self::Spake2SharedToken { token } if is_valid_shared_token(token) => Ok(()),
+            Self::Spake2SharedToken { .. } => Err(CoreError::InvalidInput(format!(
+                "SPAKE2 shared token must be at least {MIN_SHARED_TOKEN_LEN} ASCII bytes"
+            ))),
         }
     }
 }
@@ -163,20 +166,6 @@ fn shared_token(config: &PairingConfig) -> &str {
     match config {
         PairingConfig::Spake2SharedToken { token } => token,
     }
-}
-
-fn validate_shared_token(token: &str) -> Result<(), AuthError> {
-    if !token.is_ascii() {
-        return Err(CoreError::InvalidInput(
-            "SPAKE2 shared token must be ASCII".into(),
-        ));
-    }
-    if !is_valid_shared_token(token) {
-        return Err(CoreError::InvalidInput(format!(
-            "SPAKE2 shared token must be at least {MIN_SHARED_TOKEN_LEN} ASCII bytes"
-        )));
-    }
-    Ok(())
 }
 
 fn random_nonce() -> Result<[u8; NONCE_LEN], AuthError> {
