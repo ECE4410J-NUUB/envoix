@@ -1,10 +1,10 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use envoix_qr::QrInvitePayload;
 
@@ -50,8 +50,6 @@ fn cli_wrong_token_does_not_finalize_or_create_sidecar() {
 
     assert!(!output_dir.join("secret.txt").exists());
     assert_no_sidecars(&output_dir);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -94,7 +92,6 @@ fn qr_invite_loopback() {
         fs::read(output_dir.join("qr_test.txt")).unwrap(),
         source_text
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 // The next two tests pass a nonexistent file ("ignored.txt") on purpose: invite
@@ -188,8 +185,6 @@ fn run_cli_loopback() {
     }
 
     assert_eq!(fs::read(output_dir.join("hello.txt")).unwrap(), source_text);
-
-    fs::remove_dir_all(root).unwrap();
 }
 
 struct SpawnedReceiver {
@@ -382,10 +377,27 @@ fn assert_no_sidecars(output_dir: &Path) {
     assert!(sidecars.is_empty(), "unexpected sidecars: {sidecars:?}");
 }
 
-fn unique_test_dir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("envoix-cli-test-{}-{nanos}", std::process::id()))
+struct TestDir(tempfile::TempDir);
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+fn unique_test_dir() -> TestDir {
+    TestDir(
+        tempfile::Builder::new()
+            .prefix("envoix-cli-test-")
+            .tempdir()
+            .unwrap(),
+    )
 }

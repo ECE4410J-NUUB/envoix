@@ -918,8 +918,7 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -956,8 +955,6 @@ mod tests {
             tokio::fs::read(output_dir.join("hello.txt")).await.unwrap(),
             b"hello over frames"
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -998,8 +995,6 @@ mod tests {
                 .unwrap()
         );
         assert_no_sidecars(&output_dir).await;
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1072,8 +1067,6 @@ mod tests {
                 .unwrap(),
             b"resume over two connections"
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1132,8 +1125,6 @@ mod tests {
             source_bytes
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1191,8 +1182,6 @@ mod tests {
                 .unwrap(),
             source_bytes
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1251,8 +1240,6 @@ mod tests {
             tokio::fs::read(output_dir.join("fresh.txt")).await.unwrap(),
             source_bytes
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1320,8 +1307,6 @@ mod tests {
                 .is_none()
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1389,8 +1374,6 @@ mod tests {
                 .is_none()
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1431,8 +1414,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1469,8 +1450,6 @@ mod tests {
 
         assert_eq!(send_summary.bytes_transferred, 12);
         assert_eq!(receive_summary.bytes_transferred, 12);
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     struct MemoryFrameConnection {
@@ -1632,17 +1611,28 @@ mod tests {
         }
     }
 
-    fn unique_test_dir() -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+    struct TestDir(tempfile::TempDir);
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
-            "envoix-transfer-test-{}-{nanos}-{counter}",
-            std::process::id()
-        ))
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn unique_test_dir() -> TestDir {
+        TestDir(
+            tempfile::Builder::new()
+                .prefix("envoix-transfer-test-")
+                .tempdir()
+                .unwrap(),
+        )
     }
 }
