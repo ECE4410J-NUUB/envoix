@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use envoix_error::CoreError;
-use envoix_protocol::{Chunk, Frame};
+use envoix_protocol::Frame;
 use envoix_types::TransferId;
 
 /// Error type returned by transport implementations.
@@ -30,15 +30,7 @@ pub trait FrameConnection: Send {
         index: u64,
         offset: u64,
         bytes: &[u8],
-    ) -> Result<(), TransportError> {
-        self.send_frame(Frame::Chunk(Chunk {
-            transfer_id: transfer_id.clone(),
-            index,
-            offset,
-            bytes: bytes.to_vec(),
-        }))
-        .await
-    }
+    ) -> Result<(), TransportError>;
 
     /// Receives one protocol frame.
     async fn recv_frame(&mut self) -> Result<Frame, TransportError>;

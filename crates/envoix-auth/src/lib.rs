@@ -256,10 +256,10 @@ fn confirmation_proof(
     transcript: &ConfirmationTranscript<'_>,
     proof_label: &[u8],
 ) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(shared_key).expect("HMAC-SHA256 accepts keys of any length");
-    update_confirmation_mac(&mut mac, transcript, proof_label);
-    mac.finalize().into_bytes().to_vec()
+    confirmation_mac(shared_key, transcript, proof_label)
+        .finalize()
+        .into_bytes()
+        .to_vec()
 }
 
 fn verify_confirmation(
@@ -268,13 +268,20 @@ fn verify_confirmation(
     proof_label: &[u8],
     received_proof: &[u8],
 ) -> Result<(), AuthError> {
-    let expected = confirmation_proof(shared_key, transcript, proof_label);
-    if expected != received_proof {
-        return Err(CoreError::Crypto(
-            "SPAKE2 confirmation proof mismatch".into(),
-        ));
-    }
-    Ok(())
+    confirmation_mac(shared_key, transcript, proof_label)
+        .verify_slice(received_proof)
+        .map_err(|_| CoreError::Crypto("SPAKE2 confirmation proof mismatch".into()))
+}
+
+fn confirmation_mac(
+    shared_key: &[u8],
+    transcript: &ConfirmationTranscript<'_>,
+    proof_label: &[u8],
+) -> HmacSha256 {
+    let mut mac =
+        HmacSha256::new_from_slice(shared_key).expect("HMAC-SHA256 accepts keys of any length");
+    update_confirmation_mac(&mut mac, transcript, proof_label);
+    mac
 }
 
 fn update_confirmation_mac(
@@ -303,8 +310,9 @@ fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use envoix_protocol::{Frame, Ready};
+    use envoix_protocol::{Chunk, Frame, Ready};
     use envoix_transport::TransportError;
+    use envoix_types::TransferId;
     use tokio::sync::mpsc;
 
     const TOKEN: &str = "abcdefghijkl";
@@ -439,6 +447,22 @@ mod tests {
                 .map_err(|error| CoreError::Transport(error.to_string()))
         }
 
+        async fn send_chunk(
+            &mut self,
+            transfer_id: &TransferId,
+            index: u64,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<(), TransportError> {
+            self.send_frame(Frame::Chunk(Chunk {
+                transfer_id: transfer_id.clone(),
+                index,
+                offset,
+                bytes: bytes.to_vec(),
+            }))
+            .await
+        }
+
         async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
             self.rx
                 .recv()
@@ -466,6 +490,16 @@ mod tests {
         #[async_trait]
         impl FrameConnection for NoBindingConnection {
             async fn send_frame(&mut self, _frame: Frame) -> Result<(), TransportError> {
+                Ok(())
+            }
+
+            async fn send_chunk(
+                &mut self,
+                _transfer_id: &TransferId,
+                _index: u64,
+                _offset: u64,
+                _bytes: &[u8],
+            ) -> Result<(), TransportError> {
                 Ok(())
             }
 

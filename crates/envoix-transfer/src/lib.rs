@@ -1544,6 +1544,22 @@ mod tests {
                 .map_err(|error| CoreError::Transport(error.to_string()))
         }
 
+        async fn send_chunk(
+            &mut self,
+            transfer_id: &TransferId,
+            index: u64,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<(), CoreError> {
+            self.send_frame(Frame::Chunk(Chunk {
+                transfer_id: transfer_id.clone(),
+                index,
+                offset,
+                bytes: bytes.to_vec(),
+            }))
+            .await
+        }
+
         async fn recv_frame(&mut self) -> Result<Frame, CoreError> {
             self.rx
                 .recv()

@@ -155,7 +155,18 @@ impl FrameConnection for QuicFrameConnection {
         self.send
             .finish()
             .map_err(|error| CoreError::Transport(error.to_string()))?;
-        let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, self.send.stopped()).await;
+        match tokio::time::timeout(STREAM_DRAIN_TIMEOUT, self.send.stopped()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!("QUIC stream drain failed during close: {error}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?STREAM_DRAIN_TIMEOUT,
+                    "QUIC stream drain timed out during close"
+                );
+            }
+        }
         Ok(())
     }
 }

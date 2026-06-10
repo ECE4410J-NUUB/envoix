@@ -493,6 +493,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

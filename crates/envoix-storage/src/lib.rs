@@ -188,6 +188,7 @@ impl LocalFileStorage {
         let mut file = File::create(&temp_state_path).await?;
         file.write_all(&bytes).await?;
         file.flush().await?;
+        file.sync_all().await?;
         drop(file);
         fs::rename(temp_state_path, state_path).await?;
         Ok(())
