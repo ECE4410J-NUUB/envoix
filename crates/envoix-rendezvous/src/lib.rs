@@ -11,9 +11,11 @@ pub mod capabilities;
 pub mod error;
 pub mod state;
 
-pub use capabilities::{Capability, CapabilityHash, ReceiverCap, SenderCap};
+mod hex;
+
+pub use capabilities::{Capability, CapabilityHash};
 pub use error::{Error, Result};
 pub use state::{
-    Candidate, CandidatePublish, CandidateKind, PeerMetadata, Session, SessionId,
-    SessionRegistry, SessionState, Transport,
+    Candidate, CandidateKind, CandidatePublish, PeerMetadata, RegistryConfig, SessionId,
+    SessionRegistry, Transport,
 };

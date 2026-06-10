@@ -8,3 +8,6 @@ license.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
