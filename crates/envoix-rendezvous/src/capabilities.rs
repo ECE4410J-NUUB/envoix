@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::hex::{fmt_hex_lower, parse_hex_16};
+use crate::hex::{fmt_hex_lower, parse_hex};
 use crate::Error;
 
 const HASH_LEN: usize = 32;
@@ -25,7 +25,7 @@ pub struct Capability {
 impl Capability {
     /// Parse a 32-character lowercase hex string into a capability.
     pub fn from_hex(s: &str) -> Result<Self, Error> {
-        match parse_hex_16(s) {
+        match parse_hex::<16>(s) {
             Some(bytes) => Ok(Self { bytes }),
             None => Err(Error::InvalidRequest(
                 "capability must be 32 lowercase hex characters".into(),
@@ -56,6 +56,22 @@ impl fmt::Display for Capability {
 #[derive(Clone)]
 pub struct CapabilityHash {
     bytes: [u8; HASH_LEN],
+}
+
+impl CapabilityHash {
+    /// Parse a 64-character lowercase hex BLAKE3 digest.
+    ///
+    /// Wire form used at registration: the receiver pre-hashes `sender_cap`
+    /// locally and sends only the hash (design §4.1), so the server can
+    /// store it without ever seeing the raw sender capability.
+    pub fn from_hex(s: &str) -> Result<Self, Error> {
+        match parse_hex::<HASH_LEN>(s) {
+            Some(bytes) => Ok(Self { bytes }),
+            None => Err(Error::InvalidRequest(
+                "capability hash must be 64 lowercase hex characters".into(),
+            )),
+        }
+    }
 }
 
 impl PartialEq for CapabilityHash {
@@ -143,6 +159,28 @@ mod tests {
         let a = Capability::from_hex(VALID_HEX_A).unwrap().hash();
         let b = Capability::from_hex(VALID_HEX_B).unwrap().hash();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_from_hex_round_trips_with_local_hash() {
+        // Hash computed locally must equal the same digest parsed from wire hex.
+        let local = Capability::from_hex(VALID_HEX_A).unwrap().hash();
+        let wire_hex = blake3::hash(&parse_hex::<16>(VALID_HEX_A).unwrap())
+            .to_hex()
+            .to_string();
+        let parsed = CapabilityHash::from_hex(&wire_hex).unwrap();
+        assert_eq!(local, parsed);
+    }
+
+    #[test]
+    fn hash_from_hex_rejects_invalid() {
+        for bad in ["", "abcd", &"0".repeat(63), &"0".repeat(65), &"G".repeat(64)] {
+            assert!(
+                matches!(CapabilityHash::from_hex(bad), Err(Error::InvalidRequest(_))),
+                "expected InvalidRequest for {:?}",
+                bad
+            );
+        }
     }
 
     #[test]

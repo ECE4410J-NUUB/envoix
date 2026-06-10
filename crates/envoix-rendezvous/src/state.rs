@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 
 use crate::capabilities::CapabilityHash;
-use crate::hex::{fmt_hex_lower, parse_hex_16};
+use crate::hex::{fmt_hex_lower, parse_hex};
 use crate::Error;
 
 const SESSION_ID_REF_HEX_CHARS: usize = 8;
@@ -35,7 +35,7 @@ pub struct SessionId {
 
 impl SessionId {
     pub fn from_hex(s: &str) -> Result<Self, Error> {
-        match parse_hex_16(s) {
+        match parse_hex::<16>(s) {
             Some(bytes) => Ok(Self { bytes }),
             None => Err(Error::InvalidRequest(
                 "session_id must be 32 lowercase hex characters".into(),
@@ -196,6 +196,9 @@ impl SessionRegistry {
 
     /// Register a new pending session. Receiver supplies metadata at this
     /// point; sender metadata arrives at [`join`](Self::join).
+    ///
+    /// Returns the effective wall-clock expiry (requested TTL clamped to
+    /// `max_ttl`) for the API layer to serialise into the response.
     pub async fn register(
         &self,
         id: SessionId,
@@ -203,7 +206,7 @@ impl SessionRegistry {
         sender_cap_hash: CapabilityHash,
         metadata: PeerMetadata,
         ttl: Option<Duration>,
-    ) -> Result<(), Error> {
+    ) -> Result<SystemTime, Error> {
         // Hash-level distinctness is the strongest check available at this
         // layer; raw-string distinctness (id vs cap hex) is the API layer's
         // responsibility (it sees the unparsed strings).
@@ -247,7 +250,7 @@ impl SessionRegistry {
                 }),
             }),
         );
-        Ok(())
+        Ok(SystemTime::now() + ttl)
     }
 
     /// Sender joins the session. Idempotent: a second join from the same

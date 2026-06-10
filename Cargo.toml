@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "apps/envoix-server",
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-session",
@@ -35,13 +36,17 @@ envoix-storage = { path = "crates/envoix-storage" }
 envoix-types = { path = "crates/envoix-types" }
 envoix-error = { path = "crates/envoix-error" }
 async-trait = "0.1"
+axum = "0.8"
+axum-test = "18"
 blake3 = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 hmac = "0.12"
+humantime = "2"
 log = "0.4"
 quinn = "0.11"
 rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,3 +54,6 @@ sha2 = "0.10"
 spake2 = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
