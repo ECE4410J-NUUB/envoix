@@ -20,9 +20,9 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 
+use crate::Error;
 use crate::capabilities::CapabilityHash;
 use crate::hex::{fmt_hex_lower, parse_hex};
-use crate::Error;
 
 const SESSION_ID_REF_HEX_CHARS: usize = 8;
 
@@ -151,7 +151,9 @@ struct Tombstone {
 }
 
 enum SessionSlot {
-    Live(Session),
+    // Boxed: a Session (~424 bytes with its Mutex'd inner) would otherwise
+    // size every slot, making tombstones waste ~400 bytes each.
+    Live(Box<Session>),
     Tombstoned(Tombstone),
 }
 
@@ -250,7 +252,9 @@ impl SessionRegistry {
             ));
         }
 
-        let ttl = ttl.unwrap_or(self.config.default_ttl).min(self.config.max_ttl);
+        let ttl = ttl
+            .unwrap_or(self.config.default_ttl)
+            .min(self.config.max_ttl);
         let now_mono = Instant::now();
 
         let mut slots = self.slots.write().await;
@@ -264,15 +268,12 @@ impl SessionRegistry {
             return Err(Error::CapacityExceeded);
         }
         if slots.contains_key(&id) {
-            return Err(Error::Conflict(format!(
-                "session id {} already exists",
-                id
-            )));
+            return Err(Error::Conflict(format!("session id {} already exists", id)));
         }
 
         slots.insert(
             id,
-            SessionSlot::Live(Session {
+            SessionSlot::Live(Box::new(Session {
                 receiver_cap_hash,
                 sender_cap_hash,
                 ttl,
@@ -285,7 +286,7 @@ impl SessionRegistry {
                     sender_candidates: Vec::new(),
                     next_sequence: 1,
                 }),
-            }),
+            })),
         );
         self.counters.created_total.fetch_add(1, Ordering::Relaxed);
         Ok(SystemTime::now() + ttl)
@@ -423,8 +424,11 @@ impl SessionRegistry {
                 Some(inner.receiver_metadata.clone()),
             ),
         };
-        let candidates: Vec<Candidate> =
-            bucket.iter().filter(|c| c.sequence > since).cloned().collect();
+        let candidates: Vec<Candidate> = bucket
+            .iter()
+            .filter(|c| c.sequence > since)
+            .cloned()
+            .collect();
 
         touch_last_seen(&mut inner, role);
         inner.expires_at_mono = Instant::now() + session.ttl;
@@ -483,10 +487,10 @@ impl SessionRegistry {
                 SessionSlot::Live(s) => {
                     // try_lock so an in-flight request doesn't deadlock the
                     // sweep; the request itself runs opportunistic expiry.
-                    if let Ok(inner) = s.inner.try_lock() {
-                        if inner.expires_at_mono <= now {
-                            to_tombstone.push(id.clone());
-                        }
+                    if let Ok(inner) = s.inner.try_lock()
+                        && inner.expires_at_mono <= now
+                    {
+                        to_tombstone.push(id.clone());
                     }
                 }
                 SessionSlot::Tombstoned(t) => {
@@ -592,8 +596,11 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────
 
     fn hex_of(c: char) -> String {
-        debug_assert!(c.is_ascii_hexdigit() && !c.is_ascii_uppercase(), "must be lowercase hex");
-        std::iter::repeat(c).take(32).collect()
+        debug_assert!(
+            c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+            "must be lowercase hex"
+        );
+        std::iter::repeat_n(c, 32).collect()
     }
 
     fn make_id(c: char) -> SessionId {
@@ -691,9 +698,15 @@ mod tests {
         let recv = make_hash('a');
         let sender = make_hash('b');
 
-        reg.register(id.clone(), recv.clone(), sender.clone(), make_metadata(), None)
-            .await
-            .unwrap();
+        reg.register(
+            id.clone(),
+            recv.clone(),
+            sender.clone(),
+            make_metadata(),
+            None,
+        )
+        .await
+        .unwrap();
         reg.join(&id, &sender, make_metadata()).await.unwrap();
 
         let recv_cand = reg
@@ -757,7 +770,13 @@ mod tests {
         register_default(&reg, &make_id('1')).await;
         register_default(&reg, &make_id('2')).await;
         let err = reg
-            .register(make_id('3'), make_hash('a'), make_hash('b'), make_metadata(), None)
+            .register(
+                make_id('3'),
+                make_hash('a'),
+                make_hash('b'),
+                make_metadata(),
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, Error::CapacityExceeded));
@@ -863,11 +882,17 @@ mod tests {
         let all = reg.poll_candidates(&id, &sender, 0).await.unwrap();
         assert_eq!(all.candidates.len(), 2);
 
-        let after_c1 = reg.poll_candidates(&id, &sender, c1.sequence).await.unwrap();
+        let after_c1 = reg
+            .poll_candidates(&id, &sender, c1.sequence)
+            .await
+            .unwrap();
         assert_eq!(after_c1.candidates.len(), 1);
         assert_eq!(after_c1.candidates[0].sequence, c2.sequence);
 
-        let after_c2 = reg.poll_candidates(&id, &sender, c2.sequence).await.unwrap();
+        let after_c2 = reg
+            .poll_candidates(&id, &sender, c2.sequence)
+            .await
+            .unwrap();
         assert!(after_c2.candidates.is_empty());
     }
 
@@ -961,7 +986,13 @@ mod tests {
 
         // Capacity rejection and authz rejection both count.
         let _ = reg
-            .register(make_id('2'), make_hash('d'), make_hash('e'), make_metadata(), None)
+            .register(
+                make_id('2'),
+                make_hash('d'),
+                make_hash('e'),
+                make_metadata(),
+                None,
+            )
             .await
             .unwrap_err();
         let _ = reg

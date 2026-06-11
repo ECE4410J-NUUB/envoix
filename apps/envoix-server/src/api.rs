@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use envoix_rendezvous::{
-    Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error,
-    PeerMetadata, SessionId, SessionRegistry, Transport,
+    Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
+    SessionId, SessionRegistry, Transport,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -96,7 +96,10 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             reject_during_shutdown,
         ))
-        .layer(middleware::from_fn_with_state(state.clone(), count_requests))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            count_requests,
+        ))
         .with_state(state)
 }
 
@@ -116,8 +119,8 @@ impl IntoResponse for ApiError {
         if matches!(self.0, Error::Internal(_)) {
             tracing::error!(error = %self.0, "internal error");
         }
-        let status = StatusCode::from_u16(self.0.http_status())
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let body = Json(serde_json::json!({
             "code": self.0.code(),
             "message": self.0.to_string(),
@@ -322,16 +325,14 @@ async fn register(
     AppJson(body): AppJson<RegisterBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let receiver_cap_hex = bearer_token(&headers)?;
-    let receiver_cap =
-        Capability::from_hex(receiver_cap_hex).map_err(|_| Error::Unauthorized)?;
+    let receiver_cap = Capability::from_hex(receiver_cap_hex).map_err(|_| Error::Unauthorized)?;
 
     // Raw-string distinctness (design §3.1) is checked here because the
     // library only ever sees hashes.
     if body.session_id == receiver_cap_hex {
-        return Err(Error::InvalidRequest(
-            "session_id must differ from receiver_cap".into(),
-        )
-        .into());
+        return Err(
+            Error::InvalidRequest("session_id must differ from receiver_cap".into()).into(),
+        );
     }
 
     check_version(&body.peer_metadata)?;
@@ -366,7 +367,10 @@ async fn join(
     let session_id = SessionId::from_hex(&id)?;
     let metadata = peer_metadata(&headers, body.peer_metadata);
 
-    state.registry.join(&session_id, &cap.hash(), metadata).await?;
+    state
+        .registry
+        .join(&session_id, &cap.hash(), metadata)
+        .await?;
 
     tracing::info!(session_ref = &id[..8], "sender joined");
     Ok(Json(serde_json::json!({})))
@@ -400,10 +404,9 @@ async fn publish_candidate(
 
     // An ipv6_global candidate must actually carry an IPv6 address.
     if matches!(body.kind, KindBody::Ipv6Global) && !body.addr.is_ipv6() {
-        return Err(Error::InvalidRequest(
-            "ipv6_global candidate requires an IPv6 address".into(),
-        )
-        .into());
+        return Err(
+            Error::InvalidRequest("ipv6_global candidate requires an IPv6 address".into()).into(),
+        );
     }
 
     let stored = state
@@ -420,7 +423,11 @@ async fn publish_candidate(
         )
         .await?;
 
-    tracing::debug!(session_ref = &id[..8], sequence = stored.sequence, "candidate published");
+    tracing::debug!(
+        session_ref = &id[..8],
+        sequence = stored.sequence,
+        "candidate published"
+    );
     Ok(Json(CandidateJson::from(stored)))
 }
 
@@ -442,7 +449,11 @@ async fn poll_candidates(
 
     Ok(Json(PollResponse {
         peer_metadata: result.peer_metadata.map(PeerMetadataJson::from),
-        candidates: result.candidates.into_iter().map(CandidateJson::from).collect(),
+        candidates: result
+            .candidates
+            .into_iter()
+            .map(CandidateJson::from)
+            .collect(),
     }))
 }
 
@@ -526,7 +537,7 @@ fn observed_http_addr(headers: &HeaderMap) -> Option<SocketAddr> {
             headers
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(','). next())
+                .and_then(|s| s.split(',').next())
                 .and_then(|s| s.trim().parse::<IpAddr>().ok())
         })?;
     Some(SocketAddr::new(ip, 0))
@@ -548,7 +559,7 @@ mod tests {
     use super::*;
     use axum_test::TestServer;
     use envoix_rendezvous::RegistryConfig;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     const SESSION_ID: &str = "11111111111111111111111111111111";
     const RECEIVER_CAP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -8,8 +8,8 @@
 
 use std::fmt;
 
-use crate::hex::{fmt_hex_lower, parse_hex};
 use crate::Error;
+use crate::hex::{fmt_hex_lower, parse_hex};
 
 const HASH_LEN: usize = 32;
 const HASH_REF_HEX_CHARS: usize = 8;
@@ -36,7 +36,9 @@ impl Capability {
     /// BLAKE3 hash of the capability bytes. Suitable for at-rest storage.
     pub fn hash(&self) -> CapabilityHash {
         let h = blake3::hash(&self.bytes);
-        CapabilityHash { bytes: *h.as_bytes() }
+        CapabilityHash {
+            bytes: *h.as_bytes(),
+        }
     }
 }
 
@@ -120,9 +122,9 @@ mod tests {
         for bad in [
             "",
             "short",
-            "0123456789abcdef0123456789abcdeg",       // non-hex 'g'
-            "0123456789ABCDEF0123456789abcdef",       // uppercase
-            "0123456789abcdef0123456789abcdef00",     // too long
+            "0123456789abcdef0123456789abcdeg",   // non-hex 'g'
+            "0123456789ABCDEF0123456789abcdef",   // uppercase
+            "0123456789abcdef0123456789abcdef00", // too long
         ] {
             assert!(
                 matches!(Capability::from_hex(bad), Err(Error::InvalidRequest(_))),
@@ -174,7 +176,13 @@ mod tests {
 
     #[test]
     fn hash_from_hex_rejects_invalid() {
-        for bad in ["", "abcd", &"0".repeat(63), &"0".repeat(65), &"G".repeat(64)] {
+        for bad in [
+            "",
+            "abcd",
+            &"0".repeat(63),
+            &"0".repeat(65),
+            &"G".repeat(64),
+        ] {
             assert!(
                 matches!(CapabilityHash::from_hex(bad), Err(Error::InvalidRequest(_))),
                 "expected InvalidRequest for {:?}",
@@ -192,6 +200,10 @@ mod tests {
         assert!(s.ends_with(')'));
         let inner = &s["CapHashRef(".len()..s.len() - 1];
         assert_eq!(inner.len(), 8);
-        assert!(inner.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 }
