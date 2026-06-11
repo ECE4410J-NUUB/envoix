@@ -20,12 +20,12 @@ use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
     SessionId, SessionRegistry, Transport,
 };
+// SSoT: the wire version the whole workspace speaks (design §3.3
+// `protocol_versions`). Never redeclare locally — a future bump in
+// envoix-types must reach this server's 422 check automatically.
+use envoix_types::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
-
-/// Wire protocol version this server speaks (design §3.3
-/// `protocol_versions`).
-const PROTOCOL_VERSION: u32 = 1;
 
 /// Request body cap per design §4.6 robustness budget.
 const BODY_LIMIT_BYTES: usize = 64 * 1024;

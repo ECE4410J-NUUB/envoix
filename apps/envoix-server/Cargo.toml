@@ -9,6 +9,7 @@ axum.workspace = true
 blake3.workspace = true
 clap.workspace = true
 envoix-rendezvous.workspace = true
+envoix-types.workspace = true
 humantime.workspace = true
 serde.workspace = true
 serde_json.workspace = true

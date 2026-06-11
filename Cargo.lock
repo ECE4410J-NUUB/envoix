@@ -592,6 +592,7 @@ dependencies = [
  "blake3",
  "clap",
  "envoix-rendezvous",
+ "envoix-types",
  "humantime",
  "reqwest",
  "serde",
