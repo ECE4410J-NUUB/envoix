@@ -3,7 +3,7 @@
 use envoix_error::CoreError;
 use envoix_protocol::{AuthFrame, Frame, Spake2Confirm, Spake2Message, Spake2Start};
 use envoix_transport::FrameConnection;
-use envoix_types::{PROTOCOL_VERSION, PeerRole};
+use envoix_types::{PROTOCOL_VERSION, PeerRole, is_valid_shared_token};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
@@ -51,7 +51,10 @@ impl PairingConfig {
     /// Validates pairing config invariants that are independent of transport.
     pub fn validate(&self) -> Result<(), AuthError> {
         match self {
-            Self::Spake2SharedToken { token } => validate_shared_token(token),
+            Self::Spake2SharedToken { token } if is_valid_shared_token(token) => Ok(()),
+            Self::Spake2SharedToken { .. } => Err(CoreError::InvalidInput(format!(
+                "SPAKE2 shared token must be at least {MIN_SHARED_TOKEN_LEN} ASCII bytes"
+            ))),
         }
     }
 }
@@ -165,20 +168,6 @@ fn shared_token(config: &PairingConfig) -> &str {
     }
 }
 
-fn validate_shared_token(token: &str) -> Result<(), AuthError> {
-    if !token.is_ascii() {
-        return Err(CoreError::InvalidInput(
-            "SPAKE2 shared token must be ASCII".into(),
-        ));
-    }
-    if token.len() < MIN_SHARED_TOKEN_LEN {
-        return Err(CoreError::InvalidInput(format!(
-            "SPAKE2 shared token must be at least {MIN_SHARED_TOKEN_LEN} ASCII bytes"
-        )));
-    }
-    Ok(())
-}
-
 fn random_nonce() -> Result<[u8; NONCE_LEN], AuthError> {
     let mut nonce = [0_u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|error| CoreError::Crypto(error.to_string()))?;
@@ -256,10 +245,10 @@ fn confirmation_proof(
     transcript: &ConfirmationTranscript<'_>,
     proof_label: &[u8],
 ) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(shared_key).expect("HMAC-SHA256 accepts keys of any length");
-    update_confirmation_mac(&mut mac, transcript, proof_label);
-    mac.finalize().into_bytes().to_vec()
+    confirmation_mac(shared_key, transcript, proof_label)
+        .finalize()
+        .into_bytes()
+        .to_vec()
 }
 
 fn verify_confirmation(
@@ -268,13 +257,20 @@ fn verify_confirmation(
     proof_label: &[u8],
     received_proof: &[u8],
 ) -> Result<(), AuthError> {
-    let expected = confirmation_proof(shared_key, transcript, proof_label);
-    if expected != received_proof {
-        return Err(CoreError::Crypto(
-            "SPAKE2 confirmation proof mismatch".into(),
-        ));
-    }
-    Ok(())
+    confirmation_mac(shared_key, transcript, proof_label)
+        .verify_slice(received_proof)
+        .map_err(|_| CoreError::Crypto("SPAKE2 confirmation proof mismatch".into()))
+}
+
+fn confirmation_mac(
+    shared_key: &[u8],
+    transcript: &ConfirmationTranscript<'_>,
+    proof_label: &[u8],
+) -> HmacSha256 {
+    let mut mac =
+        HmacSha256::new_from_slice(shared_key).expect("HMAC-SHA256 accepts keys of any length");
+    update_confirmation_mac(&mut mac, transcript, proof_label);
+    mac
 }
 
 fn update_confirmation_mac(
@@ -303,8 +299,9 @@ fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use envoix_protocol::{Frame, Ready};
+    use envoix_protocol::{Chunk, Frame, Ready};
     use envoix_transport::TransportError;
+    use envoix_types::TransferId;
     use tokio::sync::mpsc;
 
     const TOKEN: &str = "abcdefghijkl";
@@ -439,6 +436,22 @@ mod tests {
                 .map_err(|error| CoreError::Transport(error.to_string()))
         }
 
+        async fn send_chunk(
+            &mut self,
+            transfer_id: &TransferId,
+            index: u64,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<(), TransportError> {
+            self.send_frame(Frame::Chunk(Chunk {
+                transfer_id: transfer_id.clone(),
+                index,
+                offset,
+                bytes: bytes.to_vec(),
+            }))
+            .await
+        }
+
         async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
             self.rx
                 .recv()
@@ -466,6 +479,16 @@ mod tests {
         #[async_trait]
         impl FrameConnection for NoBindingConnection {
             async fn send_frame(&mut self, _frame: Frame) -> Result<(), TransportError> {
+                Ok(())
+            }
+
+            async fn send_chunk(
+                &mut self,
+                _transfer_id: &TransferId,
+                _index: u64,
+                _offset: u64,
+                _bytes: &[u8],
+            ) -> Result<(), TransportError> {
                 Ok(())
             }
 
