@@ -4,19 +4,21 @@
 //! `envoix-rendezvous`; this module translates HTTP to library calls and
 //! library errors to the JSON envelope of design §3.4.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
-use axum::extract::{DefaultBodyLimit, FromRequest, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use envoix_rendezvous::{
-    Capability, CapabilityHash, Error, PeerMetadata, SessionId, SessionRegistry,
+    Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error,
+    PeerMetadata, SessionId, SessionRegistry, Transport,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -28,17 +30,31 @@ const PROTOCOL_VERSION: u32 = 1;
 /// Request body cap per design §4.6 robustness budget.
 const BODY_LIMIT_BYTES: usize = 64 * 1024;
 
+/// HTTP-level request counters for `/api/v1/stats` (design §4.8).
+#[derive(Default)]
+struct RequestCounters {
+    total: AtomicU64,
+    by_status: Mutex<HashMap<u16, u64>>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     registry: Arc<SessionRegistry>,
     shutting_down: Arc<AtomicBool>,
+    /// BLAKE3 of the admin token; `None` disables `/api/v1/stats`.
+    admin_token_hash: Option<blake3::Hash>,
+    request_counters: Arc<RequestCounters>,
+    started_at: Instant,
 }
 
 impl AppState {
-    pub fn new(registry: SessionRegistry) -> Self {
+    pub fn new(registry: SessionRegistry, admin_token: Option<String>) -> Self {
         Self {
             registry: Arc::new(registry),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            admin_token_hash: admin_token.map(|t| blake3::hash(t.as_bytes())),
+            request_counters: Arc::new(RequestCounters::default()),
+            started_at: Instant::now(),
         }
     }
 
@@ -46,6 +62,20 @@ impl AppState {
     /// from the signal handler.
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Relaxed);
+    }
+
+    /// Background TTL sweep per design §4.4 — non-panicking by
+    /// construction; recovery from task death is the supervisor's job.
+    pub fn spawn_ttl_sweep(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let registry = self.registry.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                registry.sweep_expired().await;
+                tracing::debug!("ttl sweep completed");
+            }
+        })
     }
 }
 
@@ -55,12 +85,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sessions", post(register))
         .route("/api/v1/sessions/{id}/join", post(join))
         .route("/api/v1/sessions/{id}", delete(close))
+        .route(
+            "/api/v1/sessions/{id}/candidates",
+            post(publish_candidate).get(poll_candidates),
+        )
+        .route("/api/v1/stats", get(stats))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             reject_during_shutdown,
         ))
+        .layer(middleware::from_fn_with_state(state.clone(), count_requests))
         .with_state(state)
 }
 
@@ -128,6 +164,19 @@ async fn reject_during_shutdown(
     next.run(req).await
 }
 
+/// Outermost layer: counts every response by status for `/api/v1/stats`.
+async fn count_requests(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let res = next.run(req).await;
+    state.request_counters.total.fetch_add(1, Ordering::Relaxed);
+    let mut by_status = state
+        .request_counters
+        .by_status
+        .lock()
+        .expect("status-counter mutex poisoned");
+    *by_status.entry(res.status().as_u16()).or_insert(0) += 1;
+    res
+}
+
 // ── Request/response shapes ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -157,6 +206,108 @@ struct RegisterResponse {
 #[derive(Deserialize)]
 struct JoinBody {
     peer_metadata: PeerMetadataBody,
+}
+
+/// Candidate `kind` wire strings (design §3.3). Unknown kinds fail serde
+/// → `400 invalid_request`.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum KindBody {
+    Host,
+    Ipv6Global,
+}
+
+impl From<KindBody> for CandidateKind {
+    fn from(k: KindBody) -> Self {
+        match k {
+            KindBody::Host => CandidateKind::Host,
+            KindBody::Ipv6Global => CandidateKind::Ipv6Global,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransportBody {
+    Quic,
+}
+
+impl From<TransportBody> for Transport {
+    fn from(t: TransportBody) -> Self {
+        match t {
+            TransportBody::Quic => Transport::Quic,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PublishBody {
+    kind: KindBody,
+    transport: TransportBody,
+    addr: SocketAddr,
+    #[serde(default)]
+    priority: i32,
+}
+
+#[derive(Serialize)]
+struct CandidateJson {
+    kind: &'static str,
+    transport: &'static str,
+    addr: String,
+    priority: i32,
+    sequence: u64,
+    published_at: String,
+}
+
+impl From<Candidate> for CandidateJson {
+    fn from(c: Candidate) -> Self {
+        Self {
+            kind: match c.kind {
+                CandidateKind::Host => "host",
+                CandidateKind::Ipv6Global => "ipv6_global",
+            },
+            transport: match c.transport {
+                Transport::Quic => "quic",
+            },
+            addr: c.addr.to_string(),
+            priority: c.priority,
+            sequence: c.sequence,
+            published_at: humantime::format_rfc3339_seconds(c.published_at).to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PeerMetadataJson {
+    observed_http_addr: Option<String>,
+    protocol_versions: Vec<u32>,
+    strategies: Vec<String>,
+    first_seen: String,
+    last_seen: String,
+}
+
+impl From<PeerMetadata> for PeerMetadataJson {
+    fn from(m: PeerMetadata) -> Self {
+        Self {
+            observed_http_addr: m.observed_http_addr.map(|a| a.to_string()),
+            protocol_versions: m.protocol_versions,
+            strategies: m.strategies,
+            first_seen: humantime::format_rfc3339_seconds(m.first_seen).to_string(),
+            last_seen: humantime::format_rfc3339_seconds(m.last_seen).to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PollResponse {
+    peer_metadata: Option<PeerMetadataJson>,
+    candidates: Vec<CandidateJson>,
+}
+
+#[derive(Deserialize)]
+struct PollQuery {
+    #[serde(default)]
+    since: u64,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────
@@ -235,6 +386,111 @@ async fn close(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Publish one candidate. Returns the canonical stored record — for a
+/// duplicate `(kind, transport, addr)` that is the existing record with
+/// its original `sequence` (design §3.3 no-op rule), hence 200 not 201.
+async fn publish_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    AppJson(body): AppJson<PublishBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let cap = Capability::from_hex(bearer_token(&headers)?).map_err(|_| Error::Unauthorized)?;
+    let session_id = SessionId::from_hex(&id)?;
+
+    // An ipv6_global candidate must actually carry an IPv6 address.
+    if matches!(body.kind, KindBody::Ipv6Global) && !body.addr.is_ipv6() {
+        return Err(Error::InvalidRequest(
+            "ipv6_global candidate requires an IPv6 address".into(),
+        )
+        .into());
+    }
+
+    let stored = state
+        .registry
+        .publish_candidate(
+            &session_id,
+            &cap.hash(),
+            CandidatePublish {
+                kind: body.kind.into(),
+                transport: body.transport.into(),
+                addr: body.addr,
+                priority: body.priority,
+            },
+        )
+        .await?;
+
+    tracing::debug!(session_ref = &id[..8], sequence = stored.sequence, "candidate published");
+    Ok(Json(CandidateJson::from(stored)))
+}
+
+/// Short-poll for the other peer's candidates. Returns immediately;
+/// an empty `candidates` array is the normal "nothing new" answer.
+async fn poll_candidates(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PollQuery>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let cap = Capability::from_hex(bearer_token(&headers)?).map_err(|_| Error::Unauthorized)?;
+    let session_id = SessionId::from_hex(&id)?;
+
+    let result = state
+        .registry
+        .poll_candidates(&session_id, &cap.hash(), query.since)
+        .await?;
+
+    Ok(Json(PollResponse {
+        peer_metadata: result.peer_metadata.map(PeerMetadataJson::from),
+        candidates: result.candidates.into_iter().map(CandidateJson::from).collect(),
+    }))
+}
+
+/// Admin-token-gated stats (design §4.8). With no token configured the
+/// route answers plain 404 — indistinguishable from a nonexistent route.
+async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(expected) = &state.admin_token_hash else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let authorized = bearer_token(&headers)
+        .map(|t| blake3::hash(t.as_bytes()) == *expected) // blake3::Hash eq is constant-time
+        .unwrap_or(false);
+    if !authorized {
+        return ApiError(Error::Unauthorized).into_response();
+    }
+
+    let registry = state.registry.stats().await;
+    let by_status: HashMap<String, u64> = state
+        .request_counters
+        .by_status
+        .lock()
+        .expect("status-counter mutex poisoned")
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+
+    Json(serde_json::json!({
+        "uptime_seconds": state.started_at.elapsed().as_secs(),
+        "sessions": {
+            "active": registry.sessions_active,
+            "created_total": registry.created_total,
+            "expired_total": registry.expired_total,
+            "closed_total": registry.closed_total,
+            "rejected_capacity_total": registry.rejected_capacity_total,
+            "rejected_authz_total": registry.rejected_authz_total,
+        },
+        "candidates": {
+            "published_total": registry.candidates_published_total,
+            "active": registry.candidates_active,
+        },
+        "requests": {
+            "total": state.request_counters.total.load(Ordering::Relaxed),
+            "by_status": by_status,
+        },
+    }))
+    .into_response()
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Missing or malformed `Authorization` header is `401 unauthorized`
@@ -303,8 +559,17 @@ mod tests {
         blake3::hash(&[0xbb_u8; 16]).to_hex().to_string()
     }
 
+    const ADMIN_TOKEN: &str = "test-admin-token";
+
     fn test_server() -> (TestServer, AppState) {
-        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()));
+        test_server_with(RegistryConfig::default(), Some(ADMIN_TOKEN.into()))
+    }
+
+    fn test_server_with(
+        config: RegistryConfig,
+        admin_token: Option<String>,
+    ) -> (TestServer, AppState) {
+        let state = AppState::new(SessionRegistry::new(config), admin_token);
         let server = TestServer::new(router(state.clone())).unwrap();
         (server, state)
     }
@@ -495,10 +760,224 @@ mod tests {
         assert_eq!(body["code"], "service_shutting_down");
     }
 
+    fn candidate_body(addr: &str) -> Value {
+        json!({ "kind": "host", "transport": "quic", "addr": addr, "priority": 100 })
+    }
+
+    #[tokio::test]
+    async fn candidate_exchange_both_directions() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/join"))
+            .authorization_bearer(SENDER_CAP)
+            .json(&join_body())
+            .await
+            .assert_status_ok();
+
+        // Receiver publishes; sender publishes.
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&candidate_body("10.0.0.1:9000"))
+            .await;
+        res.assert_status_ok();
+        let recv_pub: Value = res.json();
+        assert_eq!(recv_pub["kind"], "host");
+        assert!(recv_pub["sequence"].as_u64().unwrap() >= 1);
+
+        server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(SENDER_CAP)
+            .json(&candidate_body("10.0.0.2:9000"))
+            .await
+            .assert_status_ok();
+
+        // Each side polls and sees only the other's candidate.
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(SENDER_CAP)
+            .await;
+        res.assert_status_ok();
+        let seen_by_sender: Value = res.json();
+        assert_eq!(seen_by_sender["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(seen_by_sender["candidates"][0]["addr"], "10.0.0.1:9000");
+        assert!(seen_by_sender["peer_metadata"].is_object());
+
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        let seen_by_recv: Value = res.json();
+        assert_eq!(seen_by_recv["candidates"][0]["addr"], "10.0.0.2:9000");
+    }
+
+    #[tokio::test]
+    async fn poll_since_filters_over_http() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+
+        for addr in ["10.0.0.1:9000", "10.0.0.2:9000"] {
+            server
+                .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+                .authorization_bearer(RECEIVER_CAP)
+                .json(&candidate_body(addr))
+                .await
+                .assert_status_ok();
+        }
+
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates?since=1"))
+            .authorization_bearer(SENDER_CAP)
+            .await;
+        let body: Value = res.json();
+        let candidates = body["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["sequence"], 2);
+    }
+
+    #[tokio::test]
+    async fn empty_poll_returns_empty_array() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["candidates"], json!([]));
+        assert!(body["peer_metadata"].is_null()); // sender not joined yet
+    }
+
+    #[tokio::test]
+    async fn candidate_cap_enforced_over_http() {
+        let config = RegistryConfig {
+            max_candidates_per_session: 1,
+            ..RegistryConfig::default()
+        };
+        let (server, _) = test_server_with(config, None);
+        do_register(&server).await;
+
+        server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&candidate_body("10.0.0.1:9000"))
+            .await
+            .assert_status_ok();
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&candidate_body("10.0.0.2:9000"))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: Value = res.json();
+        assert_eq!(body["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn unknown_candidate_kind_is_400() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({ "kind": "relay", "transport": "quic", "addr": "10.0.0.1:9000" }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ipv6_global_with_v4_addr_is_400() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({ "kind": "ipv6_global", "transport": "quic", "addr": "10.0.0.1:9000" }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ttl_expiry_with_sweep_over_http() {
+        let (server, state) = test_server();
+        let mut body = register_body();
+        body["ttl_seconds"] = json!(1);
+        server
+            .post("/api/v1/sessions")
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&body)
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        state.registry.sweep_expired().await;
+
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        let body: Value = res.json();
+        assert_eq!(body["code"], "session_expired");
+
+        // The sweep recorded the expiry in stats.
+        let res = server
+            .get("/api/v1/stats")
+            .authorization_bearer(ADMIN_TOKEN)
+            .await;
+        let stats: Value = res.json();
+        assert_eq!(stats["sessions"]["expired_total"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_disabled_without_admin_token() {
+        let (server, _) = test_server_with(RegistryConfig::default(), None);
+        let res = server.get("/api/v1/stats").await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stats_wrong_token_is_401() {
+        let (server, _) = test_server();
+        let res = server
+            .get("/api/v1/stats")
+            .authorization_bearer("wrong-token")
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn stats_counters_increment() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&candidate_body("10.0.0.1:9000"))
+            .await
+            .assert_status_ok();
+
+        let res = server
+            .get("/api/v1/stats")
+            .authorization_bearer(ADMIN_TOKEN)
+            .await;
+        res.assert_status_ok();
+        let stats: Value = res.json();
+        assert_eq!(stats["sessions"]["active"], 1);
+        assert_eq!(stats["sessions"]["created_total"], 1);
+        assert_eq!(stats["candidates"]["published_total"], 1);
+        assert_eq!(stats["candidates"]["active"], 1);
+        // The register + publish requests above were counted.
+        assert!(stats["requests"]["total"].as_u64().unwrap() >= 2);
+        assert!(stats["requests"]["by_status"]["200"].as_u64().unwrap() >= 1);
+    }
+
     /// End-to-end over real TCP loopback per design §7 PR 2.
     #[tokio::test]
     async fn e2e_register_join_close_over_tcp() {
-        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()));
+        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None);
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

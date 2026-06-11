@@ -16,6 +16,6 @@ mod hex;
 pub use capabilities::{Capability, CapabilityHash};
 pub use error::{Error, Result};
 pub use state::{
-    Candidate, CandidateKind, CandidatePublish, PeerMetadata, RegistryConfig, SessionId,
-    SessionRegistry, Transport,
+    Candidate, CandidateKind, CandidatePublish, PeerMetadata, PollResult, RegistryConfig,
+    RegistryStats, SessionId, SessionRegistry, Transport,
 };

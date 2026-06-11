@@ -12,14 +12,17 @@ use envoix_rendezvous::{RegistryConfig, SessionRegistry};
 
 mod api;
 
-/// CLI flags per design §4.9. `--admin-token` arrives with `/api/v1/stats`
-/// in PR 3.
+/// CLI flags per design §4.9.
 #[derive(Parser)]
 #[command(name = "envoix-server", about = "Envoix rendezvous server")]
 struct Cli {
     /// Socket address to bind.
     #[arg(long, env = "ENVOIX_LISTEN", default_value = "127.0.0.1:9100")]
     listen: SocketAddr,
+
+    /// Bearer token for /api/v1/stats. Unset disables the endpoint.
+    #[arg(long, env = "ENVOIX_ADMIN_TOKEN")]
+    admin_token: Option<String>,
 
     /// Hard cap on concurrently live sessions.
     #[arg(long, env = "ENVOIX_MAX_SESSIONS", default_value_t = 10_000)]
@@ -53,8 +56,13 @@ async fn main() {
         default_ttl: Duration::from_secs(cli.default_ttl_seconds),
         max_ttl: Duration::from_secs(cli.max_ttl_seconds),
     };
-    let state = api::AppState::new(SessionRegistry::new(config));
+    let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token);
     let app = api::router(state.clone());
+
+    // Background TTL sweep (design §4.4); tombstoning expired sessions and
+    // forgetting stale tombstones. Opportunistic expiry on read covers the
+    // window between ticks.
+    state.spawn_ttl_sweep(Duration::from_secs(30));
 
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 axum.workspace = true
+blake3.workspace = true
 clap.workspace = true
 envoix-rendezvous.workspace = true
 humantime.workspace = true
@@ -18,5 +19,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
-blake3.workspace = true
 reqwest.workspace = true
+tokio = { workspace = true, features = ["signal", "test-util"] }

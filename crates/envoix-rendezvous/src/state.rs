@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::{Mutex, RwLock};
@@ -93,13 +94,22 @@ pub enum Transport {
     Quic,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PeerMetadata {
     pub observed_http_addr: Option<SocketAddr>,
     pub protocol_versions: Vec<u32>,
     pub strategies: Vec<String>,
     pub first_seen: SystemTime,
     pub last_seen: SystemTime,
+}
+
+/// What a peer sees when polling: the *other* peer's metadata (None while
+/// the receiver polls a not-yet-joined session) and the other peer's
+/// candidates with `sequence > since`.
+#[derive(Debug)]
+pub struct PollResult {
+    pub peer_metadata: Option<PeerMetadata>,
+    pub candidates: Vec<Candidate>,
 }
 
 // ── Internal storage types (not in the public re-exports) ────────────────
@@ -128,11 +138,7 @@ struct Session {
 struct SessionInner {
     state: SessionState,
     expires_at_mono: Instant,
-    // Metadata is populated by register/join but currently unread —
-    // PR 3 will surface it via the candidate-poll response and /stats.
-    #[allow(dead_code)]
     receiver_metadata: PeerMetadata,
-    #[allow(dead_code)]
     sender_metadata: Option<PeerMetadata>,
     receiver_candidates: Vec<Candidate>,
     sender_candidates: Vec<Candidate>,
@@ -178,12 +184,39 @@ impl Default for RegistryConfig {
     }
 }
 
+// ── Statistics ───────────────────────────────────────────────────────────
+
+/// Monotonic counters per design §4.8. Relaxed ordering — these are
+/// advisory diagnostics, not synchronisation.
+#[derive(Default)]
+struct Counters {
+    created_total: AtomicU64,
+    expired_total: AtomicU64,
+    closed_total: AtomicU64,
+    rejected_capacity_total: AtomicU64,
+    rejected_authz_total: AtomicU64,
+    candidates_published_total: AtomicU64,
+}
+
+/// Point-in-time snapshot for `/api/v1/stats` (design §4.8).
+pub struct RegistryStats {
+    pub sessions_active: u64,
+    pub created_total: u64,
+    pub expired_total: u64,
+    pub closed_total: u64,
+    pub rejected_capacity_total: u64,
+    pub rejected_authz_total: u64,
+    pub candidates_published_total: u64,
+    pub candidates_active: u64,
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────
 
 /// In-memory session registry.
 pub struct SessionRegistry {
     slots: RwLock<HashMap<SessionId, SessionSlot>>,
     config: RegistryConfig,
+    counters: Counters,
 }
 
 impl SessionRegistry {
@@ -191,6 +224,7 @@ impl SessionRegistry {
         Self {
             slots: RwLock::new(HashMap::new()),
             config,
+            counters: Counters::default(),
         }
     }
 
@@ -224,6 +258,9 @@ impl SessionRegistry {
         // Tombstones occupy a slot until their forget_at fires — preventing an
         // attacker from rapid-cycling register/close to bypass the cap.
         if slots.len() >= self.config.max_sessions {
+            self.counters
+                .rejected_capacity_total
+                .fetch_add(1, Ordering::Relaxed);
             return Err(Error::CapacityExceeded);
         }
         if slots.contains_key(&id) {
@@ -250,6 +287,7 @@ impl SessionRegistry {
                 }),
             }),
         );
+        self.counters.created_total.fetch_add(1, Ordering::Relaxed);
         Ok(SystemTime::now() + ttl)
     }
 
@@ -269,6 +307,9 @@ impl SessionRegistry {
         };
 
         if presented_hash != &session.sender_cap_hash {
+            self.counters
+                .rejected_authz_total
+                .fetch_add(1, Ordering::Relaxed);
             return Err(Error::Unauthorized);
         }
 
@@ -299,7 +340,7 @@ impl SessionRegistry {
             Some(SessionSlot::Live(s)) => s,
         };
 
-        let role = role_for_hash(session, presented_hash)?;
+        let role = self.authorize(session, presented_hash)?;
 
         let mut inner = session.inner.lock().await;
         if inner.expires_at_mono <= Instant::now() {
@@ -343,19 +384,24 @@ impl SessionRegistry {
             AuthRole::Sender => &mut inner.sender_candidates,
         };
         bucket.push(stored.clone());
+        self.counters
+            .candidates_published_total
+            .fetch_add(1, Ordering::Relaxed);
 
+        touch_last_seen(&mut inner, role);
         inner.expires_at_mono = Instant::now() + session.ttl;
         Ok(stored)
     }
 
-    /// Return *the other peer's* candidates with `sequence > since`. Empty
-    /// vec is normal — the caller decides when to retry (short-poll).
+    /// Return *the other peer's* metadata and candidates with
+    /// `sequence > since`. An empty candidate list is normal — the caller
+    /// decides when to retry (short-poll).
     pub async fn poll_candidates(
         &self,
         id: &SessionId,
         presented_hash: &CapabilityHash,
         since: u64,
-    ) -> Result<Vec<Candidate>, Error> {
+    ) -> Result<PollResult, Error> {
         let slots = self.slots.read().await;
         let session = match slots.get(id) {
             None => return Err(Error::SessionNotFound),
@@ -363,21 +409,29 @@ impl SessionRegistry {
             Some(SessionSlot::Live(s)) => s,
         };
 
-        let role = role_for_hash(session, presented_hash)?;
+        let role = self.authorize(session, presented_hash)?;
 
         let mut inner = session.inner.lock().await;
         if inner.expires_at_mono <= Instant::now() {
             return Err(Error::SessionExpired);
         }
 
-        let bucket = match role {
-            AuthRole::Receiver => &inner.sender_candidates,
-            AuthRole::Sender => &inner.receiver_candidates,
+        let (bucket, peer_metadata) = match role {
+            AuthRole::Receiver => (&inner.sender_candidates, inner.sender_metadata.clone()),
+            AuthRole::Sender => (
+                &inner.receiver_candidates,
+                Some(inner.receiver_metadata.clone()),
+            ),
         };
-        let result: Vec<Candidate> = bucket.iter().filter(|c| c.sequence > since).cloned().collect();
+        let candidates: Vec<Candidate> =
+            bucket.iter().filter(|c| c.sequence > since).cloned().collect();
 
+        touch_last_seen(&mut inner, role);
         inner.expires_at_mono = Instant::now() + session.ttl;
-        Ok(result)
+        Ok(PollResult {
+            peer_metadata,
+            candidates,
+        })
     }
 
     /// Receiver-only. Replaces the slot with a `Closed` tombstone that
@@ -393,6 +447,9 @@ impl SessionRegistry {
             Some(SessionSlot::Tombstoned(t)) => Some(tombstone_error(t.reason)),
             Some(SessionSlot::Live(s)) => {
                 if presented_hash != &s.receiver_cap_hash {
+                    self.counters
+                        .rejected_authz_total
+                        .fetch_add(1, Ordering::Relaxed);
                     Some(Error::Unauthorized)
                 } else {
                     None
@@ -409,6 +466,7 @@ impl SessionRegistry {
                 forget_at: Instant::now() + self.config.default_ttl,
             }),
         );
+        self.counters.closed_total.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -448,20 +506,74 @@ impl SessionRegistry {
                     forget_at: tombstone_forget,
                 }),
             );
+            self.counters.expired_total.fetch_add(1, Ordering::Relaxed);
         }
         for id in to_remove {
             slots.remove(&id);
         }
     }
+
+    /// Point-in-time stats snapshot (design §4.8). Active counts are
+    /// computed by walking live sessions; counters are atomic reads.
+    pub async fn stats(&self) -> RegistryStats {
+        let now = Instant::now();
+        let slots = self.slots.read().await;
+        let mut sessions_active = 0u64;
+        let mut candidates_active = 0u64;
+        for slot in slots.values() {
+            if let SessionSlot::Live(s) = slot {
+                let inner = s.inner.lock().await;
+                if inner.expires_at_mono > now {
+                    sessions_active += 1;
+                    candidates_active +=
+                        (inner.receiver_candidates.len() + inner.sender_candidates.len()) as u64;
+                }
+            }
+        }
+        RegistryStats {
+            sessions_active,
+            created_total: self.counters.created_total.load(Ordering::Relaxed),
+            expired_total: self.counters.expired_total.load(Ordering::Relaxed),
+            closed_total: self.counters.closed_total.load(Ordering::Relaxed),
+            rejected_capacity_total: self
+                .counters
+                .rejected_capacity_total
+                .load(Ordering::Relaxed),
+            rejected_authz_total: self.counters.rejected_authz_total.load(Ordering::Relaxed),
+            candidates_published_total: self
+                .counters
+                .candidates_published_total
+                .load(Ordering::Relaxed),
+            candidates_active,
+        }
+    }
+
+    /// Map a presented hash to its role, counting authorization failures.
+    fn authorize(&self, session: &Session, presented: &CapabilityHash) -> Result<AuthRole, Error> {
+        if presented == &session.receiver_cap_hash {
+            Ok(AuthRole::Receiver)
+        } else if presented == &session.sender_cap_hash {
+            Ok(AuthRole::Sender)
+        } else {
+            self.counters
+                .rejected_authz_total
+                .fetch_add(1, Ordering::Relaxed);
+            Err(Error::Unauthorized)
+        }
+    }
 }
 
-fn role_for_hash(session: &Session, presented: &CapabilityHash) -> Result<AuthRole, Error> {
-    if presented == &session.receiver_cap_hash {
-        Ok(AuthRole::Receiver)
-    } else if presented == &session.sender_cap_hash {
-        Ok(AuthRole::Sender)
-    } else {
-        Err(Error::Unauthorized)
+/// Refresh `last_seen` on the metadata of whichever peer made the request
+/// (design §3.3: last_seen is the most recent request from this peer).
+fn touch_last_seen(inner: &mut SessionInner, role: AuthRole) {
+    let now = SystemTime::now();
+    match role {
+        AuthRole::Receiver => inner.receiver_metadata.last_seen = now,
+        AuthRole::Sender => {
+            if let Some(m) = &mut inner.sender_metadata {
+                m.last_seen = now;
+            }
+        }
     }
 }
 
@@ -593,14 +705,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Each side sees only the OTHER's candidates.
+        // Each side sees only the OTHER's candidates and the other's metadata.
         let seen_by_sender = reg.poll_candidates(&id, &sender, 0).await.unwrap();
-        assert_eq!(seen_by_sender.len(), 1);
-        assert_eq!(seen_by_sender[0].sequence, recv_cand.sequence);
+        assert_eq!(seen_by_sender.candidates.len(), 1);
+        assert_eq!(seen_by_sender.candidates[0].sequence, recv_cand.sequence);
+        assert!(seen_by_sender.peer_metadata.is_some()); // receiver always has metadata
 
         let seen_by_recv = reg.poll_candidates(&id, &recv, 0).await.unwrap();
-        assert_eq!(seen_by_recv.len(), 1);
-        assert_eq!(seen_by_recv[0].sequence, sender_cand.sequence);
+        assert_eq!(seen_by_recv.candidates.len(), 1);
+        assert_eq!(seen_by_recv.candidates[0].sequence, sender_cand.sequence);
+        assert!(seen_by_recv.peer_metadata.is_some()); // sender joined above
 
         reg.close(&id, &recv).await.unwrap();
         assert!(matches!(
@@ -702,7 +816,7 @@ mod tests {
         assert_eq!(first.priority, second.priority); // existing priority kept
 
         let seen = reg.poll_candidates(&id, &make_hash('b'), 0).await.unwrap();
-        assert_eq!(seen.len(), 1);
+        assert_eq!(seen.candidates.len(), 1);
     }
 
     #[tokio::test]
@@ -747,14 +861,14 @@ mod tests {
             .unwrap();
 
         let all = reg.poll_candidates(&id, &sender, 0).await.unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.candidates.len(), 2);
 
         let after_c1 = reg.poll_candidates(&id, &sender, c1.sequence).await.unwrap();
-        assert_eq!(after_c1.len(), 1);
-        assert_eq!(after_c1[0].sequence, c2.sequence);
+        assert_eq!(after_c1.candidates.len(), 1);
+        assert_eq!(after_c1.candidates[0].sequence, c2.sequence);
 
         let after_c2 = reg.poll_candidates(&id, &sender, c2.sequence).await.unwrap();
-        assert!(after_c2.is_empty());
+        assert!(after_c2.candidates.is_empty());
     }
 
     #[tokio::test]
@@ -763,7 +877,11 @@ mod tests {
         let id = make_id('1');
         register_default(&reg, &id).await;
         let result = reg.poll_candidates(&id, &make_hash('b'), 0).await.unwrap();
-        assert!(result.is_empty());
+        assert!(result.candidates.is_empty());
+        // Receiver registered but did not join — polling sender sees its metadata,
+        // while the receiver polling sees none yet.
+        let by_recv = reg.poll_candidates(&id, &make_hash('a'), 0).await.unwrap();
+        assert!(by_recv.peer_metadata.is_none());
     }
 
     #[tokio::test]
@@ -825,6 +943,49 @@ mod tests {
         tokio::time::advance(Duration::from_secs(8)).await;
         let result = reg.poll_candidates(&id, &make_hash('a'), 0).await;
         assert!(result.is_ok(), "got {:?}", result);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stats_track_lifecycle() {
+        let cfg = RegistryConfig {
+            max_sessions: 1,
+            default_ttl: Duration::from_secs(10),
+            ..RegistryConfig::default()
+        };
+        let reg = SessionRegistry::new(cfg);
+        let id = make_id('1');
+        register_default(&reg, &id).await;
+        reg.publish_candidate(&id, &make_hash('a'), make_candidate("10.0.0.1:9000"))
+            .await
+            .unwrap();
+
+        // Capacity rejection and authz rejection both count.
+        let _ = reg
+            .register(make_id('2'), make_hash('d'), make_hash('e'), make_metadata(), None)
+            .await
+            .unwrap_err();
+        let _ = reg
+            .poll_candidates(&id, &make_hash('c'), 0)
+            .await
+            .unwrap_err();
+
+        let s = reg.stats().await;
+        assert_eq!(s.sessions_active, 1);
+        assert_eq!(s.created_total, 1);
+        assert_eq!(s.candidates_published_total, 1);
+        assert_eq!(s.candidates_active, 1);
+        assert_eq!(s.rejected_capacity_total, 1);
+        assert_eq!(s.rejected_authz_total, 1);
+        assert_eq!(s.expired_total, 0);
+        assert_eq!(s.closed_total, 0);
+
+        // Expiry via sweep moves active → expired_total.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        reg.sweep_expired().await;
+        let s = reg.stats().await;
+        assert_eq!(s.sessions_active, 0);
+        assert_eq!(s.candidates_active, 0);
+        assert_eq!(s.expired_total, 1);
     }
 
     #[tokio::test(start_paused = true)]
