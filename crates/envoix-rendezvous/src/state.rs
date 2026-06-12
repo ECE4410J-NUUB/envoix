@@ -23,6 +23,7 @@ use tokio::time::Instant;
 use crate::Error;
 use crate::capabilities::CapabilityHash;
 use crate::hex::{fmt_hex_lower, parse_hex};
+use crate::probe_token::ProbeRole;
 
 const SESSION_ID_REF_HEX_CHARS: usize = 8;
 
@@ -42,6 +43,16 @@ impl SessionId {
                 "session_id must be 32 lowercase hex characters".into(),
             )),
         }
+    }
+
+    /// Raw bytes for probe-token payloads (crate-internal only; the wire
+    /// form everywhere else is hex).
+    pub(crate) fn as_bytes(&self) -> &[u8; 16] {
+        &self.bytes
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self { bytes }
     }
 }
 
@@ -87,6 +98,9 @@ pub struct CandidatePublish {
 pub enum CandidateKind {
     Host,
     Ipv6Global,
+    /// NAT mapping observed by the probe service
+    /// (`docs/reflexive-discovery-design.md` §3.4).
+    ServerReflexiveUdp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,12 +308,16 @@ impl SessionRegistry {
 
     /// Sender joins the session. Idempotent: a second join from the same
     /// sender refreshes metadata and TTL without changing state.
+    ///
+    /// Returns the refreshed wall-clock expiry (mirrors
+    /// [`register`](Self::register)) so the API layer can serialise it and
+    /// mint probe tokens with the correct lifetime.
     pub async fn join(
         &self,
         id: &SessionId,
         presented_hash: &CapabilityHash,
         metadata: PeerMetadata,
-    ) -> Result<(), Error> {
+    ) -> Result<SystemTime, Error> {
         let slots = self.slots.read().await;
         let session = match slots.get(id) {
             None => return Err(Error::SessionNotFound),
@@ -322,7 +340,7 @@ impl SessionRegistry {
         inner.state = SessionState::Joined;
         inner.sender_metadata = Some(metadata);
         inner.expires_at_mono = Instant::now() + session.ttl;
-        Ok(())
+        Ok(SystemTime::now() + session.ttl)
     }
 
     /// Publish a candidate from whichever peer presented `presented_hash`.
@@ -340,9 +358,40 @@ impl SessionRegistry {
             Some(SessionSlot::Tombstoned(t)) => return Err(tombstone_error(t.reason)),
             Some(SessionSlot::Live(s)) => s,
         };
-
         let role = self.authorize(session, presented_hash)?;
+        self.publish_for_role(session, role, candidate).await
+    }
 
+    /// Publish on behalf of a role proven by a verified probe token
+    /// (`docs/reflexive-discovery-design.md` §4.2) — no capability hash
+    /// involved; the token's MAC already authenticated session + role.
+    pub async fn publish_candidate_for_role(
+        &self,
+        id: &SessionId,
+        role: ProbeRole,
+        candidate: CandidatePublish,
+    ) -> Result<Candidate, Error> {
+        let slots = self.slots.read().await;
+        let session = match slots.get(id) {
+            None => return Err(Error::SessionNotFound),
+            Some(SessionSlot::Tombstoned(t)) => return Err(tombstone_error(t.reason)),
+            Some(SessionSlot::Live(s)) => s,
+        };
+        let role = match role {
+            ProbeRole::Receiver => AuthRole::Receiver,
+            ProbeRole::Sender => AuthRole::Sender,
+        };
+        self.publish_for_role(session, role, candidate).await
+    }
+
+    /// Shared publish path: dedup, cap check, sequence assignment, TTL
+    /// refresh. Callers have already authenticated `role`.
+    async fn publish_for_role(
+        &self,
+        session: &Session,
+        role: AuthRole,
+        candidate: CandidatePublish,
+    ) -> Result<Candidate, Error> {
         let mut inner = session.inner.lock().await;
         if inner.expires_at_mono <= Instant::now() {
             return Err(Error::SessionExpired);
@@ -812,6 +861,51 @@ mod tests {
         register_default(&reg, &id).await;
         let err = reg.close(&id, &make_hash('b')).await.unwrap_err();
         assert!(matches!(err, Error::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn publish_for_role_lands_in_correct_bucket() {
+        let reg = fresh_registry();
+        let id = make_id('1');
+        register_default(&reg, &id).await;
+
+        // Token-authenticated path: no capability hash involved.
+        let stored = reg
+            .publish_candidate_for_role(
+                &id,
+                ProbeRole::Receiver,
+                CandidatePublish {
+                    kind: CandidateKind::ServerReflexiveUdp,
+                    transport: Transport::Quic,
+                    addr: "203.0.113.9:40000".parse().unwrap(),
+                    priority: 50,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored.kind, CandidateKind::ServerReflexiveUdp);
+
+        // The sender (other peer) sees it; the receiver does not.
+        let by_sender = reg.poll_candidates(&id, &make_hash('b'), 0).await.unwrap();
+        assert_eq!(by_sender.candidates.len(), 1);
+        let by_recv = reg.poll_candidates(&id, &make_hash('a'), 0).await.unwrap();
+        assert!(by_recv.candidates.is_empty());
+
+        // Retransmit-idempotence: same mapping again is a no-op.
+        let again = reg
+            .publish_candidate_for_role(
+                &id,
+                ProbeRole::Receiver,
+                CandidatePublish {
+                    kind: CandidateKind::ServerReflexiveUdp,
+                    transport: Transport::Quic,
+                    addr: "203.0.113.9:40000".parse().unwrap(),
+                    priority: 50,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.sequence, stored.sequence);
     }
 
     #[tokio::test]
