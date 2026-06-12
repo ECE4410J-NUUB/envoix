@@ -98,11 +98,17 @@ Headers: `Authorization: Bearer <receiver_cap>`
 ```json
 {
   "session_id": "0123456789abcdef0123456789abcdef",
-  "expires_at": "2026-06-09T15:20:00Z"
+  "expires_at": "2026-06-09T15:20:00Z",
+  "probe_token": "<114 lowercase hex chars>",
+  "probe_endpoints": ["203.0.113.1:9101", "203.0.113.1:9102"]
 }
 ```
 
-`expires_at` reflects the *effective* TTL after clamping.
+- `expires_at` reflects the *effective* TTL after clamping.
+- `probe_token` / `probe_endpoints` — present **only when the server's
+  reflexive probe service is enabled**; absence means the feature is
+  off, not an error. See "UDP reflexive probe" below. The token is
+  opaque: store it, echo it in probes, never parse it.
 
 ### POST /api/v1/sessions/{id}/join — join (sender)
 
@@ -112,8 +118,20 @@ Headers: `Authorization: Bearer <sender_cap>`
 { "peer_metadata": { "protocol_versions": [1], "strategies": ["lan"] } }
 ```
 
-`200 OK` with body `{}`. Joining twice is idempotent (refreshes
-metadata and TTL).
+`200 OK`:
+
+```json
+{
+  "expires_at": "2026-06-09T15:21:30Z",
+  "probe_token": "<114 lowercase hex chars>",
+  "probe_endpoints": ["203.0.113.1:9101", "203.0.113.1:9102"]
+}
+```
+
+Joining twice is idempotent (refreshes metadata and TTL). The sender
+gets its own `probe_token` (role-bound; tokens are not interchangeable
+between peers); the probe fields follow the same present-only-when-
+enabled rule as registration.
 
 ### POST /api/v1/sessions/{id}/candidates — publish
 
@@ -129,9 +147,10 @@ capability proves.
 }
 ```
 
-- `kind` — `"host"` (LAN-local) or `"ipv6_global"` (publicly routable
-  IPv6). Unknown kinds are rejected with `400`. `ipv6_global` requires
-  an IPv6 `addr`.
+- `kind` — `"host"` (LAN-local), `"ipv6_global"` (publicly routable
+  IPv6), or `"server_reflexive_udp"` (a NAT mapping learned via the
+  probe service or public STUN). Unknown kinds are rejected with `400`.
+  `ipv6_global` requires an IPv6 `addr`.
 - `transport` — `"quic"`.
 - `addr` — `"ip:port"` for IPv4, `"[ip]:port"` for IPv6.
 - `priority` — optional advisory hint, higher first, default 0.
@@ -193,6 +212,61 @@ returned; pass the highest `sequence` you have seen.
   server returns immediately (short-poll). Recommended client polling
   interval: 200–500 ms (non-normative).
 
+### UDP reflexive probe — discover your NAT mapping
+
+Not HTTP: a raw UDP exchange against the addresses in
+`probe_endpoints`. Full rationale in
+`docs/reflexive-discovery-design.md`; this is the client contract.
+
+**Send the probe from the same UDP socket your QUIC endpoint uses.**
+NAT mappings are per-socket — a mapping learned on any other socket is
+useless for the later connection.
+
+Request — exactly 70 bytes:
+
+```
+offset  size  field
+0       4     magic    = 3f 45 56 58
+4       1     version  = 01
+5       8     txid     — random bytes you choose; replies echo them
+13      57    token    — probe_token hex-decoded, verbatim
+```
+
+Reply — 20 bytes (IPv4) or 32 bytes (IPv6), sent to the probe's source:
+
+```
+offset  size   field
+0       4      magic (same)
+4       1      version
+5       8      txid (echoed — discard replies that match nothing in flight)
+13      1      family   = 01 IPv4 / 02 IPv6
+14      2      xport    = your observed port XOR 0x3f45
+16      4|16   xaddr    = your observed addr XOR keystream
+                          keystream = magic ‖ txid ‖ magic (16 bytes)
+```
+
+The XOR is not encryption — it stops NAT ALGs from rewriting address
+bytes they recognise. Decode: `addr[i] = xaddr[i] ^ keystream[i]`,
+`port = xport ^ 0x3f45`.
+
+Client rules:
+
+- Retransmit on silence: send at 0 / 500 / 1500 / 3500 / 7500 ms, then
+  give up (RFC 8489 §6.2.1 schedule). Silence means an invalid/expired
+  token, a dead session, or packet loss — the server never explains.
+- Probe **both** endpoints in `probe_endpoints` from the same socket
+  and compare the two observed addresses: **equal** ⇒ your NAT mapping
+  is endpoint-independent and the address is usable for hole punching;
+  **different** ⇒ symmetric NAT/CGNAT — skip punching, proceed to
+  relay fallback.
+- You do not need to publish the result: the server auto-publishes
+  your observed mapping as a `server_reflexive_udp` candidate
+  (priority 50) the moment a valid probe arrives. The peer sees it on
+  its next poll. Probing twice is harmless (duplicate candidates
+  dedup).
+- The reply tells *you* your own mapping — keep it for the
+  symmetric-NAT comparison and diagnostics.
+
 ### DELETE /api/v1/sessions/{id} — close (receiver only)
 
 Headers: `Authorization: Bearer <receiver_cap>`
@@ -225,6 +299,7 @@ configured the route answers plain `404`.
     "rejected_authz_total": 3
   },
   "candidates": { "published_total": 318, "active": 24 },
+  "probes": { "received_total": 12, "invalid_total": 2, "published_total": 9 },
   "requests": { "total": 1487, "by_status": { "200": 1431, "401": 3 } }
 }
 ```
