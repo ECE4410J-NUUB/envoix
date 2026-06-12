@@ -11,6 +11,7 @@ use clap::Parser;
 use envoix_rendezvous::{RegistryConfig, SessionRegistry};
 
 mod api;
+mod probe;
 
 /// CLI flags per design §4.9.
 #[derive(Parser)]
@@ -40,6 +41,28 @@ struct Cli {
     #[arg(long, env = "ENVOIX_MAX_TTL", default_value_t = 1800)]
     max_ttl_seconds: u64,
 
+    /// UDP bind addresses for the reflexive probe service, comma
+    /// separated (e.g. "0.0.0.0:9101,0.0.0.0:9102"). Unset disables the
+    /// feature entirely.
+    #[arg(
+        long,
+        env = "ENVOIX_PROBE_LISTEN",
+        requires = "probe_advertise",
+        value_delimiter = ','
+    )]
+    probe_listen: Vec<SocketAddr>,
+
+    /// Public host:port pairs advertised to clients as probe endpoints,
+    /// comma separated. Required with --probe-listen — behind NAT the
+    /// server cannot know its own public address.
+    #[arg(
+        long,
+        env = "ENVOIX_PROBE_ADVERTISE",
+        requires = "probe_listen",
+        value_delimiter = ','
+    )]
+    probe_advertise: Vec<String>,
+
     /// Upgrade envoix log targets to debug (ignored if RUST_LOG is set).
     #[arg(long)]
     debug: bool,
@@ -56,13 +79,32 @@ async fn main() {
         default_ttl: Duration::from_secs(cli.default_ttl_seconds),
         max_ttl: Duration::from_secs(cli.max_ttl_seconds),
     };
-    let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token);
+    let probe_advertise = if cli.probe_listen.is_empty() {
+        None
+    } else {
+        Some(cli.probe_advertise.clone())
+    };
+    let state = api::AppState::new(
+        SessionRegistry::new(config),
+        cli.admin_token,
+        probe_advertise,
+    );
     let app = api::router(state.clone());
 
     // Background TTL sweep (design §4.4); tombstoning expired sessions and
     // forgetting stale tombstones. Opportunistic expiry on read covers the
     // window between ticks.
     state.spawn_ttl_sweep(Duration::from_secs(30));
+
+    // Reflexive probe sockets (reflexive-discovery design §5). Bind
+    // failures abort startup — a half-working deployment is worse than a
+    // loud one.
+    if !cli.probe_listen.is_empty() {
+        let sockets = probe::bind_probe_sockets(&cli.probe_listen)
+            .await
+            .unwrap_or_else(|e| panic!("cannot bind probe sockets {:?}: {e}", cli.probe_listen));
+        state.spawn_probe_tasks(sockets);
+    }
 
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await

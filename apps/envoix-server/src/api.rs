@@ -18,7 +18,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
-    SessionId, SessionRegistry, Transport,
+    ProbeRole, ProbeTokenKey, SessionId, SessionRegistry, Transport,
 };
 // SSoT: the wire version the whole workspace speaks (design §3.3
 // `protocol_versions`). Never redeclare locally — a future bump in
@@ -26,6 +26,8 @@ use envoix_rendezvous::{
 use envoix_types::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
+
+use crate::probe::{ProbeCounters, run_probe_socket};
 
 /// Request body cap per design §4.6 robustness budget.
 const BODY_LIMIT_BYTES: usize = 64 * 1024;
@@ -37,6 +39,13 @@ struct RequestCounters {
     by_status: Mutex<HashMap<u16, u64>>,
 }
 
+/// Probe-service state, present only when `--probe-listen` is configured
+/// (`docs/reflexive-discovery-design.md` §5).
+struct ProbeState {
+    key: Arc<ProbeTokenKey>,
+    advertise: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     registry: Arc<SessionRegistry>,
@@ -44,18 +53,56 @@ pub struct AppState {
     /// BLAKE3 of the admin token; `None` disables `/api/v1/stats`.
     admin_token_hash: Option<blake3::Hash>,
     request_counters: Arc<RequestCounters>,
+    probe: Option<Arc<ProbeState>>,
+    probe_counters: Arc<ProbeCounters>,
     started_at: Instant,
 }
 
 impl AppState {
-    pub fn new(registry: SessionRegistry, admin_token: Option<String>) -> Self {
+    /// `probe_advertise`: the public `host:port` list put into
+    /// `probe_endpoints` response fields. `Some` enables the probe
+    /// feature (a fresh token key is generated); `None` disables it.
+    pub fn new(
+        registry: SessionRegistry,
+        admin_token: Option<String>,
+        probe_advertise: Option<Vec<String>>,
+    ) -> Self {
         Self {
             registry: Arc::new(registry),
             shutting_down: Arc::new(AtomicBool::new(false)),
             admin_token_hash: admin_token.map(|t| blake3::hash(t.as_bytes())),
             request_counters: Arc::new(RequestCounters::default()),
+            probe: probe_advertise.map(|advertise| {
+                Arc::new(ProbeState {
+                    key: Arc::new(ProbeTokenKey::random()),
+                    advertise,
+                })
+            }),
+            probe_counters: Arc::new(ProbeCounters::default()),
             started_at: Instant::now(),
         }
+    }
+
+    /// Spawn one task per bound probe socket. No-op (empty vec) when the
+    /// probe feature is disabled.
+    pub fn spawn_probe_tasks(
+        &self,
+        sockets: Vec<tokio::net::UdpSocket>,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let Some(probe) = &self.probe else {
+            return Vec::new();
+        };
+        sockets
+            .into_iter()
+            .map(|socket| {
+                tokio::spawn(run_probe_socket(
+                    socket,
+                    self.registry.clone(),
+                    probe.key.clone(),
+                    self.probe_counters.clone(),
+                ))
+            })
+            .collect()
     }
 
     /// Flip the flag consulted by [`reject_during_shutdown`]. Called once
@@ -204,11 +251,26 @@ struct RegisterResponse {
     session_id: String,
     /// Effective expiry after server-side TTL clamping, RFC 3339.
     expires_at: String,
+    /// Present only when the probe service is enabled (design §3.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_endpoints: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 struct JoinBody {
     peer_metadata: PeerMetadataBody,
+}
+
+#[derive(Serialize)]
+struct JoinResponse {
+    /// Refreshed session expiry, RFC 3339.
+    expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_endpoints: Option<Vec<String>>,
 }
 
 /// Candidate `kind` wire strings (design §3.3). Unknown kinds fail serde
@@ -218,6 +280,9 @@ struct JoinBody {
 enum KindBody {
     Host,
     Ipv6Global,
+    /// Accepted over HTTP too — a client may publish reflexive addresses
+    /// learned elsewhere (e.g. public STUN).
+    ServerReflexiveUdp,
 }
 
 impl From<KindBody> for CandidateKind {
@@ -225,6 +290,7 @@ impl From<KindBody> for CandidateKind {
         match k {
             KindBody::Host => CandidateKind::Host,
             KindBody::Ipv6Global => CandidateKind::Ipv6Global,
+            KindBody::ServerReflexiveUdp => CandidateKind::ServerReflexiveUdp,
         }
     }
 }
@@ -268,6 +334,7 @@ impl From<Candidate> for CandidateJson {
             kind: match c.kind {
                 CandidateKind::Host => "host",
                 CandidateKind::Ipv6Global => "ipv6_global",
+                CandidateKind::ServerReflexiveUdp => "server_reflexive_udp",
             },
             transport: match c.transport {
                 Transport::Quic => "quic",
@@ -343,8 +410,15 @@ async fn register(
 
     let expires_at = state
         .registry
-        .register(id, receiver_cap.hash(), sender_cap_hash, metadata, ttl)
+        .register(
+            id.clone(),
+            receiver_cap.hash(),
+            sender_cap_hash,
+            metadata,
+            ttl,
+        )
         .await?;
+    let (probe_token, probe_endpoints) = probe_fields(&state, &id, ProbeRole::Receiver, expires_at);
 
     tracing::info!(session_ref = &body.session_id[..8], "session registered");
     Ok((
@@ -352,6 +426,8 @@ async fn register(
         Json(RegisterResponse {
             session_id: body.session_id,
             expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
+            probe_token,
+            probe_endpoints,
         }),
     ))
 }
@@ -367,13 +443,19 @@ async fn join(
     let session_id = SessionId::from_hex(&id)?;
     let metadata = peer_metadata(&headers, body.peer_metadata);
 
-    state
+    let expires_at = state
         .registry
         .join(&session_id, &cap.hash(), metadata)
         .await?;
+    let (probe_token, probe_endpoints) =
+        probe_fields(&state, &session_id, ProbeRole::Sender, expires_at);
 
     tracing::info!(session_ref = &id[..8], "sender joined");
-    Ok(Json(serde_json::json!({})))
+    Ok(Json(JoinResponse {
+        expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
+        probe_token,
+        probe_endpoints,
+    }))
 }
 
 async fn close(
@@ -494,6 +576,11 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
             "published_total": registry.candidates_published_total,
             "active": registry.candidates_active,
         },
+        "probes": {
+            "received_total": state.probe_counters.received_total.load(Ordering::Relaxed),
+            "invalid_total": state.probe_counters.invalid_total.load(Ordering::Relaxed),
+            "published_total": state.probe_counters.published_total.load(Ordering::Relaxed),
+        },
         "requests": {
             "total": state.request_counters.total.load(Ordering::Relaxed),
             "by_status": by_status,
@@ -503,6 +590,25 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/// Mint the probe-token / probe-endpoints response fields, or `(None,
+/// None)` when the probe service is disabled (clients treat absence as
+/// "feature off").
+fn probe_fields(
+    state: &AppState,
+    session_id: &SessionId,
+    role: ProbeRole,
+    expires_at: SystemTime,
+) -> (Option<String>, Option<Vec<String>>) {
+    match &state.probe {
+        None => (None, None),
+        Some(probe) => {
+            let token = probe.key.mint(session_id, role, expires_at);
+            let hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+            (Some(hex), Some(probe.advertise.clone()))
+        }
+    }
+}
 
 /// Missing or malformed `Authorization` header is `401 unauthorized`
 /// without inspecting the session id (design §3.4 — prevents probing for
@@ -580,9 +686,23 @@ mod tests {
         config: RegistryConfig,
         admin_token: Option<String>,
     ) -> (TestServer, AppState) {
-        let state = AppState::new(SessionRegistry::new(config), admin_token);
+        let state = AppState::new(SessionRegistry::new(config), admin_token, None);
         let server = TestServer::new(router(state.clone())).unwrap();
         (server, state)
+    }
+
+    /// Probe-enabled server plus a live UDP probe socket on loopback.
+    async fn test_server_with_probe() -> (TestServer, AppState, std::net::SocketAddr) {
+        let state = AppState::new(
+            SessionRegistry::new(RegistryConfig::default()),
+            Some(ADMIN_TOKEN.into()),
+            Some(vec!["198.51.100.1:9101".into(), "198.51.100.1:9102".into()]),
+        );
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let probe_addr = socket.local_addr().unwrap();
+        state.spawn_probe_tasks(vec![socket]);
+        let server = TestServer::new(router(state.clone())).unwrap();
+        (server, state, probe_addr)
     }
 
     fn register_body() -> Value {
@@ -985,10 +1105,168 @@ mod tests {
         assert!(stats["requests"]["by_status"]["200"].as_u64().unwrap() >= 1);
     }
 
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn probe_fields_present_only_when_enabled() {
+        let (server, _, _) = test_server_with_probe().await;
+        let res = server
+            .post("/api/v1/sessions")
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&register_body())
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: Value = res.json();
+        assert_eq!(body["probe_token"].as_str().unwrap().len(), 114); // 57 bytes hex
+        assert_eq!(body["probe_endpoints"].as_array().unwrap().len(), 2);
+
+        // Disabled server: fields absent entirely (not null).
+        let (server, _) = test_server();
+        let res = server
+            .post("/api/v1/sessions")
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&register_body())
+            .await;
+        let body: Value = res.json();
+        assert!(body.get("probe_token").is_none());
+        assert!(body.get("probe_endpoints").is_none());
+    }
+
+    #[tokio::test]
+    async fn join_response_carries_expiry_and_sender_token() {
+        let (server, _, _) = test_server_with_probe().await;
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/join"))
+            .authorization_bearer(SENDER_CAP)
+            .json(&join_body())
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert!(body["expires_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(body["probe_token"].as_str().unwrap().len(), 114);
+    }
+
+    /// The full reflexive loop: HTTPS register → UDP probe → XOR'd reply
+    /// with the observed address → candidate auto-published → peer sees it.
+    #[tokio::test]
+    async fn udp_probe_end_to_end() {
+        use envoix_rendezvous::{PROBE_TOKEN_LEN, ProbeReply, ProbeRequest};
+
+        let (server, _, probe_addr) = test_server_with_probe().await;
+        let res = server
+            .post("/api/v1/sessions")
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&register_body())
+            .await;
+        let body: Value = res.json();
+        let token_bytes = hex_to_bytes(body["probe_token"].as_str().unwrap());
+
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let request = ProbeRequest {
+            txid: [9, 8, 7, 6, 5, 4, 3, 2],
+            token: token_bytes.try_into().unwrap(),
+        };
+        client.send_to(&request.encode(), probe_addr).await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .expect("probe reply within 2s")
+        .unwrap();
+
+        let reply = ProbeReply::decode(&buf[..len]).expect("decodable reply");
+        assert_eq!(reply.txid, request.txid);
+        assert_eq!(reply.observed, client_addr); // loopback: no NAT in between
+        assert_eq!(PROBE_TOKEN_LEN, 57);
+
+        // The auto-published candidate is visible to the other peer.
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(SENDER_CAP)
+            .await;
+        let body: Value = res.json();
+        let cands = body["candidates"].as_array().unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0]["kind"], "server_reflexive_udp");
+        assert_eq!(cands[0]["addr"], client_addr.to_string());
+        assert_eq!(cands[0]["priority"], 50);
+
+        // Retransmit: same mapping, dedup keeps one candidate.
+        client.send_to(&request.encode(), probe_addr).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.recv_from(&mut buf),
+        )
+        .await
+        .expect("retransmit also answered")
+        .unwrap();
+        let res = server
+            .get(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(SENDER_CAP)
+            .await;
+        let body: Value = res.json();
+        assert_eq!(body["candidates"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_probes_get_silence() {
+        let (server, _, probe_addr) = test_server_with_probe().await;
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // Garbage of the right length, wrong magic/token.
+        client.send_to(&[0u8; 70], probe_addr).await.unwrap();
+        // Wrong length entirely.
+        client.send_to(&[0x3f; 10], probe_addr).await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            client.recv_from(&mut buf),
+        )
+        .await;
+        assert!(got.is_err(), "invalid probe must get no reply");
+
+        let res = server
+            .get("/api/v1/stats")
+            .authorization_bearer(ADMIN_TOKEN)
+            .await;
+        let stats: Value = res.json();
+        assert_eq!(stats["probes"]["received_total"], 2);
+        assert_eq!(stats["probes"]["invalid_total"], 2);
+        assert_eq!(stats["probes"]["published_total"], 0);
+    }
+
+    #[tokio::test]
+    async fn reflexive_kind_accepted_over_http() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({
+                "kind": "server_reflexive_udp",
+                "transport": "quic",
+                "addr": "198.51.100.7:40000",
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["kind"], "server_reflexive_udp");
+    }
+
     /// End-to-end over real TCP loopback per design §7 PR 2.
     #[tokio::test]
     async fn e2e_register_join_close_over_tcp() {
-        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None);
+        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None, None);
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
