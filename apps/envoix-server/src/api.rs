@@ -16,9 +16,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use envoix_relay::{RelayRole, RelaySessionId, RelayTokenKey};
 use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
-    SessionId, SessionRegistry, Transport,
+    SessionId, SessionRegistry, SessionRole, Transport,
 };
 // SSoT: the wire version the whole workspace speaks. Never redeclare
 // locally -- a future bump in envoix-types must reach this server's 422
@@ -37,6 +38,13 @@ struct RequestCounters {
     by_status: Mutex<HashMap<u16, u64>>,
 }
 
+/// Relay allocation state, present only when `--relay-key` +
+/// `--relay-advertise` are both configured (`docs/relay-design.md` §3.5).
+struct RelayState {
+    key: RelayTokenKey,
+    advertise: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     registry: Arc<SessionRegistry>,
@@ -44,16 +52,29 @@ pub struct AppState {
     /// BLAKE3 of the admin token; `None` disables `/api/v1/stats`.
     admin_token_hash: Option<blake3::Hash>,
     request_counters: Arc<RequestCounters>,
+    /// `None` disables `/relay-allocation` (returns 404).
+    relay: Option<Arc<RelayState>>,
     started_at: Instant,
 }
 
 impl AppState {
-    pub fn new(registry: SessionRegistry, admin_token: Option<String>) -> Self {
+    /// `relay`: `(64-hex shared key, advertised "host:port")`. `Some`
+    /// enables the relay allocation endpoint; `None` disables it.
+    pub fn new(
+        registry: SessionRegistry,
+        admin_token: Option<String>,
+        relay: Option<(String, String)>,
+    ) -> Self {
         Self {
             registry: Arc::new(registry),
             shutting_down: Arc::new(AtomicBool::new(false)),
             admin_token_hash: admin_token.map(|t| blake3::hash(t.as_bytes())),
             request_counters: Arc::new(RequestCounters::default()),
+            relay: relay.map(|(key_hex, advertise)| {
+                let key = RelayTokenKey::from_hex(key_hex.trim())
+                    .unwrap_or_else(|| panic!("--relay-key must be 64 hex characters"));
+                Arc::new(RelayState { key, advertise })
+            }),
             started_at: Instant::now(),
         }
     }
@@ -88,6 +109,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/sessions/{id}/candidates",
             post(publish_candidate).get(poll_candidates),
+        )
+        .route(
+            "/api/v1/sessions/{id}/relay-allocation",
+            post(relay_allocation),
         )
         .route("/api/v1/stats", get(stats))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
@@ -218,6 +243,7 @@ struct JoinBody {
 enum KindBody {
     Host,
     Ipv6Global,
+    Relay,
 }
 
 impl From<KindBody> for CandidateKind {
@@ -225,6 +251,7 @@ impl From<KindBody> for CandidateKind {
         match k {
             KindBody::Host => CandidateKind::Host,
             KindBody::Ipv6Global => CandidateKind::Ipv6Global,
+            KindBody::Relay => CandidateKind::Relay,
         }
     }
 }
@@ -268,6 +295,7 @@ impl From<Candidate> for CandidateJson {
             kind: match c.kind {
                 CandidateKind::Host => "host",
                 CandidateKind::Ipv6Global => "ipv6_global",
+                CandidateKind::Relay => "relay",
             },
             transport: match c.transport {
                 Transport::Quic => "quic",
@@ -390,7 +418,54 @@ async fn close(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Publish one candidate. Returns the canonical stored record -- for a
+#[derive(Serialize)]
+struct RelayAllocationResponse {
+    relay_endpoint: String,
+    /// 114 hex chars — the 57-byte relay token. Opaque to the client;
+    /// echoed in every data-plane datagram (`docs/relay-design.md` §6).
+    relay_token: String,
+    /// Session expiry the token is valid until, RFC 3339.
+    expires_at: String,
+}
+
+/// Mint a relay allocation for the calling peer (design §3.5). Either
+/// capability authorises; the role is inferred and the token is bound to
+/// it. Returns `404` when the relay feature is not configured.
+async fn relay_allocation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(relay) = &state.relay else {
+        return Err(Error::SessionNotFound.into()); // route effectively disabled → 404
+    };
+    let cap = Capability::from_hex(bearer_token(&headers)?).map_err(|_| Error::Unauthorized)?;
+    let session_id = SessionId::from_hex(&id)?;
+
+    let (role, expires_at) = state
+        .registry
+        .authorize_for_allocation(&session_id, &cap.hash())
+        .await?;
+    let relay_role = match role {
+        SessionRole::Receiver => RelayRole::Receiver,
+        SessionRole::Sender => RelayRole::Sender,
+    };
+    let token = relay.key.mint(
+        &RelaySessionId::from_bytes(session_id.to_bytes()),
+        relay_role,
+        expires_at,
+    );
+    let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+
+    tracing::info!(session_ref = &id[..8], ?role, "relay allocated");
+    Ok(Json(RelayAllocationResponse {
+        relay_endpoint: relay.advertise.clone(),
+        relay_token: token_hex,
+        expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
+    }))
+}
+
+/// Publish one candidate. Returns the canonical stored record — for a
 /// duplicate `(kind, transport, addr)` that is the existing record with
 /// its original `sequence` (no-op rule), hence 200 not 201.
 async fn publish_candidate(
@@ -571,17 +646,29 @@ mod tests {
 
     const ADMIN_TOKEN: &str = "test-admin-token";
 
+    /// 64-hex relay key used by the relay-enabled test servers.
+    const RELAY_KEY: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+
     fn test_server() -> (TestServer, AppState) {
-        test_server_with(RegistryConfig::default(), Some(ADMIN_TOKEN.into()))
+        test_server_with(RegistryConfig::default(), Some(ADMIN_TOKEN.into()), None)
     }
 
     fn test_server_with(
         config: RegistryConfig,
         admin_token: Option<String>,
+        relay: Option<(String, String)>,
     ) -> (TestServer, AppState) {
-        let state = AppState::new(SessionRegistry::new(config), admin_token);
+        let state = AppState::new(SessionRegistry::new(config), admin_token, relay);
         let server = TestServer::new(router(state.clone())).unwrap();
         (server, state)
+    }
+
+    fn relay_test_server() -> (TestServer, AppState) {
+        test_server_with(
+            RegistryConfig::default(),
+            Some(ADMIN_TOKEN.into()),
+            Some((RELAY_KEY.into(), "203.0.113.9:9104".into())),
+        )
     }
 
     fn register_body() -> Value {
@@ -866,7 +953,7 @@ mod tests {
             max_candidates_per_session: 1,
             ..RegistryConfig::default()
         };
-        let (server, _) = test_server_with(config, None);
+        let (server, _) = test_server_with(config, None, None);
         do_register(&server).await;
 
         server
@@ -892,7 +979,9 @@ mod tests {
         let res = server
             .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
             .authorization_bearer(RECEIVER_CAP)
-            .json(&json!({ "kind": "relay", "transport": "quic", "addr": "10.0.0.1:9000" }))
+            .json(
+                &json!({ "kind": "carrier_pigeon", "transport": "quic", "addr": "10.0.0.1:9000" }),
+            )
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
     }
@@ -943,7 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_disabled_without_admin_token() {
-        let (server, _) = test_server_with(RegistryConfig::default(), None);
+        let (server, _) = test_server_with(RegistryConfig::default(), None, None);
         let res = server.get("/api/v1/stats").await;
         res.assert_status(StatusCode::NOT_FOUND);
     }
@@ -984,10 +1073,103 @@ mod tests {
         assert!(stats["requests"]["by_status"]["200"].as_u64().unwrap() >= 1);
     }
 
-    /// End-to-end over real TCP loopback.
+    #[tokio::test]
+    async fn relay_allocation_mints_verifiable_token() {
+        use envoix_relay::{RelayDatagram, RelayRole, RelayTokenKey, encode};
+
+        let (server, _) = relay_test_server();
+        do_register(&server).await;
+
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["relay_endpoint"], "203.0.113.9:9104");
+        let token_hex = body["relay_token"].as_str().unwrap();
+        assert_eq!(token_hex.len(), 114); // 57 bytes
+
+        // The token verifies under the same shared key (home mints, VPS
+        // validates) and the role is receiver.
+        let token: Vec<u8> = (0..57)
+            .map(|i| u8::from_str_radix(&token_hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let key = RelayTokenKey::from_hex(RELAY_KEY).unwrap();
+        let (_sid, role, _exp) = key.verify(&token).expect("token verifies");
+        assert_eq!(role, RelayRole::Receiver);
+
+        // And it parses as a real data-plane frame.
+        let token_arr: [u8; 57] = token.try_into().unwrap();
+        let dg = encode(&token_arr, b"quic");
+        assert!(RelayDatagram::parse(&dg).is_some());
+
+        // Sender gets a sender-role token.
+        server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/join"))
+            .authorization_bearer(SENDER_CAP)
+            .json(&join_body())
+            .await
+            .assert_status_ok();
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer(SENDER_CAP)
+            .await;
+        let body: Value = res.json();
+        let token_hex = body["relay_token"].as_str().unwrap();
+        let token: Vec<u8> = (0..57)
+            .map(|i| u8::from_str_radix(&token_hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let (_, role, _) = key.verify(&token).unwrap();
+        assert_eq!(role, RelayRole::Sender);
+    }
+
+    #[tokio::test]
+    async fn relay_allocation_disabled_returns_404() {
+        let (server, _) = test_server(); // relay = None
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn relay_allocation_requires_auth() {
+        let (server, _) = relay_test_server();
+        do_register(&server).await;
+        // Missing Authorization → 401.
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        // Wrong cap → 401.
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer("cccccccccccccccccccccccccccccccc")
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn relay_candidate_kind_accepted() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({ "kind": "relay", "transport": "quic", "addr": "203.0.113.9:9104" }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["kind"], "relay");
+    }
+
+    /// End-to-end over real TCP loopback per design §7 PR 2.
     #[tokio::test]
     async fn e2e_register_join_close_over_tcp() {
-        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None);
+        let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None, None);
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
