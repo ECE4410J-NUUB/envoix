@@ -583,6 +583,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-relay-server"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "envoix-relay",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "envoix-rendezvous"
 version = "0.1.0"
 dependencies = [
@@ -599,6 +612,7 @@ dependencies = [
  "axum-test",
  "blake3",
  "clap",
+ "envoix-relay",
  "envoix-rendezvous",
  "envoix-types",
  "humantime",

@@ -2,6 +2,7 @@
 members = [
     "apps/envoix-cli",
     "apps/envoix-server",
+    "apps/envoix-relay-server",
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-session",
