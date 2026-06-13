@@ -575,6 +575,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-relay"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "tokio",
+]
+
+[[package]]
 name = "envoix-rendezvous"
 version = "0.1.0"
 dependencies = [
