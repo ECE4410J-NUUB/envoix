@@ -102,7 +102,7 @@ pub enum CandidateKind {
     Host,
     Ipv6Global,
     /// Reach this peer through the relay (the `addr` is the relay
-    /// endpoint). See `docs/relay-design.md` §3.4.
+    /// endpoint).
     Relay,
 }
 

@@ -1,15 +1,17 @@
 //! Relay authorization tokens: stateless, shared-key keyed MAC.
 //!
-//! Design pointers (`docs/relay-design.md`):
-//! - §3.1 - byte layout; the key is a **shared, persistent** secret
-//!   configured identically in the home issuer and the VPS validator
-//!   (TURN REST API / coturn `use-auth-secret` precedent). This is the
-//!   one difference from the probe token, whose key is per-process random.
-//! - §4.2 - verification is silent-drop: failures return `None`.
+//! Layout: `session_id(16) || role(1) || expires_at(8) || tag(32)`, where
+//! the tag is a keyed BLAKE3 MAC over the first 25 bytes. The key is a
+//! shared, persistent secret configured identically on the issuer (the home
+//! rendezvous) and the validator (the VPS forwarder), so a token minted at
+//! home verifies on the VPS and survives a restart of either. (This is the
+//! one difference from the probe token, whose key is per-process random,
+//! because there one process both issues and validates.) Verification is
+//! silent-drop: any failure returns `None` and the caller drops the packet.
 //!
-//! The token authorises *relay use* for a session+role. It is unrelated
-//! to the transfer's end-to-end encryption key, which the relay never
-//! possesses (the relay forwards opaque QUIC).
+//! The token authorises relay use for a session+role. It is unrelated to
+//! the transfer's end-to-end encryption key, which the relay never holds
+//! (it forwards opaque QUIC).
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

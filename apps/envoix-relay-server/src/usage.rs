@@ -1,4 +1,4 @@
-//! Persisted monthly-usage state (design §4.4).
+//! Persisted monthly-usage state.
 //!
 //! Wraps the pure [`envoix_relay::MonthlyUsage`] with the two things it
 //! deliberately doesn't do: compute the current month from the wall clock,

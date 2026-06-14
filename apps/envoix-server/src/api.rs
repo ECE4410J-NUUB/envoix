@@ -39,7 +39,7 @@ struct RequestCounters {
 }
 
 /// Relay allocation state, present only when `--relay-key` +
-/// `--relay-advertise` are both configured (`docs/relay-design.md` §3.5).
+/// `--relay-advertise` are both configured.
 struct RelayState {
     key: RelayTokenKey,
     advertise: String,
@@ -418,15 +418,15 @@ async fn close(
 struct RelayAllocationResponse {
     relay_endpoint: String,
     /// 114 hex chars - the 57-byte relay token. Opaque to the client;
-    /// echoed in every data-plane datagram (`docs/relay-design.md` §6).
+    /// echoed in every data-plane datagram to the relay.
     relay_token: String,
     /// Session expiry the token is valid until, RFC 3339.
     expires_at: String,
 }
 
-/// Mint a relay allocation for the calling peer (design §3.5). Either
-/// capability authorises; the role is inferred and the token is bound to
-/// it. Returns `404` when the relay feature is not configured.
+/// Mint a relay allocation for the calling peer. Either capability
+/// authorises; the role is inferred and the token is bound to it. Returns
+/// `404` when the relay feature is not configured.
 async fn relay_allocation(
     State(state): State<AppState>,
     Path(id): Path<String>,

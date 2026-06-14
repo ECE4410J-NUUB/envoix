@@ -17,7 +17,7 @@ mod usage;
 
 use server::RelayServer;
 
-/// CLI per design §5.1 / §4.4 / §4.7.
+/// Command-line configuration.
 #[derive(Parser)]
 #[command(name = "envoix-relay-server", about = "Envoix relay data plane")]
 struct Cli {
@@ -31,7 +31,8 @@ struct Cli {
     key: String,
 
     /// Monthly forwarded-byte limit; forwarding disables on exceed and
-    /// auto-resets at the month boundary. Default 200 GiB.
+    /// the counter resets at the start of each calendar month (UTC).
+    /// Default 200 GiB.
     #[arg(long, env = "ENVOIX_RELAY_MONTHLY_BYTE_LIMIT", default_value_t = 200 * 1024 * 1024 * 1024)]
     monthly_byte_limit: u64,
 
@@ -101,7 +102,7 @@ async fn main() {
     server.run().await;
 }
 
-/// Idle sweep (§4.3), periodic usage flush and stats line (§4.4 / §4.6).
+/// Spawn the idle-sweep task and the periodic usage-flush/stats task.
 fn spawn_background_tasks(server: Arc<RelayServer>) {
     let sweep = server.clone();
     tokio::spawn(async move {
@@ -124,7 +125,7 @@ fn spawn_background_tasks(server: Arc<RelayServer>) {
 }
 
 /// SIGUSR1 -> toggle debug logging; SIGUSR2 -> toggle forwarding pause;
-/// SIGTERM/SIGINT -> flush usage and exit (design §4.7).
+/// SIGTERM/SIGINT -> flush usage and exit.
 fn install_signal_handlers(server: Arc<RelayServer>) {
     #[cfg(unix)]
     {

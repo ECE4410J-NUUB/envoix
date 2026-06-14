@@ -1,4 +1,4 @@
-//! Monthly byte quota guard (design §4.4).
+//! Monthly byte quota guard.
 //!
 //! Pure counting and month-rollover logic. The caller supplies the
 //! current month as an integer (`year * 12 + month0`), so this type never

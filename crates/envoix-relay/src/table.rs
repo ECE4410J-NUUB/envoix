@@ -1,15 +1,15 @@
 //! In-memory forwarding table: pairs two peers of a session by their
 //! observed addresses and decides where each datagram is forwarded.
 //!
-//! Design pointers (`docs/relay-design.md`):
-//! - §2.3 / §4.2 - pair by observed source address; record on each valid
-//!   datagram (NAT rebind handled for free); forward to the other role.
-//! - §4.3 - idle sweep evicts pairs with no activity within the timeout.
-//! - §4.4 - per-session byte cap cuts a pair off mid-stream; session cap
-//!   bounds memory.
+//! Each session has a slot per role holding that peer's most recently seen
+//! source address. A valid datagram records the sender's address in its
+//! slot (so a NAT rebind is followed for free) and is forwarded to the
+//! other role's slot. An idle sweep evicts pairs with no traffic within the
+//! timeout; a per-session byte cap cuts a pair off mid-stream; a
+//! session-count cap bounds memory.
 //!
 //! Pure logic, no sockets: [`on_datagram`](RelayTable::on_datagram)
-//! returns *where* to forward; the binary performs the actual send. The
+//! returns where to forward; the binary performs the actual send. The
 //! monthly quota (cross-session, persisted) lives in [`crate::quota`].
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub struct RelayConfig {
 }
 
 impl Default for RelayConfig {
-    /// Conservative "guest on a personal VPS" defaults (design §4.4).
+    /// Conservative "guest on a personal VPS" defaults.
     fn default() -> Self {
         Self {
             max_sessions: 64,
@@ -95,7 +95,7 @@ struct Counters {
 }
 
 /// Point-in-time stats (the binary merges these with the monthly quota
-/// counter for the `relay` stats block, design §4.6).
+/// counter for the `relay` stats block).
 pub struct RelayTableStats {
     pub active_pairs: u64,
     pub pairs_created_total: u64,
@@ -176,7 +176,7 @@ impl RelayTable {
         }
     }
 
-    /// Evict pairs idle longer than the configured timeout (design §4.3).
+    /// Evict pairs idle longer than the configured timeout.
     pub async fn sweep_idle(&self) {
         let now = Instant::now();
         let timeout = self.config.idle_timeout;

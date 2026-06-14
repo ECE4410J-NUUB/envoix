@@ -2,7 +2,7 @@
 //!
 //! Thin transport over `envoix-relay`'s pure logic. Owns the UDP socket,
 //! the forwarding table, the persisted monthly counter, and the runtime
-//! flags (debug logging, forwarding pause). Per design §4.2 / §4.6 / §4.7.
+//! flags (debug logging, forwarding pause).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ impl RelayServer {
     }
 
     async fn handle(&self, datagram: &[u8], from: SocketAddr) {
-        // Cheapest checks first; silent drop on anything invalid (§4.2).
+        // Cheapest checks first; silent drop on anything invalid.
         let Some(dg) = RelayDatagram::parse(datagram) else {
             self.invalid_total.fetch_add(1, Ordering::Relaxed);
             return;
@@ -81,12 +81,12 @@ impl RelayServer {
             return;
         };
 
-        // Manual / signal pause (§4.7).
+        // Manual / signal pause.
         if !self.forwarding_enabled.load(Ordering::Relaxed) {
             return;
         }
 
-        // Monthly quota gate (§4.4). Lock scope ends before any await.
+        // Monthly quota gate. Lock scope ends before any await.
         let now_month = usage::current_month();
         {
             let mut u = self.usage.lock().expect("usage mutex");
@@ -131,7 +131,7 @@ impl RelayServer {
         }
     }
 
-    // runtime controls (signal-driven, §4.7)
+    // runtime controls (signal-driven)
     /// Toggle verbose per-datagram logging. Returns the new state.
     pub fn toggle_debug(&self) -> bool {
         let prev = self.debug_mode.fetch_xor(true, Ordering::Relaxed);
@@ -159,7 +159,7 @@ impl RelayServer {
         self.table.sweep_idle().await;
     }
 
-    /// Emit the `relay` stats line (design §4.6).
+    /// Emit the `relay` stats line.
     pub async fn log_stats(&self) {
         let t = self.table.stats().await;
         let (month_bytes, limit) = {

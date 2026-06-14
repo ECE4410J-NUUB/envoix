@@ -1,12 +1,12 @@
 //! Data-plane datagram framing.
 //!
-//! Wire format per `docs/relay-design.md` §3.2: `magic || token || payload`.
-//! The relay parses an incoming datagram into (token, payload), validates
-//! the token elsewhere, and forwards the bare payload (§3.3). The token
-//! flows only peer->relay; the relay never echoes it.
+//! Wire format: `magic || token || payload`. The relay parses an incoming
+//! datagram into (token, payload), validates the token elsewhere, and
+//! forwards the bare payload. The token flows only peer->relay; the relay
+//! never echoes it.
 //!
 //! Magic first byte `0x3F` keeps the top two bits `00` so a relay datagram
-//! is distinguishable from a QUIC packet on a shared socket (RFC 8489 §5
+//! is distinguishable from a QUIC packet on a shared socket (RFC 8489 section 5
 //! lesson, same as the probe magic); last byte `0x59` distinguishes it
 //! from the probe magic (`...58`) if the two ever co-locate.
 
@@ -16,7 +16,7 @@ pub const RELAY_MAGIC: [u8; 4] = [0x3f, 0x45, 0x56, 0x59];
 
 /// magic || token. The client prepends this to every QUIC datagram on a
 /// relayed path; the client must shrink its QUIC max-datagram by this many
-/// bytes to stay under the path MTU (design §6).
+/// bytes to stay under the path MTU.
 pub const RELAY_HEADER_LEN: usize = 4 + RELAY_TOKEN_LEN; // 61
 
 /// A parsed data-plane datagram: the token to validate and the opaque
