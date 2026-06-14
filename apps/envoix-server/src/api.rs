@@ -431,12 +431,26 @@ async fn relay_allocation(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Response {
+    // Feature disabled: bare 404, indistinguishable from a missing route
+    // (same convention as /api/v1/stats).
     let Some(relay) = &state.relay else {
-        return Err(Error::SessionNotFound.into()); // route effectively disabled -> 404
+        return StatusCode::NOT_FOUND.into_response();
     };
-    let cap = Capability::from_hex(bearer_token(&headers)?).map_err(|_| Error::Unauthorized)?;
-    let session_id = SessionId::from_hex(&id)?;
+    match allocate_relay(&state, relay, &id, &headers).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
+async fn allocate_relay(
+    state: &AppState,
+    relay: &RelayState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<RelayAllocationResponse, Error> {
+    let cap = Capability::from_hex(bearer_token(headers)?).map_err(|_| Error::Unauthorized)?;
+    let session_id = SessionId::from_hex(id)?;
 
     let (role, expires_at) = state
         .registry
@@ -454,11 +468,11 @@ async fn relay_allocation(
     let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
 
     tracing::info!(session_ref = &id[..8], ?role, "relay allocated");
-    Ok(Json(RelayAllocationResponse {
+    Ok(RelayAllocationResponse {
         relay_endpoint: relay.advertise.clone(),
         relay_token: token_hex,
         expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
-    }))
+    })
 }
 
 /// Publish one candidate. Returns the canonical stored record - for a
