@@ -1,4 +1,4 @@
-//! Relay authorization tokens: stateless, shared-key HMAC.
+//! Relay authorization tokens: stateless, shared-key keyed MAC.
 //!
 //! Design pointers (`docs/relay-design.md`):
 //! - §3.1 — byte layout; the key is a **shared, persistent** secret

@@ -7,7 +7,7 @@ Branch: `feat/relay` (off `server-dev`)
 Owner: chkxw
 Adjacent docs: `docs/rendezvous-design.md` (the session registry this
 attaches to), `docs/reflexive-discovery-design.md` (the probe service;
-shares the stateless-HMAC-token and silent-drop patterns),
+shares the stateless keyed-MAC token and silent-drop patterns),
 `docs/rendezvous-api.md` (client contract).
 
 This document fixes the architecture, wire model, and runtime semantics
@@ -93,7 +93,7 @@ TURN (RFC 8656) is the standard, but most of it is scope we do not need:
 allocation lifetimes with refresh, permissions, channels, multiple
 transport protocols, long-term credential mechanism. We borrow only the
 core idea — a server that forwards between two peers by their observed
-addresses — and reuse our own stateless-HMAC-token pattern (from the
+addresses — and reuse our own stateless keyed-MAC token pattern (from the
 probe service) for auth instead of TURN's credential machinery. The
 result is ~a few hundred lines, not a TURN stack.
 
@@ -137,7 +137,7 @@ data-plane datagram, validated locally by the VPS forwarder.
 ```
 payload = session_id ‖ role ‖ expires_at
           [16 bytes ] [1 B ] [8 B u64 BE unix-seconds]   = 25 bytes
-tag     = HMAC-BLAKE3(relay_key, payload)                = 32 bytes
+tag     = keyed_BLAKE3(relay_key, payload)                = 32 bytes
 token   = payload ‖ tag                                  = 57 bytes
 ```
 
@@ -160,10 +160,10 @@ check expiry. Any failure ⇒ silent drop (no reply, no log at normal
 level).
 
 **This follows established practice.** The shared-static-key + local
-HMAC-validation pattern is exactly the **TURN REST API** model
+keyed-MAC validation pattern is exactly the **TURN REST API** model
 (draft-uberti-behave-turn-rest, RFC 7635) used across WebRTC: a
 signaling server and a separate TURN relay share one secret; the
-signaling server mints time-limited HMAC credentials the relay validates
+signaling server mints time-limited MAC credentials the relay validates
 locally **without any runtime call back**. coturn (the most-deployed
 TURN server) ships this as `use-auth-secret`. Online validation
 (relay calls home per token) was considered and rejected: it would
@@ -267,7 +267,7 @@ direct attempts.
 Per datagram, cheapest checks first:
 
 ```
-len ≥ 61 ?  → magic ok ?  → token HMAC valid (constant-time) ?
+len ≥ 61 ?  → magic ok ?  → token MAC valid (constant-time) ?
   → expires_at in the future ?
        any "no" ⇒ drop silently (count invalid)
        all "yes" ⇒ record sender addr in its role slot;
@@ -345,7 +345,7 @@ work, not v1 server-side.
 
 | Failure | Defence |
 |---|---|
-| Forged / replayed token | HMAC validation, constant-time; silent drop. Stolen token only injects garbage a peer's QUIC rejects. |
+| Forged / replayed token | MAC validation, constant-time; silent drop. Stolen token only injects garbage a peer's QUIC rejects. |
 | Amplification abuse | Output (bare payload) < input (payload + 61 B header); never amplifies. Unknown-peer datagrams dropped, not buffered. |
 | Oversized datagram | Bounded by recv buffer; QUIC datagrams are ≤ path MTU. Anything larger is malformed → dropped. |
 | Memory growth | `--relay-max-sessions` cap + idle sweep. |
