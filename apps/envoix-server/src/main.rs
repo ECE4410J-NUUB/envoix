@@ -47,9 +47,9 @@ struct Cli {
     relay_key: Option<String>,
 
     /// Public relay endpoint advertised to clients, e.g.
-    /// "67.230.187.238:9104". Required with `--relay-key`.
+    /// "203.0.113.1:9104". Required with `--relay-key`.
     #[arg(long, env = "ENVOIX_RELAY_ADVERTISE", requires = "relay_key")]
-    relay_advertise: Option<String>,
+    relay_advertise: Option<SocketAddr>,
 
     /// Upgrade envoix log targets to debug (ignored if RUST_LOG is set).
     #[arg(long)]
@@ -68,7 +68,7 @@ async fn main() {
         max_ttl: Duration::from_secs(cli.max_ttl_seconds),
     };
     let relay = match (cli.relay_key, cli.relay_advertise) {
-        (Some(key), Some(advertise)) => Some((key, advertise)),
+        (Some(key), Some(advertise)) => Some((key, advertise.to_string())),
         _ => None,
     };
     let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token, relay);
