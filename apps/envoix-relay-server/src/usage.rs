@@ -20,7 +20,7 @@ struct UsageState {
 /// Current month as `year * 12 + month0` (month0 in 0..12).
 ///
 /// Pure civil-from-days (Howard Hinnant's algorithm) over the Unix day
-/// count — no calendar crate needed, and exact.
+/// count - no calendar crate needed, and exact.
 pub fn current_month() -> u32 {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,16 +74,16 @@ mod tests {
 
     #[test]
     fn month_of_known_dates() {
-        // 1970-01-01 → year 1970, month0 0 → 1970*12 + 0
+        // 1970-01-01 -> year 1970, month0 0 -> 1970*12 + 0
         assert_eq!(month_of_unix_secs(0), 1970 * 12);
         // 2026-06-13 ~ 1781e6 s. Compute the boundary precisely:
         // 2026-01-01 00:00:00 UTC = 1767225600
         assert_eq!(month_of_unix_secs(1_767_225_600), 2026 * 12); // Jan = month0 0
-        // 2026-06-01 00:00:00 UTC = 1780272000 → June = month0 5
+        // 2026-06-01 00:00:00 UTC = 1780272000 -> June = month0 5
         assert_eq!(month_of_unix_secs(1_780_272_000), 2026 * 12 + 5);
-        // 2026-06-30 23:59:59 = 1782863999 → still June
+        // 2026-06-30 23:59:59 = 1782863999 -> still June
         assert_eq!(month_of_unix_secs(1_782_863_999), 2026 * 12 + 5);
-        // 2026-07-01 00:00:00 = 1782864000 → July
+        // 2026-07-01 00:00:00 = 1782864000 -> July
         assert_eq!(month_of_unix_secs(1_782_864_000), 2026 * 12 + 6);
     }
 

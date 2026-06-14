@@ -40,7 +40,7 @@ struct Cli {
     #[arg(long, env = "ENVOIX_MAX_TTL", default_value_t = 1800)]
     max_ttl_seconds: u64,
 
-    /// Shared 64-hex relay key — must match the relay server's
+    /// Shared 64-hex relay key - must match the relay server's
     /// `--relay-key`. Required (with `--relay-advertise`) to enable the
     /// relay-allocation endpoint.
     #[arg(long, env = "ENVOIX_RELAY_KEY", requires = "relay_advertise")]
@@ -116,8 +116,8 @@ async fn shutdown_signal(state: api::AppState) {
 
 /// Default filter: envoix targets at `info`, everything
 /// else at `warn`. `--debug` upgrades envoix targets; `RUST_LOG` overrides
-/// everything. Target names are the actual crate names (underscored);
-/// `envoix=info` is shorthand for these.
+/// everything. Target names are the actual crate names (underscored) -
+/// the design's `envoix=info` is shorthand for these.
 fn init_tracing(debug: bool) {
     let level = if debug { "debug" } else { "info" };
     let default = format!("envoix_server={level},envoix_rendezvous={level},warn");

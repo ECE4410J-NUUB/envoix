@@ -131,8 +131,7 @@ impl RelayServer {
         }
     }
 
-    // ── runtime controls (signal-driven, §4.7) ──────────────────────────
-
+    // runtime controls (signal-driven, §4.7)
     /// Toggle verbose per-datagram logging. Returns the new state.
     pub fn toggle_debug(&self) -> bool {
         let prev = self.debug_mode.fetch_xor(true, Ordering::Relaxed);
@@ -251,7 +250,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Receiver sends payload — relay forwards the BARE payload to sender.
+        // Receiver sends payload - relay forwards the BARE payload to sender.
         receiver
             .send_to(&encode(&token(RelayRole::Receiver), b"hello-quic"), relay)
             .await
@@ -270,7 +269,7 @@ mod tests {
         let relay = server.local_addr();
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-        // Wrong magic / garbage token — no reply, no forward.
+        // Wrong magic / garbage token - no reply, no forward.
         let mut bad = vec![0u8; 70];
         peer.send_to(&bad, relay).await.unwrap();
         // Valid frame shape but bad token bytes.
@@ -302,7 +301,7 @@ mod tests {
         let mut buf = [0u8; 64];
         assert!(recv_timeout(&sender, &mut buf).await.is_none());
 
-        // Resume → forwarding works again.
+        // Resume -> forwarding works again.
         assert!(server.toggle_forwarding());
         receiver
             .send_to(&encode(&token(RelayRole::Receiver), b"data2"), relay)
@@ -326,7 +325,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // First payload (5 bytes) forwards but pushes month_bytes to 5 ≥ 3.
+        // First payload (5 bytes) forwards but pushes month_bytes to 5 >= 3.
         receiver
             .send_to(&encode(&token(RelayRole::Receiver), b"first"), relay)
             .await
@@ -334,7 +333,7 @@ mod tests {
         let mut buf = [0u8; 64];
         let _ = recv_timeout(&sender, &mut buf).await; // may or may not arrive
 
-        // Next datagram is over quota → dropped regardless.
+        // Next datagram is over quota -> dropped regardless.
         receiver
             .send_to(&encode(&token(RelayRole::Receiver), b"second"), relay)
             .await

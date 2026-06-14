@@ -1,6 +1,6 @@
 //! HTTP surface: routes, request/response shapes, error mapping.
 //!
-//! Thin transport layer -- all session behaviour lives in
+//! Thin transport layer per design §2 - all session behaviour lives in
 //! `envoix-rendezvous`; this module translates HTTP to library calls and
 //! library errors to the JSON envelope.
 
@@ -21,9 +21,9 @@ use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
     SessionId, SessionRegistry, SessionRole, Transport,
 };
-// SSoT: the wire version the whole workspace speaks. Never redeclare
-// locally -- a future bump in envoix-types must reach this server's 422
-// check automatically.
+// SSoT: the wire version the whole workspace speaks (design §3.3
+// `protocol_versions`). Never redeclare locally - a future bump in
+// envoix-types must reach this server's 422 check automatically.
 use envoix_types::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -85,8 +85,8 @@ impl AppState {
         self.shutting_down.store(true, Ordering::Relaxed);
     }
 
-    /// Background TTL sweep. Recovery from task death is the
-    /// supervisor's job.
+    /// Background TTL sweep per design §4.4 - non-panicking by
+    /// construction; recovery from task death is the supervisor's job.
     pub fn spawn_ttl_sweep(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
         let registry = self.registry.clone();
         tokio::spawn(async move {
@@ -129,7 +129,6 @@ pub fn router(state: AppState) -> Router {
 }
 
 // Error envelope
-
 /// Wrapper so library errors become the `{code, message}` envelope.
 struct ApiError(Error);
 
@@ -178,7 +177,6 @@ where
 }
 
 // Middleware
-
 /// New requests after SIGTERM get `503 service_shutting_down`; in-flight
 /// requests (already past this layer) finish naturally.
 async fn reject_during_shutdown(
@@ -206,7 +204,6 @@ async fn count_requests(State(state): State<AppState>, req: Request, next: Next)
 }
 
 // Request/response shapes
-
 #[derive(Deserialize)]
 struct PeerMetadataBody {
     protocol_versions: Vec<u32>,
@@ -236,7 +233,7 @@ struct JoinBody {
     peer_metadata: PeerMetadataBody,
 }
 
-/// Candidate `kind` wire strings. Unknown kinds fail serde
+/// Candidate `kind` wire strings (design §3.3). Unknown kinds fail serde
 /// -> `400 invalid_request`.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -342,7 +339,6 @@ struct PollQuery {
 }
 
 // Handlers
-
 async fn health() -> &'static str {
     "ok"
 }
@@ -421,7 +417,7 @@ async fn close(
 #[derive(Serialize)]
 struct RelayAllocationResponse {
     relay_endpoint: String,
-    /// 114 hex chars — the 57-byte relay token. Opaque to the client;
+    /// 114 hex chars - the 57-byte relay token. Opaque to the client;
     /// echoed in every data-plane datagram (`docs/relay-design.md` §6).
     relay_token: String,
     /// Session expiry the token is valid until, RFC 3339.
@@ -437,7 +433,7 @@ async fn relay_allocation(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let Some(relay) = &state.relay else {
-        return Err(Error::SessionNotFound.into()); // route effectively disabled → 404
+        return Err(Error::SessionNotFound.into()); // route effectively disabled -> 404
     };
     let cap = Capability::from_hex(bearer_token(&headers)?).map_err(|_| Error::Unauthorized)?;
     let session_id = SessionId::from_hex(&id)?;
@@ -465,7 +461,7 @@ async fn relay_allocation(
     }))
 }
 
-/// Publish one candidate. Returns the canonical stored record — for a
+/// Publish one candidate. Returns the canonical stored record - for a
 /// duplicate `(kind, transport, addr)` that is the existing record with
 /// its original `sequence` (no-op rule), hence 200 not 201.
 async fn publish_candidate(
@@ -532,8 +528,8 @@ async fn poll_candidates(
     }))
 }
 
-/// Admin-token-gated stats. With no token configured the route answers
-/// plain 404 -- indistinguishable from a nonexistent route.
+/// Admin-token-gated stats (design §4.8). With no token configured the
+/// route answers plain 404 - indistinguishable from a nonexistent route.
 async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = &state.admin_token_hash else {
         return StatusCode::NOT_FOUND.into_response();
@@ -578,9 +574,9 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 // Helpers
-
 /// Missing or malformed `Authorization` header is `401 unauthorized`
-/// without inspecting the session id (prevents probing for live ids).
+/// without inspecting the session id (design §3.4 - prevents probing for
+/// live ids).
 fn bearer_token(headers: &HeaderMap) -> Result<&str, Error> {
     headers
         .get(header::AUTHORIZATION)
@@ -599,7 +595,7 @@ fn check_version(meta: &PeerMetadataBody) -> Result<(), Error> {
 
 /// Observed address: `X-Real-IP`, else leftmost
 /// `X-Forwarded-For`, else none. The direct TCP source is intentionally
-/// not consulted -- behind nginx it is always 127.0.0.1 (no information)
+/// not consulted - behind nginx it is always 127.0.0.1 (no information)
 /// and the field is advisory metadata only. nginx does not forward the
 /// client's source port, so port 0 marks it unknown.
 fn observed_http_addr(headers: &HeaderMap) -> Option<SocketAddr> {
@@ -1139,12 +1135,12 @@ mod tests {
     async fn relay_allocation_requires_auth() {
         let (server, _) = relay_test_server();
         do_register(&server).await;
-        // Missing Authorization → 401.
+        // Missing Authorization -> 401.
         let res = server
             .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
-        // Wrong cap → 401.
+        // Wrong cap -> 401.
         let res = server
             .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
             .authorization_bearer("cccccccccccccccccccccccccccccccc")

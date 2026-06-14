@@ -2,10 +2,10 @@
 //! observed addresses and decides where each datagram is forwarded.
 //!
 //! Design pointers (`docs/relay-design.md`):
-//! - §2.3 / §4.2 — pair by observed source address; record on each valid
+//! - §2.3 / §4.2 - pair by observed source address; record on each valid
 //!   datagram (NAT rebind handled for free); forward to the other role.
-//! - §4.3 — idle sweep evicts pairs with no activity within the timeout.
-//! - §4.4 — per-session byte cap cuts a pair off mid-stream; session cap
+//! - §4.3 - idle sweep evicts pairs with no activity within the timeout.
+//! - §4.4 - per-session byte cap cuts a pair off mid-stream; session cap
 //!   bounds memory.
 //!
 //! Pure logic, no sockets: [`on_datagram`](RelayTable::on_datagram)
@@ -45,11 +45,11 @@ impl Default for RelayConfig {
 pub enum ForwardOutcome {
     /// Forward the bare payload to this peer address.
     Forward(SocketAddr),
-    /// The other peer has not sent yet — drop (it will retransmit).
+    /// The other peer has not sent yet - drop (it will retransmit).
     PeerUnknown,
-    /// This pair exceeded `max_bytes_per_session` and was removed — drop.
+    /// This pair exceeded `max_bytes_per_session` and was removed - drop.
     SessionCutOff,
-    /// A new session past `max_sessions` — drop.
+    /// A new session past `max_sessions` - drop.
     CapacityExceeded,
 }
 
@@ -229,17 +229,17 @@ mod tests {
         let a = addr("1.2.3.4:5000"); // receiver
         let b = addr("9.8.7.6:6000"); // sender
 
-        // Receiver sends first — sender unknown, drop.
+        // Receiver sends first - sender unknown, drop.
         assert_eq!(
             t.on_datagram(s, RelayRole::Receiver, a, 100).await,
             ForwardOutcome::PeerUnknown
         );
-        // Sender sends — now receiver is known, forward to receiver.
+        // Sender sends - now receiver is known, forward to receiver.
         assert_eq!(
             t.on_datagram(s, RelayRole::Sender, b, 100).await,
             ForwardOutcome::Forward(a)
         );
-        // Receiver again — forward to sender.
+        // Receiver again - forward to sender.
         assert_eq!(
             t.on_datagram(s, RelayRole::Receiver, a, 100).await,
             ForwardOutcome::Forward(b)
@@ -277,7 +277,7 @@ mod tests {
         let b = addr("9.8.7.6:6000");
         t.on_datagram(s, RelayRole::Sender, b, 0).await; // register sender
 
-        // 600 + 600 = 1200 > 1000 → second one cuts off.
+        // 600 + 600 = 1200 > 1000 -> second one cuts off.
         assert_eq!(
             t.on_datagram(s, RelayRole::Receiver, a, 600).await,
             ForwardOutcome::Forward(b)

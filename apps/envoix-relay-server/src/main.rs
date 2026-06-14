@@ -25,7 +25,7 @@ struct Cli {
     #[arg(long, env = "ENVOIX_RELAY_LISTEN", default_value = "0.0.0.0:9104")]
     listen: SocketAddr,
 
-    /// Shared 64-hex relay key — must match the home allocation server's
+    /// Shared 64-hex relay key - must match the home allocation server's
     /// `--relay-key`.
     #[arg(long, env = "ENVOIX_RELAY_KEY")]
     key: String,
@@ -123,8 +123,8 @@ fn spawn_background_tasks(server: Arc<RelayServer>) {
     });
 }
 
-/// SIGUSR1 → toggle debug logging; SIGUSR2 → toggle forwarding pause;
-/// SIGTERM/SIGINT → flush usage and exit (design §4.7).
+/// SIGUSR1 -> toggle debug logging; SIGUSR2 -> toggle forwarding pause;
+/// SIGTERM/SIGINT -> flush usage and exit (design §4.7).
 fn install_signal_handlers(server: Arc<RelayServer>) {
     #[cfg(unix)]
     {

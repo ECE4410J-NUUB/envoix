@@ -1,11 +1,11 @@
 //! Relay authorization tokens: stateless, shared-key keyed MAC.
 //!
 //! Design pointers (`docs/relay-design.md`):
-//! - §3.1 — byte layout; the key is a **shared, persistent** secret
+//! - §3.1 - byte layout; the key is a **shared, persistent** secret
 //!   configured identically in the home issuer and the VPS validator
 //!   (TURN REST API / coturn `use-auth-secret` precedent). This is the
 //!   one difference from the probe token, whose key is per-process random.
-//! - §4.2 — verification is silent-drop: failures return `None`.
+//! - §4.2 - verification is silent-drop: failures return `None`.
 //!
 //! The token authorises *relay use* for a session+role. It is unrelated
 //! to the transfer's end-to-end encryption key, which the relay never
@@ -15,13 +15,13 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SESSION_LEN: usize = 16;
-/// payload = session_id(16) ‖ role(1) ‖ expires_at(8, u64 BE unix-seconds)
+/// payload = session_id(16) || role(1) || expires_at(8, u64 BE unix-seconds)
 const PAYLOAD_LEN: usize = SESSION_LEN + 1 + 8;
 const TAG_LEN: usize = 32;
 pub const RELAY_TOKEN_LEN: usize = PAYLOAD_LEN + TAG_LEN; // 57
 
 /// Opaque pairing key. The relay treats the session id as 16 bytes with
-/// no semantics of its own — it is only a HashMap key for pairing the two
+/// no semantics of its own - it is only a HashMap key for pairing the two
 /// peers. The home server supplies the rendezvous session's bytes.
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RelaySessionId([u8; SESSION_LEN]);
@@ -37,7 +37,7 @@ impl RelaySessionId {
 }
 
 impl fmt::Debug for RelaySessionId {
-    /// First 8 hex chars only — a stable short ref for logs (not secret,
+    /// First 8 hex chars only - a stable short ref for logs (not secret,
     /// just tidy and consistent with the rendezvous `session_ref`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -125,7 +125,7 @@ impl RelayTokenKey {
     }
 
     /// Verify a token from a data-plane datagram. `None` on any failure
-    /// (length, tag, unknown role, expiry past) — callers drop silently.
+    /// (length, tag, unknown role, expiry past) - callers drop silently.
     pub fn verify(&self, token: &[u8]) -> Option<(RelaySessionId, RelayRole, SystemTime)> {
         if token.len() != RELAY_TOKEN_LEN {
             return None;

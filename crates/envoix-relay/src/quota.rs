@@ -4,7 +4,7 @@
 //! current month as an integer (`year * 12 + month0`), so this type never
 //! touches the clock and is fully unit-testable; the binary computes the
 //! month from `SystemTime` and persists the snapshot to disk
-//! (`/var/lib/envoix-relay/usage.json`) so a restart — or restart loop —
+//! (`/var/lib/envoix-relay/usage.json`) so a restart - or restart loop -
 //! cannot bypass the limit.
 
 /// Tracks bytes forwarded in the current month against a hard limit.
@@ -75,7 +75,7 @@ mod tests {
         u.record(600);
         assert!(u.check(100)); // 600 < 1000
         u.record(600);
-        assert!(!u.check(100)); // 1200 >= 1000 → blocked
+        assert!(!u.check(100)); // 1200 >= 1000 -> blocked
     }
 
     #[test]
@@ -100,7 +100,7 @@ mod tests {
         let mut restored = MonthlyUsage::with_state(1000, month, bytes);
         assert!(restored.check(100)); // 800 < 1000, still ok
         restored.record(300);
-        assert!(!restored.check(100)); // 1100 >= 1000 — restart didn't reset
+        assert!(!restored.check(100)); // 1100 >= 1000 - restart didn't reset
     }
 
     #[test]
