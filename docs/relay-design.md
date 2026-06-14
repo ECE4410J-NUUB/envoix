@@ -520,6 +520,13 @@ capability.
   immediately). Idle timeout suffices; a control channel can be added if
   eviction latency ever matters.
 - **Token rotation without coordinated restart.**
+- **Self-hosted forwarding.** v1 ties allocation and forwarding to one
+  operator. The split is already clean: the control plane (session
+  allocation) stays on the rendezvous server, and the data plane is a
+  standalone binary keyed only by the shared secret. A future relay
+  registration would let an operator run their own forwarder and hand
+  the rendezvous its key, leaving allocation centralized. Not configurable
+  in v1 — the rendezvous trusts a single statically configured relay.
 
 ---
 
