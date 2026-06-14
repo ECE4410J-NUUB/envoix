@@ -31,7 +31,7 @@ The relay has two planes:
 
 - **Control plane** (allocation): an authenticated HTTP endpoint that
   hands a peer a relay endpoint + a short-lived token. Lives at home,
-  `envoix.chkxwlyh.us/relay/...`, behind Cloudflare like the rest of the
+  `<home-server>/relay/...`, behind Cloudflare like the rest of the
   rendezvous API.
 - **Data plane** (forwarding): a dumb UDP forwarder on a VPS. Validates
   each datagram's token, pairs the two peers of a session by their
@@ -212,7 +212,7 @@ endpoint and that peer's role-bound token:
 
 ```json
 {
-  "relay_endpoint": "67.230.187.238:9104",
+  "relay_endpoint": "203.0.113.1:9104",
   "relay_token": "<114 hex chars>",
   "expires_at": "2026-06-13T09:20:00Z"
 }
@@ -444,10 +444,10 @@ for testing. The box's primary (personal) use is fully insulated.
 ### 5.1 Topology
 
 ```
-                         envoix.chkxwlyh.us  (home, Cloudflare orange)
+                         <home-server>  (home, Cloudflare orange)
 peer ──HTTP allocation──►  /api/v1/.../relay-allocation
                               │  mints token with shared relay_key
-                              │  advertises 67.230.187.238:9104
+                              │  advertises 203.0.113.1:9104
 peer ──UDP QUIC-over-relay──────────────────────────────► VPS :9104
                                                             envoix-relay-server
                                                             validates token (same key)
@@ -469,7 +469,7 @@ peer ──UDP QUIC-over-relay────────────────�
 
 ### 5.2 VPS specifics (already provisioned)
 
-`67.230.187.238`, AlmaLinux 9.8, 2 vCPU / 1 GB, BandwagonHost CN2 GIA-E
+A CN2 GIA-E VPS (example: 2 vCPU / 1 GB, AlmaLinux), reachable at the advertised `host:port`
 (LA / DC9). firewalld open on UDP 9100-9105; key-only SSH; fail2ban.
 Off-peak baseline Shanghai 移动 → VPS: 132 ms, 0 % loss (June 2026).
 systemd unit + `DynamicUser`, `Restart=on-failure`, mirroring the home
