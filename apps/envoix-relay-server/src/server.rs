@@ -65,7 +65,7 @@ impl RelayServer {
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((n, from)) => self.handle(&buf[..n], from).await,
-                Err(e) => tracing::warn!(error = %e, "probe recv error; continuing"),
+                Err(e) => tracing::warn!(error = %e, "relay recv error; continuing"),
             }
         }
     }
