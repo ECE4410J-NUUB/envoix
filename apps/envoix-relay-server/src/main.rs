@@ -53,6 +53,14 @@ struct Cli {
     #[arg(long, env = "ENVOIX_RELAY_IDLE_TIMEOUT", default_value_t = 60)]
     idle_timeout_secs: u64,
 
+    /// How often to evict idle pairs (seconds).
+    #[arg(long, env = "ENVOIX_RELAY_SWEEP_INTERVAL", default_value_t = 30)]
+    sweep_interval_secs: u64,
+
+    /// How often to persist usage and log the stats line (seconds).
+    #[arg(long, env = "ENVOIX_RELAY_HOUSEKEEPING_INTERVAL", default_value_t = 30)]
+    housekeeping_interval_secs: u64,
+
     /// Persisted monthly-usage file.
     #[arg(
         long,
@@ -94,7 +102,11 @@ async fn main() {
     }
     tracing::info!(listen = %cli.listen, "envoix relay data plane listening");
 
-    spawn_background_tasks(server.clone());
+    spawn_background_tasks(
+        server.clone(),
+        Duration::from_secs(cli.sweep_interval_secs),
+        Duration::from_secs(cli.housekeeping_interval_secs),
+    );
     install_signal_handlers(server.clone());
 
     // The receive loop is the main work; it runs until the process exits.
@@ -103,10 +115,14 @@ async fn main() {
 }
 
 /// Spawn the idle-sweep task and the periodic usage-flush/stats task.
-fn spawn_background_tasks(server: Arc<RelayServer>) {
+fn spawn_background_tasks(
+    server: Arc<RelayServer>,
+    sweep_interval: Duration,
+    housekeeping_interval: Duration,
+) {
     let sweep = server.clone();
     tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_secs(30));
+        let mut t = tokio::time::interval(sweep_interval);
         loop {
             t.tick().await;
             sweep.sweep_idle().await;
@@ -115,7 +131,7 @@ fn spawn_background_tasks(server: Arc<RelayServer>) {
 
     let housekeeping = server;
     tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_secs(30));
+        let mut t = tokio::time::interval(housekeeping_interval);
         loop {
             t.tick().await;
             housekeeping.flush_usage();
