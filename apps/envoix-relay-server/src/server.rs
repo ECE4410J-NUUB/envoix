@@ -146,11 +146,8 @@ impl RelayServer {
 
     /// Persist the usage counter (periodic + on shutdown).
     pub fn flush_usage(&self) {
-        let snapshot = {
-            let u = self.usage.lock().expect("usage mutex");
-            usage::save(&self.usage_path, &u)
-        };
-        if let Err(e) = snapshot {
+        let snapshot = self.usage.lock().expect("usage mutex").snapshot();
+        if let Err(e) = usage::save(&self.usage_path, snapshot) {
             tracing::warn!(error = %e, "failed to persist relay usage");
         }
     }

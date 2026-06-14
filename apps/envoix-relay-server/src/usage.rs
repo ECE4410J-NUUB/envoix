@@ -55,10 +55,11 @@ pub fn load(path: &Path, limit: u64) -> MonthlyUsage {
     }
 }
 
-/// Persist the snapshot, creating the parent directory if needed.
-/// Best-effort: a write failure is logged by the caller, not fatal.
-pub fn save(path: &Path, usage: &MonthlyUsage) -> std::io::Result<()> {
-    let (month, bytes) = usage.snapshot();
+/// Persist a `(month, bytes)` snapshot, creating the parent directory if
+/// needed. The caller takes the snapshot under lock and passes it here so
+/// the usage mutex is not held across this blocking write. Best-effort: a
+/// write failure is logged by the caller, not fatal.
+pub fn save(path: &Path, (month, bytes): (u32, u64)) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -97,7 +98,7 @@ mod tests {
         let mut u = MonthlyUsage::new(1000);
         u.check(2026 * 12 + 5);
         u.record(777);
-        save(&path, &u).expect("save");
+        save(&path, u.snapshot()).expect("save");
 
         let restored = load(&path, 1000);
         assert_eq!(restored.snapshot(), (2026 * 12 + 5, 777));
