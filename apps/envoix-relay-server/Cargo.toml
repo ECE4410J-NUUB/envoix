@@ -3,6 +3,7 @@ name = "envoix-relay-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Envoix relay data plane: a UDP forwarder for the Envoix relay fallback."
 
 [dependencies]
 envoix-relay.workspace = true
@@ -14,3 +15,23 @@ toml.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Debian packaging: build with `cargo deb -p envoix-relay-server`.
+# Installs the binary, a default config (conffile), and the systemd unit,
+# enabling (but not starting) the service on install.
+[package.metadata.deb]
+section = "net"
+priority = "optional"
+maintainer = "Envoix maintainers <relay@example.invalid>"
+copyright = "2026, Envoix"
+assets = [
+    ["target/release/envoix-relay-server", "usr/bin/", "755"],
+    ["dist/config.toml", "etc/envoix-relay/config.toml", "644"],
+]
+conf-files = ["/etc/envoix-relay/config.toml"]
+
+[package.metadata.deb.systemd-units]
+unit-name = "envoix-relay"
+unit-scripts = "dist"
+enable = true
+start = false

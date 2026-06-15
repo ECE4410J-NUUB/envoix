@@ -1,0 +1,30 @@
+[Unit]
+Description=Envoix relay data plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/envoix-relay-server --config /etc/envoix-relay/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Transient unprivileged user; state persists in /var/lib/envoix-relay
+# (the master key, usage counter, and stats snapshot live here).
+DynamicUser=yes
+StateDirectory=envoix-relay
+StateDirectoryMode=0700
+
+# Hardening.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
