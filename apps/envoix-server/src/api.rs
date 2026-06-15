@@ -1,6 +1,6 @@
 //! HTTP surface: routes, request/response shapes, error mapping.
 //!
-//! Thin transport layer per design §2 - all session behaviour lives in
+//! Thin transport layer -- all session behaviour lives in
 //! `envoix-rendezvous`; this module translates HTTP to library calls and
 //! library errors to the JSON envelope.
 
@@ -21,9 +21,9 @@ use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
     SessionId, SessionRegistry, SessionRole, Transport,
 };
-// SSoT: the wire version the whole workspace speaks (design §3.3
-// `protocol_versions`). Never redeclare locally - a future bump in
-// envoix-types must reach this server's 422 check automatically.
+// SSoT: the wire version the whole workspace speaks. Never redeclare
+// locally -- a future bump in envoix-types must reach this server's 422
+// check automatically.
 use envoix_types::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -85,8 +85,8 @@ impl AppState {
         self.shutting_down.store(true, Ordering::Relaxed);
     }
 
-    /// Background TTL sweep per design §4.4 - non-panicking by
-    /// construction; recovery from task death is the supervisor's job.
+    /// Background TTL sweep. Recovery from task death is the
+    /// supervisor's job.
     pub fn spawn_ttl_sweep(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
         let registry = self.registry.clone();
         tokio::spawn(async move {
@@ -233,7 +233,7 @@ struct JoinBody {
     peer_metadata: PeerMetadataBody,
 }
 
-/// Candidate `kind` wire strings (design §3.3). Unknown kinds fail serde
+/// Candidate `kind` wire strings. Unknown kinds fail serde
 /// -> `400 invalid_request`.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -542,8 +542,8 @@ async fn poll_candidates(
     }))
 }
 
-/// Admin-token-gated stats (design §4.8). With no token configured the
-/// route answers plain 404 - indistinguishable from a nonexistent route.
+/// Admin-token-gated stats. With no token configured the route answers
+/// plain 404 -- indistinguishable from a nonexistent route.
 async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = &state.admin_token_hash else {
         return StatusCode::NOT_FOUND.into_response();
@@ -589,8 +589,7 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
 // Helpers
 /// Missing or malformed `Authorization` header is `401 unauthorized`
-/// without inspecting the session id (design §3.4 - prevents probing for
-/// live ids).
+/// without inspecting the session id (prevents probing for live ids).
 fn bearer_token(headers: &HeaderMap) -> Result<&str, Error> {
     headers
         .get(header::AUTHORIZATION)
@@ -1176,7 +1175,7 @@ mod tests {
         assert_eq!(body["kind"], "relay");
     }
 
-    /// End-to-end over real TCP loopback per design §7 PR 2.
+    /// End-to-end over real TCP loopback.
     #[tokio::test]
     async fn e2e_register_join_close_over_tcp() {
         let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None, None);
