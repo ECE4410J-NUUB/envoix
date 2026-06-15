@@ -9,19 +9,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use envoix_relay::{RelayConfig, RelayTokenKey};
 
 mod keyfile;
 mod server;
+mod service;
 mod usage;
 
 use server::RelayServer;
 
-/// Command-line configuration.
+/// Run the relay (no subcommand) or manage the installed service.
 #[derive(Parser)]
-#[command(name = "envoix-relay-server", about = "Envoix relay data plane")]
+#[command(
+    name = "envoix-relay-server",
+    about = "Envoix relay data plane",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    #[command(flatten)]
+    run: RunArgs,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Enable on boot and start the relay service.
+    Up,
+    /// Stop the relay service.
+    Down,
+}
+
+/// Data-plane server options (used when no subcommand is given).
+#[derive(Args)]
+struct RunArgs {
     /// UDP bind address.
     #[arg(long, env = "ENVOIX_RELAY_LISTEN", default_value = "0.0.0.0:9104")]
     listen: SocketAddr,
@@ -88,39 +111,47 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    init_tracing(cli.debug);
+    match cli.command {
+        None => run_server(cli.run).await,
+        Some(Command::Up) => service::up(),
+        Some(Command::Down) => service::down(),
+    }
+}
 
-    let key = match cli.key {
+async fn run_server(args: RunArgs) {
+    init_tracing(args.debug);
+
+    let key = match args.key {
         Some(hex) => RelayTokenKey::from_hex(hex.trim())
             .unwrap_or_else(|| panic!("--key must be 64 hex characters")),
-        None => keyfile::load_or_generate(&cli.key_file)
+        None => keyfile::load_or_generate(&args.key_file)
             .unwrap_or_else(|e| panic!("relay key: {e}")),
     };
     let config = RelayConfig {
-        max_sessions: cli.max_sessions,
-        max_bytes_per_session: cli.max_bytes_per_session,
-        idle_timeout: Duration::from_secs(cli.idle_timeout_secs),
+        max_sessions: args.max_sessions,
+        max_bytes_per_session: args.max_bytes_per_session,
+        idle_timeout: Duration::from_secs(args.idle_timeout_secs),
     };
 
     let server = RelayServer::bind(
-        cli.listen,
+        args.listen,
         key,
         config,
-        cli.monthly_byte_limit,
-        cli.usage_file,
+        args.monthly_byte_limit,
+        args.usage_file,
     )
     .await
-    .unwrap_or_else(|e| panic!("cannot bind {}: {e}", cli.listen));
+    .unwrap_or_else(|e| panic!("cannot bind {}: {e}", args.listen));
     let server = Arc::new(server);
-    if cli.debug {
+    if args.debug {
         server.toggle_debug();
     }
-    tracing::info!(listen = %cli.listen, "envoix relay data plane listening");
+    tracing::info!(listen = %args.listen, "envoix relay data plane listening");
 
     spawn_background_tasks(
         server.clone(),
-        Duration::from_secs(cli.sweep_interval_secs),
-        Duration::from_secs(cli.housekeeping_interval_secs),
+        Duration::from_secs(args.sweep_interval_secs),
+        Duration::from_secs(args.housekeeping_interval_secs),
     );
     install_signal_handlers(server.clone());
 
