@@ -17,6 +17,8 @@ mod doctor;
 mod keyfile;
 mod server;
 mod service;
+mod stats;
+mod status;
 mod usage;
 
 use server::RelayServer;
@@ -42,6 +44,11 @@ enum Command {
     Config(ConfigArgs),
     /// Run preflight diagnostics (port, firewall, clock, permissions).
     Test {
+        #[arg(long, default_value = config::DEFAULT_PATH)]
+        config: PathBuf,
+    },
+    /// Show live stats from the running relay.
+    Status {
         #[arg(long, default_value = config::DEFAULT_PATH)]
         config: PathBuf,
     },
@@ -122,6 +129,10 @@ struct RunArgs {
     #[arg(long, env = "ENVOIX_RELAY_USAGE_FILE")]
     usage_file: Option<PathBuf>,
 
+    /// Stats snapshot file read by the `status` command.
+    #[arg(long, env = "ENVOIX_RELAY_STATS_FILE")]
+    stats_file: Option<PathBuf>,
+
     /// Start with verbose per-datagram logging (also toggleable via SIGUSR1).
     #[arg(long)]
     debug: bool,
@@ -140,6 +151,7 @@ async fn main() {
         None => run_server(cli.run).await,
         Some(Command::Config(c)) => run_config(c),
         Some(Command::Test { config }) => doctor::run(&config),
+        Some(Command::Status { config }) => status::run(&config),
         Some(Command::Up) => service::up(),
         Some(Command::Down) => service::down(),
     }
@@ -213,6 +225,7 @@ async fn run_server(args: RunArgs) {
             args.housekeeping_interval_secs
                 .unwrap_or(cfg.housekeeping_interval_secs),
         ),
+        args.stats_file.unwrap_or(cfg.stats_file),
     );
     install_signal_handlers(server.clone());
 
@@ -226,6 +239,7 @@ fn spawn_background_tasks(
     server: Arc<RelayServer>,
     sweep_interval: Duration,
     housekeeping_interval: Duration,
+    stats_file: PathBuf,
 ) {
     let sweep = server.clone();
     tokio::spawn(async move {
@@ -242,6 +256,7 @@ fn spawn_background_tasks(
         loop {
             t.tick().await;
             housekeeping.flush_usage();
+            housekeeping.write_stats(&stats_file).await;
             housekeeping.log_stats().await;
         }
     });

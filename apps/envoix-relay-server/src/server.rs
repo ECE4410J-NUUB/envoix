@@ -5,15 +5,17 @@
 //! flags (debug logging, forwarding pause).
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use envoix_relay::{
     ForwardOutcome, MonthlyUsage, RelayConfig, RelayDatagram, RelayTable, RelayTokenKey,
 };
 use tokio::net::UdpSocket;
 
+use crate::stats::{self, StatsSnapshot};
 use crate::usage;
 
 pub struct RelayServer {
@@ -26,6 +28,7 @@ pub struct RelayServer {
     debug_mode: AtomicBool,
     invalid_total: AtomicU64,
     quota_exceeded_total: AtomicU64,
+    started_at: Instant,
 }
 
 impl RelayServer {
@@ -48,6 +51,7 @@ impl RelayServer {
             debug_mode: AtomicBool::new(false),
             invalid_total: AtomicU64::new(0),
             quota_exceeded_total: AtomicU64::new(0),
+            started_at: Instant::now(),
         })
     }
 
@@ -153,6 +157,38 @@ impl RelayServer {
 
     pub async fn sweep_idle(&self) {
         self.table.sweep_idle().await;
+    }
+
+    /// Build a point-in-time stats snapshot.
+    pub async fn snapshot(&self) -> StatsSnapshot {
+        let t = self.table.stats().await;
+        let (month_bytes, limit) = {
+            let u = self.usage.lock().expect("usage mutex");
+            (u.month_bytes(), u.limit())
+        };
+        StatsSnapshot {
+            written_at_unix: stats::now_unix(),
+            uptime_secs: self.started_at.elapsed().as_secs(),
+            forwarding_enabled: self.forwarding_enabled.load(Ordering::Relaxed)
+                && month_bytes < limit,
+            active_pairs: t.active_pairs,
+            pairs_created_total: t.pairs_created_total,
+            datagrams_forwarded_total: t.datagrams_forwarded_total,
+            bytes_forwarded_total: t.bytes_forwarded_total,
+            month_bytes,
+            month_byte_limit: limit,
+            invalid_total: self.invalid_total.load(Ordering::Relaxed),
+            quota_exceeded_total: self.quota_exceeded_total.load(Ordering::Relaxed),
+            session_cap_cutoff_total: t.session_cap_cutoff_total,
+            rejected_capacity_total: t.rejected_capacity_total,
+        }
+    }
+
+    /// Persist the stats snapshot for the `status` command to read.
+    pub async fn write_stats(&self, path: &Path) {
+        if let Err(e) = self.snapshot().await.save(path) {
+            tracing::warn!(error = %e, "failed to write stats snapshot");
+        }
     }
 
     /// Emit the `relay` stats line.
