@@ -203,3 +203,37 @@ housekeeping interval drives the periodic stats log line. Self-hosting adds:
 - a first-class log-level setting rather than only the `RUST_LOG` env var;
 - quiet by default - with on-demand `status` (6.1), the periodic stats line
   is mostly journald noise, so it defaults low or off and is opt-in.
+
+## 7. Ports and dependencies
+
+The relay is UDP-only and uses one port (default 9104, set by `--listen`).
+The real dependency set to verify: one UDP port open and reachable, a public
+IP or port-forward, a firewall rule, the key file and writable state dir, and
+a sane clock.
+
+## 8. Cross-platform handling
+
+- Multiple firewall backends exist; detect and degrade gracefully, never
+  assume one tool is present.
+- Reading firewall rules often needs root; if not root, report which checks
+  were skipped and suggest re-running with sudo rather than failing.
+- Linux servers are the target; routers (OpenWrt) and BSD are stretch goals.
+
+## 9. Out of scope (v1)
+
+GUI, config TUI wizard, a custom daemon supervisor, and packaging for every
+distro/format. The static binary plus a `.deb` covers the common cases; the
+rest follow demand.
+
+## 10. Open decisions
+
+- Provisioning when relay and client are on different machines: who
+  generates the key and how it is copied to both the minting and validating
+  sides (one manual transfer of a generated blob, WireGuard-style).
+- Whether either peer may host, and the tiebreak when both advertise a relay
+  (candidate priority).
+- Exact subcommand surface and config-file format.
+- Whether the reachability probe is a standing rendezvous endpoint or an
+  on-demand one.
+- Stats exposure mechanism: a permission-restricted Unix socket vs a
+  periodic snapshot file read by `status`.
