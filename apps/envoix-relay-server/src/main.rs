@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use envoix_relay::{RelayConfig, RelayTokenKey};
 
 mod config;
+mod doctor;
 mod keyfile;
 mod server;
 mod service;
@@ -39,6 +40,11 @@ struct Cli {
 enum Command {
     /// Manage the config file.
     Config(ConfigArgs),
+    /// Run preflight diagnostics (port, firewall, clock, permissions).
+    Test {
+        #[arg(long, default_value = config::DEFAULT_PATH)]
+        config: PathBuf,
+    },
     /// Enable on boot and start the relay service.
     Up,
     /// Stop the relay service.
@@ -133,6 +139,7 @@ async fn main() {
     match cli.command {
         None => run_server(cli.run).await,
         Some(Command::Config(c)) => run_config(c),
+        Some(Command::Test { config }) => doctor::run(&config),
         Some(Command::Up) => service::up(),
         Some(Command::Down) => service::down(),
     }
