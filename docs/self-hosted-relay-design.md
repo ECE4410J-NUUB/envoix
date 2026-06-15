@@ -142,3 +142,64 @@ proves the port is open end-to-end, detects NAT (local IP vs the public IP
 the rendezvous observed), and verifies the advertised address is correct.
 This reuses the rendezvous reflexive-address mechanism already used for
 clients.
+
+## 6. Observability
+
+Today the relay's counters (`active_pairs`, `bytes_forwarded_total`,
+`month_bytes`, `invalid_total`, `quota_exceeded_total`,
+`session_cap_cutoff_total`, `rejected_capacity_total`) only surface as a
+periodic tracing log line - useful for the public operator who tails logs,
+useless for a casual self-hoster. The improvement is exposing and presenting
+the data already collected, not collecting more.
+
+### 6.1 Local stats access
+
+A self-hoster is on the machine, so stats are local-first with no network
+exposure and no admin token: the daemon serves a snapshot over a
+permission-restricted Unix socket (or writes a periodic snapshot file
+alongside `usage.json`). `status` reads it. The rendezvous keeps its
+admin-token HTTP `/stats` because it is a public, remote-queried server; the
+self-hosted relay does not need that surface.
+
+### 6.2 Human-friendly summary
+
+`status` formats the snapshot for a non-expert: uptime, active transfers,
+total forwarded (GB), quota used/remaining with a percentage, error summary,
+last activity, and a one-line health verdict - not raw counters.
+
+### 6.3 Flow localization
+
+The same counters double as a "where is it blocked" diagnosis:
+
+- valid datagrams from one peer, none from the other -> the other peer
+  cannot reach the relay (its firewall/NAT or a wrong advertised address);
+- datagrams arriving but tokens invalid -> key mismatch or clock skew with
+  the client;
+- quota tripped -> monthly cap reached.
+
+Most of the diagnosis comes from data already collected.
+
+### 6.4 Metrics export (optional)
+
+A Prometheus `/metrics` endpoint for power users who already run Grafana.
+Cheap because the counters exist, but secondary to the noob path and off by
+default. A bundled time-series database or dashboard is out of scope.
+
+### 6.5 Privacy
+
+The relay forwards opaque encrypted traffic and sees peer source addresses.
+Stats stay aggregate: no content is ever logged, and peer addresses are not
+retained in persisted stats. This matches the project's end-to-end privacy
+posture.
+
+### 6.6 Logging
+
+PR #22 already made the sweep and housekeeping intervals configurable
+(`--sweep-interval-secs`, `--housekeeping-interval-secs`), and the
+housekeeping interval drives the periodic stats log line. Self-hosting adds:
+
+- decouple the stats-log interval from the usage-flush interval (one knob
+  drives both today);
+- a first-class log-level setting rather than only the `RUST_LOG` env var;
+- quiet by default - with on-demand `status` (6.1), the periodic stats line
+  is mostly journald noise, so it defaults low or off and is opt-in.
