@@ -1,16 +1,15 @@
 //! Lowercase-hex parsing and formatting for fixed-size byte arrays.
 //!
 //! Capability and session-id strings on the wire are always 32 lowercase
-//! hex characters per design §3.1. This module is the single place that
-//! handles that encoding.
+//! hex characters. This module is the single place that handles that encoding.
 
 use std::fmt;
 
 /// Parse exactly `N * 2` lowercase hex characters into `N` bytes.
 ///
 /// Returns `None` on length, charset, or case mismatch. Uppercase `A-F` is
-/// rejected because the design pins lowercase to make string comparison
-/// straightforward downstream. `N = 16` for capabilities and session ids;
+/// rejected because lowercase is pinned so downstream string comparison is
+/// exact. `N = 16` for capabilities and session ids;
 /// `N = 32` for BLAKE3 capability hashes carried on the wire.
 pub(crate) fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 {
@@ -56,7 +55,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_uppercase() {
-        // Lowercase pinned by design §3.1.
+        // Lowercase is required.
         assert!(parse_hex::<16>("0123456789ABCDEF0123456789abcdef").is_none());
     }
 

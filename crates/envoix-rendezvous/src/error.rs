@@ -1,4 +1,4 @@
-//! Typed errors. Each variant maps 1:1 to a wire `code` in design §3.4.
+//! Typed errors. Each variant maps 1:1 to a wire `code`.
 //!
 //! The HTTP status mapping lives on this type rather than in the API layer
 //! so the binary crate stays a thin transport translator.
@@ -42,7 +42,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// Stable wire code per design §3.4. Never change without bumping `/api/v2`.
+    /// Stable wire code; never change without bumping `/api/v2`.
     pub fn code(&self) -> &'static str {
         match self {
             Error::InvalidRequest(_) => "invalid_request",
@@ -60,7 +60,7 @@ impl Error {
     }
 
     /// HTTP status the API layer should respond with. Status collisions are
-    /// intentional — `code()` is what clients branch on.
+    /// intentional; `code()` is what clients branch on.
     pub fn http_status(&self) -> u16 {
         match self {
             Error::InvalidRequest(_) => 400,

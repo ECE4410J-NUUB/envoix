@@ -1,6 +1,6 @@
 //! Envoix rendezvous server binary.
 //!
-//! Thin transport shell per design §2: CLI parsing, tracing initialisation,
+//! Thin transport shell: CLI parsing, tracing initialisation,
 //! axum wiring, graceful shutdown. All session behaviour lives in
 //! `envoix-rendezvous`.
 
@@ -12,7 +12,7 @@ use envoix_rendezvous::{RegistryConfig, SessionRegistry};
 
 mod api;
 
-/// CLI flags per design §4.9.
+/// CLI flags.
 #[derive(Parser)]
 #[command(name = "envoix-server", about = "Envoix rendezvous server")]
 struct Cli {
@@ -59,7 +59,7 @@ async fn main() {
     let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token);
     let app = api::router(state.clone());
 
-    // Background TTL sweep (design §4.4); tombstoning expired sessions and
+    // Background TTL sweep; tombstoning expired sessions and
     // forgetting stale tombstones. Opportunistic expiry on read covers the
     // window between ticks.
     state.spawn_ttl_sweep(Duration::from_secs(30));
@@ -77,7 +77,7 @@ async fn main() {
 }
 
 /// Resolves when SIGTERM or Ctrl-C arrives. Sets the shutting-down flag so
-/// new requests get `503 service_shutting_down` (design §4.6) while axum
+/// new requests get `503 service_shutting_down` while axum
 /// drains in-flight ones. The 5-second hard bound on draining is enforced
 /// by the supervisor (systemd `TimeoutStopSec`), not in-process.
 async fn shutdown_signal(state: api::AppState) {
@@ -99,10 +99,10 @@ async fn shutdown_signal(state: api::AppState) {
     tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
-/// Default filter per design §4.7: envoix targets at `info`, everything
+/// Default filter: envoix targets at `info`, everything
 /// else at `warn`. `--debug` upgrades envoix targets; `RUST_LOG` overrides
-/// everything. Target names are the actual crate names (underscored) —
-/// the design's `envoix=info` is shorthand for these.
+/// everything. Target names are the actual crate names (underscored);
+/// `envoix=info` is shorthand for these.
 fn init_tracing(debug: bool) {
     let level = if debug { "debug" } else { "info" };
     let default = format!("envoix_server={level},envoix_rendezvous={level},warn");

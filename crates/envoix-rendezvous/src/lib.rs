@@ -1,11 +1,10 @@
-//! Rendezvous session registry — pure logic, no HTTP.
+//! Rendezvous session registry: pure logic, no HTTP.
 //!
-//! See `docs/rendezvous-design.md` for the contract this crate implements.
-//! Module split per design §2:
+//! Module split:
 //!
-//! - [`capabilities`] — bearer-capability newtype, BLAKE3 hashing, redaction.
-//! - [`state`] — session record, candidate, in-memory registry, TTL.
-//! - [`error`] — the typed error taxonomy from design §3.4.
+//! - [`capabilities`] - bearer-capability newtype, BLAKE3 hashing, redaction.
+//! - [`state`] - session record, candidate, in-memory registry, TTL.
+//! - [`error`] - the typed error taxonomy.
 
 pub mod capabilities;
 pub mod error;

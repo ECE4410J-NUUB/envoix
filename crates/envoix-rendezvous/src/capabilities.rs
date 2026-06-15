@@ -1,10 +1,8 @@
 //! Bearer-capability handling: parsing, hashing, redaction.
 //!
-//! Design pointers:
-//! - §3.1 — capability format (32 lowercase hex chars, 128 bits).
-//! - §3.1 — BLAKE3 at intake, constant-time compare on the hash.
-//! - §4.7 — `Debug` / `Display` emit redaction so a stray
-//!   `tracing::debug!(?cap)` cannot leak.
+//! A capability is 32 lowercase hex characters (128 bits). It is BLAKE3-hashed
+//! at intake, with a constant-time compare on the hash. `Debug` and `Display`
+//! redact the value so a stray log line cannot leak a bearer.
 
 use std::fmt;
 
@@ -64,8 +62,8 @@ impl CapabilityHash {
     /// Parse a 64-character lowercase hex BLAKE3 digest.
     ///
     /// Wire form used at registration: the receiver pre-hashes `sender_cap`
-    /// locally and sends only the hash (design §4.1), so the server can
-    /// store it without ever seeing the raw sender capability.
+    /// locally and sends only the hash, so the server can store it without
+    /// ever seeing the raw sender capability.
     pub fn from_hex(s: &str) -> Result<Self, Error> {
         match parse_hex::<HASH_LEN>(s) {
             Some(bytes) => Ok(Self { bytes }),
@@ -79,12 +77,8 @@ impl CapabilityHash {
 impl PartialEq for CapabilityHash {
     /// Constant-time XOR-accumulate over all 32 bytes.
     ///
-    /// Design §3.1 allows "`subtle::ConstantTimeEq` or equivalent". The hand
-    /// rolled form is equivalent: the loop unconditionally touches every
-    /// byte and the `|=` prevents short-circuit optimisation. We never
-    /// accept a hash from the network — only re-hashed bearers — so a
-    /// hypothetical timing leak of the hash itself would not yield the
-    /// underlying capability.
+    /// Unconditionally XORs every byte so timing does not reveal where a
+    /// mismatch is; `|=` avoids short-circuit.
     fn eq(&self, other: &Self) -> bool {
         let mut diff: u8 = 0;
         for i in 0..HASH_LEN {
@@ -97,7 +91,7 @@ impl PartialEq for CapabilityHash {
 impl Eq for CapabilityHash {}
 
 impl fmt::Debug for CapabilityHash {
-    /// `CapHashRef(deadbeef)` — first 8 hex chars only per design §4.7.
+    /// `CapHashRef(deadbeef)`: first 8 hex chars only, redacted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("CapHashRef(")?;
         fmt_hex_lower(&self.bytes[..HASH_REF_HEX_CHARS / 2], f)?;
@@ -195,7 +189,7 @@ mod tests {
     fn hash_debug_emits_short_ref_only() {
         let h = Capability::from_hex(VALID_HEX_A).unwrap().hash();
         let s = format!("{:?}", h);
-        // Format: CapHashRef(xxxxxxxx) — exactly 8 hex chars.
+        // Format: CapHashRef(xxxxxxxx), exactly 8 hex chars.
         assert!(s.starts_with("CapHashRef("));
         assert!(s.ends_with(')'));
         let inner = &s["CapHashRef(".len()..s.len() - 1];

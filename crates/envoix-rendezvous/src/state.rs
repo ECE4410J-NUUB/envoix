@@ -1,15 +1,14 @@
 //! Session record, candidate types, and the in-memory registry.
 //!
-//! Design pointers:
-//! - §3.2 — session lifecycle (Pending → Joined → removed) and tombstone
-//!   retention for distinguishing `session_expired` from `session_closed`.
-//! - §3.3 — `PeerMetadata` vs. `Candidate`, tagged-union `kind`, duplicate
-//!   publish is a no-op.
-//! - §4.4 — TTL refresh on every authenticated request; sweep backstop;
-//!   opportunistic expiry on read.
-//! - §4.5 — outer `RwLock<HashMap<…>>` + per-session inner `Mutex`.
-//! - §4.5 — two clocks: wall-clock `SystemTime` on the wire, monotonic
-//!   `tokio::time::Instant` for TTL math.
+//! Sessions move Pending -> Joined -> removed; closed/expired sessions leave
+//! tombstones so callers can distinguish `session_expired` from
+//! `session_closed`. `PeerMetadata` is distinct from `Candidate`, which
+//! carries a tagged-union `kind`; a duplicate publish is a no-op. TTL is
+//! refreshed on every authenticated request, with a periodic sweep as a
+//! backstop and opportunistic expiry on read. Storage is an outer
+//! `RwLock<HashMap<...>>` with a per-session inner `Mutex`. Two clocks are in
+//! play: wall-clock `SystemTime` on the wire, monotonic
+//! `tokio::time::Instant` for TTL math.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -26,7 +25,7 @@ use crate::hex::{fmt_hex_lower, parse_hex};
 
 const SESSION_ID_REF_HEX_CHARS: usize = 8;
 
-// ── Public wire-shaped types ─────────────────────────────────────────────
+// Public wire-shaped types
 
 /// Session id. 32 lowercase hex chars on the wire, 16 raw bytes in memory.
 #[derive(Clone, Eq, PartialEq, Hash)]
@@ -46,7 +45,7 @@ impl SessionId {
 }
 
 impl fmt::Debug for SessionId {
-    /// `SessionRef(deadbeef)` — first 8 hex chars only per design §4.7.
+    /// `SessionRef(deadbeef)`: first 8 hex chars only, redacted.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SessionRef(")?;
         fmt_hex_lower(&self.bytes[..SESSION_ID_REF_HEX_CHARS / 2], f)?;
@@ -55,7 +54,7 @@ impl fmt::Debug for SessionId {
 }
 
 impl fmt::Display for SessionId {
-    /// Full 32 lowercase hex chars. URL paths only — do **not** log via
+    /// Full 32 lowercase hex chars. URL paths only -- do not log via
     /// `Display`; use `Debug` for the redacted ref.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_hex_lower(&self.bytes, f)
@@ -103,7 +102,7 @@ pub struct PeerMetadata {
     pub last_seen: SystemTime,
 }
 
-/// What a peer sees when polling: the *other* peer's metadata (None while
+/// What a peer sees when polling: the other peer's metadata (None while
 /// the receiver polls a not-yet-joined session) and the other peer's
 /// candidates with `sequence > since`.
 #[derive(Debug)]
@@ -112,7 +111,7 @@ pub struct PollResult {
     pub candidates: Vec<Candidate>,
 }
 
-// ── Internal storage types (not in the public re-exports) ────────────────
+// Internal storage types (not in the public re-exports)
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SessionState {
@@ -163,10 +162,10 @@ enum AuthRole {
     Sender,
 }
 
-// ── Configuration ────────────────────────────────────────────────────────
+// Configuration
 
 /// Registry tuning knobs sourced from `--max-sessions` / `--max-candidates`
-/// / `--default-ttl-seconds` / `--max-ttl-seconds` (design §4.9).
+/// / `--default-ttl-seconds` / `--max-ttl-seconds`.
 #[derive(Clone, Copy)]
 pub struct RegistryConfig {
     pub max_sessions: usize,
@@ -186,10 +185,9 @@ impl Default for RegistryConfig {
     }
 }
 
-// ── Statistics ───────────────────────────────────────────────────────────
+// Statistics
 
-/// Monotonic counters per design §4.8. Relaxed ordering — these are
-/// advisory diagnostics, not synchronisation.
+/// Advisory diagnostic counters; relaxed ordering, not synchronisation.
 #[derive(Default)]
 struct Counters {
     created_total: AtomicU64,
@@ -200,7 +198,7 @@ struct Counters {
     candidates_published_total: AtomicU64,
 }
 
-/// Point-in-time snapshot for `/api/v1/stats` (design §4.8).
+/// Point-in-time snapshot for `/api/v1/stats`.
 pub struct RegistryStats {
     pub sessions_active: u64,
     pub created_total: u64,
@@ -212,7 +210,7 @@ pub struct RegistryStats {
     pub candidates_active: u64,
 }
 
-// ── Registry ─────────────────────────────────────────────────────────────
+// Registry
 
 /// In-memory session registry.
 pub struct SessionRegistry {
@@ -259,7 +257,7 @@ impl SessionRegistry {
 
         let mut slots = self.slots.write().await;
 
-        // Tombstones occupy a slot until their forget_at fires — preventing an
+        // Tombstones occupy a slot until their forget_at fires -- preventing an
         // attacker from rapid-cycling register/close to bypass the cap.
         if slots.len() >= self.config.max_sessions {
             self.counters
@@ -327,7 +325,7 @@ impl SessionRegistry {
 
     /// Publish a candidate from whichever peer presented `presented_hash`.
     /// A duplicate `(kind, transport, addr)` returns the existing record
-    /// unchanged (design §3.3).
+    /// unchanged.
     pub async fn publish_candidate(
         &self,
         id: &SessionId,
@@ -394,8 +392,8 @@ impl SessionRegistry {
         Ok(stored)
     }
 
-    /// Return *the other peer's* metadata and candidates with
-    /// `sequence > since`. An empty candidate list is normal — the caller
+    /// Return the other peer's metadata and candidates with
+    /// `sequence > since`. An empty candidate list is normal -- the caller
     /// decides when to retry (short-poll).
     pub async fn poll_candidates(
         &self,
@@ -517,7 +515,7 @@ impl SessionRegistry {
         }
     }
 
-    /// Point-in-time stats snapshot (design §4.8). Active counts are
+    /// Point-in-time stats snapshot. Active counts are
     /// computed by walking live sessions; counters are atomic reads.
     pub async fn stats(&self) -> RegistryStats {
         let now = Instant::now();
@@ -568,7 +566,7 @@ impl SessionRegistry {
 }
 
 /// Refresh `last_seen` on the metadata of whichever peer made the request
-/// (design §3.3: last_seen is the most recent request from this peer).
+/// (last_seen is the most recent request from this peer).
 fn touch_last_seen(inner: &mut SessionInner, role: AuthRole) {
     let now = SystemTime::now();
     match role {
@@ -593,7 +591,7 @@ mod tests {
     use super::*;
     use crate::Capability;
 
-    // ── helpers ──────────────────────────────────────────────────────────
+    // helpers
 
     fn hex_of(c: char) -> String {
         debug_assert!(
@@ -646,7 +644,7 @@ mod tests {
         .expect("register");
     }
 
-    // ── SessionId unit tests (kept from previous step) ───────────────────
+    // SessionId unit tests
 
     const VALID_HEX: &str = "0123456789abcdef0123456789abcdef";
 
@@ -689,7 +687,7 @@ mod tests {
         assert_eq!(c.max_ttl, Duration::from_secs(1800));
     }
 
-    // ── registry tests ───────────────────────────────────────────────────
+    // registry tests
 
     #[tokio::test]
     async fn full_round_trip() {
@@ -718,7 +716,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Each side sees only the OTHER's candidates and the other's metadata.
+        // Each side sees only the other's candidates and the other's metadata.
         let seen_by_sender = reg.poll_candidates(&id, &sender, 0).await.unwrap();
         assert_eq!(seen_by_sender.candidates.len(), 1);
         assert_eq!(seen_by_sender.candidates[0].sequence, recv_cand.sequence);
@@ -825,7 +823,7 @@ mod tests {
             .publish_candidate(&id, &recv, make_candidate("10.0.0.1:9000"))
             .await
             .unwrap();
-        // Same (kind, transport, addr) — even with different priority.
+        // Same (kind, transport, addr) -- even with different priority.
         let dup = CandidatePublish {
             priority: 200,
             ..make_candidate("10.0.0.1:9000")
@@ -903,7 +901,7 @@ mod tests {
         register_default(&reg, &id).await;
         let result = reg.poll_candidates(&id, &make_hash('b'), 0).await.unwrap();
         assert!(result.candidates.is_empty());
-        // Receiver registered but did not join — polling sender sees its metadata,
+        // Receiver registered but did not join -- polling sender sees its metadata,
         // while the receiver polling sees none yet.
         let by_recv = reg.poll_candidates(&id, &make_hash('a'), 0).await.unwrap();
         assert!(by_recv.peer_metadata.is_none());
@@ -960,11 +958,11 @@ mod tests {
         let id = make_id('1');
         register_default(&reg, &id).await;
 
-        // Step forward but not past TTL, then poll → refreshes.
+        // Step forward but not past TTL, then poll -> refreshes.
         tokio::time::advance(Duration::from_secs(8)).await;
         reg.poll_candidates(&id, &make_hash('a'), 0).await.unwrap();
 
-        // Another 8s — still alive because of refresh.
+        // Another 8s -- still alive because of refresh.
         tokio::time::advance(Duration::from_secs(8)).await;
         let result = reg.poll_candidates(&id, &make_hash('a'), 0).await;
         assert!(result.is_ok(), "got {:?}", result);
@@ -1010,7 +1008,7 @@ mod tests {
         assert_eq!(s.expired_total, 0);
         assert_eq!(s.closed_total, 0);
 
-        // Expiry via sweep moves active → expired_total.
+        // Expiry via sweep moves active -> expired_total.
         tokio::time::advance(Duration::from_secs(11)).await;
         reg.sweep_expired().await;
         let s = reg.stats().await;
@@ -1031,7 +1029,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(11)).await;
         reg.sweep_expired().await;
-        // Tombstone visible — distinct error from not-found.
+        // Tombstone visible -- distinct error from not-found.
         assert!(matches!(
             reg.poll_candidates(&id, &make_hash('a'), 0).await,
             Err(Error::SessionExpired)

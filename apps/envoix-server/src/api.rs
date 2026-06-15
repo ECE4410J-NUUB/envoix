@@ -1,8 +1,8 @@
 //! HTTP surface: routes, request/response shapes, error mapping.
 //!
-//! Thin transport layer per design §2 — all session behaviour lives in
+//! Thin transport layer -- all session behaviour lives in
 //! `envoix-rendezvous`; this module translates HTTP to library calls and
-//! library errors to the JSON envelope of design §3.4.
+//! library errors to the JSON envelope.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -20,17 +20,17 @@ use envoix_rendezvous::{
     Candidate, CandidateKind, CandidatePublish, Capability, CapabilityHash, Error, PeerMetadata,
     SessionId, SessionRegistry, Transport,
 };
-// SSoT: the wire version the whole workspace speaks (design §3.3
-// `protocol_versions`). Never redeclare locally — a future bump in
-// envoix-types must reach this server's 422 check automatically.
+// SSoT: the wire version the whole workspace speaks. Never redeclare
+// locally -- a future bump in envoix-types must reach this server's 422
+// check automatically.
 use envoix_types::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
-/// Request body cap per design §4.6 robustness budget.
+/// Request body cap.
 const BODY_LIMIT_BYTES: usize = 64 * 1024;
 
-/// HTTP-level request counters for `/api/v1/stats` (design §4.8).
+/// HTTP-level request counters for `/api/v1/stats`.
 #[derive(Default)]
 struct RequestCounters {
     total: AtomicU64,
@@ -64,8 +64,8 @@ impl AppState {
         self.shutting_down.store(true, Ordering::Relaxed);
     }
 
-    /// Background TTL sweep per design §4.4 — non-panicking by
-    /// construction; recovery from task death is the supervisor's job.
+    /// Background TTL sweep. Recovery from task death is the
+    /// supervisor's job.
     pub fn spawn_ttl_sweep(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
         let registry = self.registry.clone();
         tokio::spawn(async move {
@@ -103,7 +103,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-// ── Error envelope ───────────────────────────────────────────────────────
+// Error envelope
 
 /// Wrapper so library errors become the `{code, message}` envelope.
 struct ApiError(Error);
@@ -130,7 +130,7 @@ impl IntoResponse for ApiError {
 }
 
 /// `axum::Json` with rejections mapped into the error envelope
-/// (over-limit body → `payload_too_large`, malformed JSON →
+/// (over-limit body -> `payload_too_large`, malformed JSON ->
 /// `invalid_request`).
 struct AppJson<T>(T);
 
@@ -152,10 +152,10 @@ where
     }
 }
 
-// ── Middleware ───────────────────────────────────────────────────────────
+// Middleware
 
 /// New requests after SIGTERM get `503 service_shutting_down`; in-flight
-/// requests (already past this layer) finish naturally (design §4.6).
+/// requests (already past this layer) finish naturally.
 async fn reject_during_shutdown(
     State(state): State<AppState>,
     req: Request,
@@ -180,7 +180,7 @@ async fn count_requests(State(state): State<AppState>, req: Request, next: Next)
     res
 }
 
-// ── Request/response shapes ──────────────────────────────────────────────
+// Request/response shapes
 
 #[derive(Deserialize)]
 struct PeerMetadataBody {
@@ -193,7 +193,7 @@ struct PeerMetadataBody {
 struct RegisterBody {
     session_id: String,
     /// BLAKE3 hash of `sender_cap`, 64 lowercase hex chars. The raw sender
-    /// capability never reaches the server (design §4.1).
+    /// capability never reaches the server.
     sender_cap_hash: String,
     peer_metadata: PeerMetadataBody,
     ttl_seconds: Option<u64>,
@@ -211,8 +211,8 @@ struct JoinBody {
     peer_metadata: PeerMetadataBody,
 }
 
-/// Candidate `kind` wire strings (design §3.3). Unknown kinds fail serde
-/// → `400 invalid_request`.
+/// Candidate `kind` wire strings. Unknown kinds fail serde
+/// -> `400 invalid_request`.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum KindBody {
@@ -313,7 +313,7 @@ struct PollQuery {
     since: u64,
 }
 
-// ── Handlers ─────────────────────────────────────────────────────────────
+// Handlers
 
 async fn health() -> &'static str {
     "ok"
@@ -327,8 +327,8 @@ async fn register(
     let receiver_cap_hex = bearer_token(&headers)?;
     let receiver_cap = Capability::from_hex(receiver_cap_hex).map_err(|_| Error::Unauthorized)?;
 
-    // Raw-string distinctness (design §3.1) is checked here because the
-    // library only ever sees hashes.
+    // Raw-string distinctness is checked here because the library only
+    // ever sees hashes.
     if body.session_id == receiver_cap_hex {
         return Err(
             Error::InvalidRequest("session_id must differ from receiver_cap".into()).into(),
@@ -390,9 +390,9 @@ async fn close(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Publish one candidate. Returns the canonical stored record — for a
+/// Publish one candidate. Returns the canonical stored record -- for a
 /// duplicate `(kind, transport, addr)` that is the existing record with
-/// its original `sequence` (design §3.3 no-op rule), hence 200 not 201.
+/// its original `sequence` (no-op rule), hence 200 not 201.
 async fn publish_candidate(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -457,8 +457,8 @@ async fn poll_candidates(
     }))
 }
 
-/// Admin-token-gated stats (design §4.8). With no token configured the
-/// route answers plain 404 — indistinguishable from a nonexistent route.
+/// Admin-token-gated stats. With no token configured the route answers
+/// plain 404 -- indistinguishable from a nonexistent route.
 async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(expected) = &state.admin_token_hash else {
         return StatusCode::NOT_FOUND.into_response();
@@ -502,11 +502,10 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
     .into_response()
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+// Helpers
 
 /// Missing or malformed `Authorization` header is `401 unauthorized`
-/// without inspecting the session id (design §3.4 — prevents probing for
-/// live ids).
+/// without inspecting the session id (prevents probing for live ids).
 fn bearer_token(headers: &HeaderMap) -> Result<&str, Error> {
     headers
         .get(header::AUTHORIZATION)
@@ -523,9 +522,9 @@ fn check_version(meta: &PeerMetadataBody) -> Result<(), Error> {
     }
 }
 
-/// Observed address per design §5.2: `X-Real-IP`, else leftmost
+/// Observed address: `X-Real-IP`, else leftmost
 /// `X-Forwarded-For`, else none. The direct TCP source is intentionally
-/// not consulted — behind nginx it is always 127.0.0.1 (no information)
+/// not consulted -- behind nginx it is always 127.0.0.1 (no information)
 /// and the field is advisory metadata only. nginx does not forward the
 /// client's source port, so port 0 marks it unknown.
 fn observed_http_addr(headers: &HeaderMap) -> Option<SocketAddr> {
@@ -699,7 +698,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::NO_CONTENT);
 
-        // Post-close join → 409 session_closed.
+        // Post-close join -> 409 session_closed.
         let res = server
             .post(&format!("/api/v1/sessions/{SESSION_ID}/join"))
             .authorization_bearer(SENDER_CAP)
@@ -985,7 +984,7 @@ mod tests {
         assert!(stats["requests"]["by_status"]["200"].as_u64().unwrap() >= 1);
     }
 
-    /// End-to-end over real TCP loopback per design §7 PR 2.
+    /// End-to-end over real TCP loopback.
     #[tokio::test]
     async fn e2e_register_join_close_over_tcp() {
         let state = AppState::new(SessionRegistry::new(RegistryConfig::default()), None);
