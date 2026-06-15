@@ -12,6 +12,7 @@ use std::time::Duration;
 use clap::Parser;
 use envoix_relay::{RelayConfig, RelayTokenKey};
 
+mod keyfile;
 mod server;
 mod usage;
 
@@ -25,10 +26,20 @@ struct Cli {
     #[arg(long, env = "ENVOIX_RELAY_LISTEN", default_value = "0.0.0.0:9104")]
     listen: SocketAddr,
 
-    /// Shared 64-hex relay key - must match the home allocation server's
-    /// `--relay-key`.
+    /// Explicit 64-hex master key. Overrides `--key-file`; needed for a
+    /// public relay that must share a key with the home allocation server.
+    /// Prefer the env var or key-file over passing this on the command line.
     #[arg(long, env = "ENVOIX_RELAY_KEY")]
-    key: String,
+    key: Option<String>,
+
+    /// Master-key file. Generated (0600) on first run if absent. Used unless
+    /// `--key` is set.
+    #[arg(
+        long,
+        env = "ENVOIX_RELAY_KEY_FILE",
+        default_value = "/var/lib/envoix-relay/relay.key"
+    )]
+    key_file: PathBuf,
 
     /// Monthly forwarded-byte limit; forwarding disables on exceed and
     /// the counter resets at the start of each calendar month (UTC).
@@ -79,8 +90,12 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.debug);
 
-    let key = RelayTokenKey::from_hex(cli.key.trim())
-        .unwrap_or_else(|| panic!("--relay-key must be 64 hex characters"));
+    let key = match cli.key {
+        Some(hex) => RelayTokenKey::from_hex(hex.trim())
+            .unwrap_or_else(|| panic!("--key must be 64 hex characters")),
+        None => keyfile::load_or_generate(&cli.key_file)
+            .unwrap_or_else(|e| panic!("relay key: {e}")),
+    };
     let config = RelayConfig {
         max_sessions: cli.max_sessions,
         max_bytes_per_session: cli.max_bytes_per_session,
