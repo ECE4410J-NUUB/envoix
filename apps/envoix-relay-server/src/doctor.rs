@@ -91,20 +91,20 @@ fn check_firewall(port: u16) -> Check {
             format!("no rule for {port}/udp; run: sudo ufw allow {port}/udp"),
         );
     }
-    if let Some(state) = run_cmd("firewall-cmd", &["--state"]) {
-        if state.to_lowercase().contains("running") {
-            let ports = run_cmd("firewall-cmd", &["--list-ports"]).unwrap_or_default();
-            if firewalld_port_open(&ports, port) {
-                return Check::pass("firewall (firewalld)", format!("{port}/udp open"));
-            }
-            return Check::warn(
-                "firewall (firewalld)",
-                format!(
-                    "{port}/udp not open; run: sudo firewall-cmd --add-port={port}/udp \
-                     --permanent && sudo firewall-cmd --reload"
-                ),
-            );
+    if let Some(state) = run_cmd("firewall-cmd", &["--state"])
+        && state.to_lowercase().contains("running")
+    {
+        let ports = run_cmd("firewall-cmd", &["--list-ports"]).unwrap_or_default();
+        if firewalld_port_open(&ports, port) {
+            return Check::pass("firewall (firewalld)", format!("{port}/udp open"));
         }
+        return Check::warn(
+            "firewall (firewalld)",
+            format!(
+                "{port}/udp not open; run: sudo firewall-cmd --add-port={port}/udp \
+                 --permanent && sudo firewall-cmd --reload"
+            ),
+        );
     }
     if run_cmd("nft", &["--version"]).is_some() || run_cmd("iptables", &["--version"]).is_some() {
         return Check::warn(
