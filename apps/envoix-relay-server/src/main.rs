@@ -1,8 +1,8 @@
-//! Envoix relay data-plane server (Issue #12).
+//! Envoix relay data-plane server.
 //!
-//! Runs on the VPS. Validates relay tokens (shared key with the home
-//! allocation endpoint) and cross-forwards opaque QUIC datagrams between
-//! the two peers of a session. Never decrypts; not a trust party.
+//! Validates relay tokens (a shared key with the allocation endpoint) and
+//! cross-forwards opaque QUIC datagrams between the two peers of a session.
+//! Never decrypts; not a trust party.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -90,9 +90,9 @@ struct RunArgs {
     #[arg(long, env = "ENVOIX_RELAY_LISTEN")]
     listen: Option<SocketAddr>,
 
-    /// Explicit 64-hex master key. Overrides the key file; needed for a
-    /// public relay that must share a key with the home allocation server.
-    /// Prefer the env var or key file over passing this on the command line.
+    /// Explicit 64-hex master key, overriding the key file - for a public
+    /// relay that shares a key with the rendezvous. Prefer the env var or
+    /// key file; argv is world-readable.
     #[arg(long, env = "ENVOIX_RELAY_KEY")]
     key: Option<String>,
 
