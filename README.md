@@ -21,6 +21,25 @@ cargo run -p envoix-cli -- send --invite "envoix:<base64url>" ./hello.txt
 The invite encodes the pairing token, receiver address, and a 5-minute expiry.
 The sender validates the invite before attempting a connection.
 
+### LAN mDNS auto flow (same local network)
+
+The sender discovers the receiver automatically via mDNS. No manual address
+exchange or QR scanning — both sides just need the same shared token.
+
+```bash
+# Terminal 1 — receiver (advertises over mDNS with the given token)
+cargo run -p envoix-cli -- receive --auto --output ./received --token "shared-token-123"
+
+# Terminal 2 — sender (discovers the receiver over mDNS)
+cargo run -p envoix-cli -- send --auto --token "shared-token-123" ./hello.txt
+```
+
+The receiver's QUIC listener binds to `0.0.0.0:0` and advertises its port over
+mDNS. The sender browses for `_envoix._udp.local.` services, resolves discovered
+records into QUIC candidates, and dials them in a deterministic order. SPAKE2
+pairing still gates the transfer — a sender with the wrong token fails before
+any file data is exchanged.
+
 ### Manual flow
 
 Supply the shared token and address explicitly. The receiver prints its
@@ -49,7 +68,8 @@ security caveat.
 
 Implemented:
 
-- one-file transfer over a manually supplied address;
+- LAN mDNS discovery — receiver advertises, sender browses `_envoix._udp.local.`;
+- one-file transfer over a manually supplied address (or discovered via mDNS);
 - QUIC transport;
 - required experimental SPAKE2 shared-token pairing before file metadata;
 - minimal length-prefixed JSON frame protocol;
@@ -61,7 +81,7 @@ Implemented:
 Not implemented in this walking skeleton:
 
 - end-to-end file encryption;
-- automatic LAN discovery, relay, or server fallback;
+- relay or server fallback;
 - interactive pause, folder transfer, or multi-file manifests;
 - per-chunk hashes, parallel chunk transfer, or out-of-order chunk recovery;
 - mobile camera scanning (QR invite requires manual paste on CLI).

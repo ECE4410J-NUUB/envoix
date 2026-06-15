@@ -114,7 +114,10 @@ fn send_with_expired_invite_fails() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "expected non-zero exit for expired invite");
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for expired invite"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("expired"),
@@ -231,7 +234,11 @@ fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
     // is fine: read_stderr() on failure will just return an empty string.
     let stderr = child.stderr.take().unwrap();
     let (invite_str, drain) = extract_invite_and_drain(stderr);
-    SpawnedAutoReceiver { child, invite_str, _stderr_drain: drain }
+    SpawnedAutoReceiver {
+        child,
+        invite_str,
+        _stderr_drain: drain,
+    }
 }
 
 /// Scans `stderr` line by line for the `invite: envoix:...` line, then
@@ -241,7 +248,9 @@ fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<
     let mut reader = BufReader::new(stderr);
     let invite = loop {
         let mut line = String::new();
-        reader.read_line(&mut line).expect("reading receiver stderr");
+        reader
+            .read_line(&mut line)
+            .expect("reading receiver stderr");
         if let Some(s) = line.trim_end_matches(['\n', '\r']).strip_prefix("invite: ") {
             break s.trim().to_string();
         }

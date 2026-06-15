@@ -3,14 +3,15 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use envoix_auth::PairingConfig;
-use envoix_auth::{authenticate_receiver, authenticate_sender};
+pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
-use envoix_transfer::TransferEngine;
+pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
     DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, TransferEvent, TransferSummary,
 };
 use envoix_transport::{ConnectionCandidate, TransportDialer, TransportListener};
+/// Re-exported so the client facade can inspect the bound address.
+pub use envoix_transport_quic::QuicListener as BoundListener;
 use envoix_transport_quic::{QuicDialer, QuicListener};
 pub use envoix_types::TransferDirection;
 
@@ -24,6 +25,14 @@ pub struct SessionConfig {
     pub chunk_size: usize,
     /// Pairing authentication required before any transfer frame.
     pub pairing: PairingConfig,
+}
+
+/// Bind a QUIC listener that can accept one incoming connection.
+///
+/// This is useful when the caller needs to know the actual bound port
+/// (e.g. to advertise it over mDNS) before accepting.
+pub fn bind_quic_listener(listen_addr: SocketAddr) -> Result<BoundListener, SessionError> {
+    QuicListener::bind(listen_addr)
 }
 
 /// Sends one file to a manually supplied peer address.
