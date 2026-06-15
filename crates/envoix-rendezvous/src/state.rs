@@ -42,6 +42,21 @@ impl SessionId {
             )),
         }
     }
+
+    /// Raw 16 bytes. The relay allocation endpoint needs these to mint a
+    /// relay token bound to this session (the relay treats the id as an
+    /// opaque pairing key).
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.bytes
+    }
+}
+
+/// Role a capability proves against a session. Exposed for the relay
+/// allocation endpoint, which mints a role-bound relay token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionRole {
+    Receiver,
+    Sender,
 }
 
 impl fmt::Debug for SessionId {
@@ -86,6 +101,9 @@ pub struct CandidatePublish {
 pub enum CandidateKind {
     Host,
     Ipv6Global,
+    /// Reach this peer through the relay (the `addr` is the relay
+    /// endpoint).
+    Relay,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +452,38 @@ impl SessionRegistry {
             peer_metadata,
             candidates,
         })
+    }
+
+    /// Authorize a capability against a live session for a relay allocation.
+    /// Refreshes the session TTL and returns the caller's role plus the
+    /// refreshed wall-clock expiry; the API layer mints a role-bound relay
+    /// token with that expiry.
+    pub async fn authorize_for_allocation(
+        &self,
+        id: &SessionId,
+        presented_hash: &CapabilityHash,
+    ) -> Result<(SessionRole, SystemTime), Error> {
+        let slots = self.slots.read().await;
+        let session = match slots.get(id) {
+            None => return Err(Error::SessionNotFound),
+            Some(SessionSlot::Tombstoned(t)) => return Err(tombstone_error(t.reason)),
+            Some(SessionSlot::Live(s)) => s,
+        };
+
+        let role = self.authorize(session, presented_hash)?;
+
+        let mut inner = session.inner.lock().await;
+        if inner.expires_at_mono <= Instant::now() {
+            return Err(Error::SessionExpired);
+        }
+        touch_last_seen(&mut inner, role);
+        inner.expires_at_mono = Instant::now() + session.ttl;
+
+        let role = match role {
+            AuthRole::Receiver => SessionRole::Receiver,
+            AuthRole::Sender => SessionRole::Sender,
+        };
+        Ok((role, SystemTime::now() + session.ttl))
     }
 
     /// Receiver-only. Replaces the slot with a `Closed` tombstone that
@@ -801,6 +851,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn authorize_for_allocation_returns_role_and_expiry() {
+        let reg = fresh_registry();
+        let id = make_id('1');
+        register_default(&reg, &id).await;
+
+        let (role, expiry) = reg
+            .authorize_for_allocation(&id, &make_hash('a'))
+            .await
+            .unwrap();
+        assert_eq!(role, SessionRole::Receiver);
+        assert!(expiry > SystemTime::now());
+
+        let (role, _) = reg
+            .authorize_for_allocation(&id, &make_hash('b'))
+            .await
+            .unwrap();
+        assert_eq!(role, SessionRole::Sender);
+
+        // Wrong cap -> Unauthorized.
+        assert!(matches!(
+            reg.authorize_for_allocation(&id, &make_hash('c')).await,
+            Err(Error::Unauthorized)
+        ));
+
+        // Closed session -> SessionClosed.
+        reg.close(&id, &make_hash('a')).await.unwrap();
+        assert!(matches!(
+            reg.authorize_for_allocation(&id, &make_hash('a')).await,
+            Err(Error::SessionClosed)
+        ));
     }
 
     #[tokio::test]

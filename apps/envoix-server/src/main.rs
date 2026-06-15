@@ -40,6 +40,17 @@ struct Cli {
     #[arg(long, env = "ENVOIX_MAX_TTL", default_value_t = 1800)]
     max_ttl_seconds: u64,
 
+    /// Shared 64-hex relay key - must match the relay server's
+    /// `--relay-key`. Required (with `--relay-advertise`) to enable the
+    /// relay-allocation endpoint.
+    #[arg(long, env = "ENVOIX_RELAY_KEY", requires = "relay_advertise")]
+    relay_key: Option<String>,
+
+    /// Public relay endpoint advertised to clients, e.g.
+    /// "203.0.113.1:9104". Required with `--relay-key`.
+    #[arg(long, env = "ENVOIX_RELAY_ADVERTISE", requires = "relay_key")]
+    relay_advertise: Option<SocketAddr>,
+
     /// Upgrade envoix log targets to debug (ignored if RUST_LOG is set).
     #[arg(long)]
     debug: bool,
@@ -56,7 +67,11 @@ async fn main() {
         default_ttl: Duration::from_secs(cli.default_ttl_seconds),
         max_ttl: Duration::from_secs(cli.max_ttl_seconds),
     };
-    let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token);
+    let relay = match (cli.relay_key, cli.relay_advertise) {
+        (Some(key), Some(advertise)) => Some((key, advertise.to_string())),
+        _ => None,
+    };
+    let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token, relay);
     let app = api::router(state.clone());
 
     // Background TTL sweep; tombstoning expired sessions and
@@ -101,8 +116,8 @@ async fn shutdown_signal(state: api::AppState) {
 
 /// Default filter: envoix targets at `info`, everything
 /// else at `warn`. `--debug` upgrades envoix targets; `RUST_LOG` overrides
-/// everything. Target names are the actual crate names (underscored);
-/// `envoix=info` is shorthand for these.
+/// everything. Target names are the actual crate names (underscored) -
+/// the design's `envoix=info` is shorthand for these.
 fn init_tracing(debug: bool) {
     let level = if debug { "debug" } else { "info" };
     let default = format!("envoix_server={level},envoix_rendezvous={level},warn");
