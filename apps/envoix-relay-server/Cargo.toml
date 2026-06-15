@@ -24,6 +24,9 @@ section = "net"
 priority = "optional"
 maintainer = "Envoix maintainers <relay@example.invalid>"
 copyright = "2026, Envoix"
+# Must be set (even empty) for cargo-deb to generate the systemd maintainer
+# scripts; `dist` has no postinst/prerm of its own, so they are generated.
+maintainer-scripts = "dist"
 assets = [
     ["target/release/envoix-relay-server", "usr/bin/", "755"],
     ["dist/config.toml", "etc/envoix-relay/config.toml", "644"],
