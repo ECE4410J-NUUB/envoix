@@ -81,3 +81,64 @@ key so the rendezvous shuttles only ciphertext.
 
 The only protocol change is an optional `relay_token` field on relay
 candidates. Everything else is client-side wiring plus tooling.
+
+## 4. Packaging and install
+
+- **Universal static binary** (`x86_64-unknown-linux-musl`, already built):
+  works on any Linux, no dependencies. The fallback for every system.
+- **`.deb` (Debian/Ubuntu)** via `cargo-deb`: installs the binary, a systemd
+  unit (`DynamicUser`, `Restart=on-failure`, `StateDirectory`), the config
+  directory, and a `postinst` that generates the master key (0600) if
+  missing. This is the easy path for the most common case.
+- **Other formats** (`.rpm`, OpenWrt `.ipk`, AUR, brew): deferred, added by
+  demand. Not maintained from day one.
+
+systemd owns the service lifecycle (start/stop, boot-persistence, logging,
+restart). The CLI does not reimplement this.
+
+## 5. Management CLI
+
+One binary with subcommands. `run` is the server process systemd invokes;
+the rest are operator tools that wrap systemd and add value.
+
+### 5.1 `config`
+
+Read/write `/etc/envoix-relay/config.toml`: listen port, advertised
+address, monthly/per-session caps, key-file path, and logging settings
+(level, stats-log interval, sweep and usage-flush intervals). Validation on
+write. `config init` generates a key and sensible defaults. A user-supplied
+key is
+rejected if obviously weak (not 32 bytes, low unique-byte count, repetition,
+all-zeros); entropy cannot be measured from the value alone, so this is
+best-effort and the guidance is "paste a generated key, do not type one".
+
+The master key never appears on the command line (argv is world-readable via
+`ps` / `/proc` and leaks into shell history). It lives only in the key file.
+
+### 5.2 `up` / `down` / `status`
+
+- `up` / `down`: wrap `systemctl start/stop` (+ `enable` for boot), then run
+  a quick post-start reachability check.
+- `status`: running state plus live stats (active pairs, quota used, error
+  counters) and a one-line health verdict.
+
+### 5.3 `test` (doctor / preflight)
+
+Checklist with `PASS / WARN / FAIL` and the exact remediation command.
+
+Local checks (the relay self-determines):
+- bind test on the configured UDP port;
+- firewall: detect the active backend (ufw / firewalld / nftables /
+  iptables / cloud security group), confirm the UDP port is allowed, and on
+  failure print the literal fix (e.g. `sudo ufw allow 9104/udp`);
+- key-file and state-dir permissions;
+- clock skew (token `expires_at` is wall-clock; large NTP drift silently
+  breaks validation).
+
+External reachability (needs a helper - a host cannot self-prove its UDP
+port is open to the internet): the relay asks the rendezvous to send a UDP
+probe to its advertised address and confirm receipt. This single check
+proves the port is open end-to-end, detects NAT (local IP vs the public IP
+the rendezvous observed), and verifies the advertised address is correct.
+This reuses the rendezvous reflexive-address mechanism already used for
+clients.
