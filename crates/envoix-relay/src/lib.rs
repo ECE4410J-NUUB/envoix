@@ -1,8 +1,7 @@
 //! Relay data-plane logic - pure, no sockets.
 //!
-//! See `docs/relay-design.md` for the contract. The relay forwards opaque
-//! QUIC datagrams between two peers of a session; it never decrypts and is
-//! not a trust party. Module split:
+//! The relay forwards opaque QUIC datagrams between two peers of a session;
+//! it never decrypts and is not a trust party. Module split:
 //!
 //! - [`token`] - shared-key keyed-MAC relay tokens (TURN REST API precedent).
 //! - [`frame`] - `magic || token || payload` datagram parsing.

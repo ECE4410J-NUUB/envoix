@@ -56,11 +56,10 @@ impl RelayServer {
         self.socket.local_addr().expect("bound socket")
     }
 
-    /// Receive loop. Runs until the process exits; non-panicking by
-    /// construction (every fallible call is matched).
+    /// Receive loop. Runs until the process exits.
     pub async fn run(&self) {
-        // Largest QUIC datagram + 61-byte header is well under 1500; a
-        // 64 KiB buffer is generous headroom.
+        // Largest QUIC datagram + 61-byte header is well under 1500; 64 KiB
+        // buffer.
         let mut buf = vec![0u8; 65536];
         loop {
             match self.socket.recv_from(&mut buf).await {
@@ -71,7 +70,7 @@ impl RelayServer {
     }
 
     async fn handle(&self, datagram: &[u8], from: SocketAddr) {
-        // Cheapest checks first; silent drop on anything invalid.
+        // Silent drop on anything invalid.
         let Some(dg) = RelayDatagram::parse(datagram) else {
             self.invalid_total.fetch_add(1, Ordering::Relaxed);
             return;

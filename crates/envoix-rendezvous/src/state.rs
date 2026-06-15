@@ -454,11 +454,10 @@ impl SessionRegistry {
         })
     }
 
-    /// Authorize a capability against a live session for a relay
-    /// allocation: returns the caller's role and the session's refreshed
-    /// wall-clock expiry (this counts as an authenticated request, so it
-    /// refreshes the TTL like the other operations). The API layer mints a
-    /// role-bound relay token with that expiry.
+    /// Authorize a capability against a live session for a relay allocation.
+    /// Refreshes the session TTL and returns the caller's role plus the
+    /// refreshed wall-clock expiry; the API layer mints a role-bound relay
+    /// token with that expiry.
     pub async fn authorize_for_allocation(
         &self,
         id: &SessionId,
@@ -873,13 +872,13 @@ mod tests {
             .unwrap();
         assert_eq!(role, SessionRole::Sender);
 
-        // Wrong cap → Unauthorized.
+        // Wrong cap -> Unauthorized.
         assert!(matches!(
             reg.authorize_for_allocation(&id, &make_hash('c')).await,
             Err(Error::Unauthorized)
         ));
 
-        // Closed session → SessionClosed.
+        // Closed session -> SessionClosed.
         reg.close(&id, &make_hash('a')).await.unwrap();
         assert!(matches!(
             reg.authorize_for_allocation(&id, &make_hash('a')).await,

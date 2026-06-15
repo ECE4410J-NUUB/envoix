@@ -6,9 +6,9 @@
 //! never echoes it.
 //!
 //! Magic first byte `0x3F` keeps the top two bits `00` so a relay datagram
-//! is distinguishable from a QUIC packet on a shared socket (RFC 8489 section 5
-//! lesson, same as the probe magic); last byte `0x59` distinguishes it
-//! from the probe magic (`...58`) if the two ever co-locate.
+//! is distinguishable from a QUIC packet on a shared socket; last byte
+//! `0x59` distinguishes it from the probe magic (`...58`) if the two ever
+//! co-locate.
 
 use crate::token::RELAY_TOKEN_LEN;
 
