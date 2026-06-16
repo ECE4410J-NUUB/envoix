@@ -27,5 +27,25 @@ sudo envoix-relay-server up        # enable on boot + start
 envoix-relay-server status         # live stats
 ```
 
-For systems without `.deb`, use the static binary
-(`x86_64-unknown-linux-musl`) and install the unit + config by hand.
+## Static binary (any Linux, no `.deb`)
+
+A fully static `musl` build runs on any x86_64 Linux with no libc
+dependency:
+
+```sh
+rustup target add x86_64-unknown-linux-musl     # once
+cargo build --release --target x86_64-unknown-linux-musl -p envoix-relay-server
+# -> target/x86_64-unknown-linux-musl/release/envoix-relay-server
+strip target/x86_64-unknown-linux-musl/release/envoix-relay-server   # optional, ~3.0M
+```
+
+Install it by hand:
+
+```sh
+sudo install -m755 target/x86_64-unknown-linux-musl/release/envoix-relay-server /usr/bin/
+sudo install -Dm644 dist/config.toml /etc/envoix-relay/config.toml
+sudo install -Dm644 dist/envoix-relay.service /etc/systemd/system/envoix-relay.service
+sudo systemctl daemon-reload
+sudo envoix-relay-server test && sudo envoix-relay-server up
+```
+
