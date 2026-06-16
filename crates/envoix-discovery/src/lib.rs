@@ -240,11 +240,14 @@ impl MdnsLanAdvertiser {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
+        // mdns-sd requires the host name to end with ".local."; the instance
+        // name (second argument) does not.
+        let host_name = format!("{}.local.", record.session_id);
         let service_info = ServiceInfo::new(
             ENVOIX_SERVICE_TYPE,
             &record.session_id,
-            &record.session_id, // hostname
-            "",                 // auto-detect local addresses
+            &host_name, // hostname
+            "",         // auto-detect local addresses
             record.port,
             properties.as_slice(),
         )
