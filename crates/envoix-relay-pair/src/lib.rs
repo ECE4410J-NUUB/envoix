@@ -17,12 +17,14 @@
 
 mod bundle;
 mod handshake;
+mod wire;
 
 pub use bundle::{RelayProvision, open, open_provision, seal, seal_provision};
 pub use handshake::{
     Confirm, PakeResponse, PakeStart, Paired, client_start, relay_respond, ClientConfirming,
     ClientPending, RelayConfirming,
 };
+pub use wire::{MAX_FRAME_BODY, frame, unframe};
 
 /// Errors from the pairing protocol.
 #[derive(Debug, thiserror::Error)]
