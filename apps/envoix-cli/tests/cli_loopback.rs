@@ -67,7 +67,8 @@ fn qr_invite_loopback() {
 
     let mut receiver = spawn_receiver_auto(&output_dir);
 
-    let send_output = retry_send(|| run_send_with_invite(&receiver.invite_str, &source_path));
+    let invite = loopback_invite(&receiver.invite_str);
+    let send_output = retry_send(|| run_send_with_invite(&invite, &source_path));
 
     if !send_output.status.success() {
         let _ = receiver.child.kill();
@@ -248,9 +249,12 @@ fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<
     let mut reader = BufReader::new(stderr);
     let invite = loop {
         let mut line = String::new();
-        reader
+        let bytes_read = reader
             .read_line(&mut line)
             .expect("reading receiver stderr");
+        if bytes_read == 0 {
+            panic!("receiver exited before printing invite");
+        }
         if let Some(s) = line.trim_end_matches(['\n', '\r']).strip_prefix("invite: ") {
             break s.trim().to_string();
         }
@@ -263,13 +267,14 @@ fn extract_invite_and_drain(stderr: ChildStderr) -> (String, thread::JoinHandle<
 }
 
 fn run_send_with_invite(invite: &str, source_path: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_envoix"))
-        .arg("send")
-        .arg("--invite")
-        .arg(invite)
-        .arg(source_path)
-        .output()
-        .unwrap()
+    run_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_envoix"))
+            .arg("send")
+            .arg("--invite")
+            .arg(invite)
+            .arg(source_path),
+        Duration::from_secs(10),
+    )
 }
 
 fn run_send_with_retries(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Output {
@@ -305,6 +310,37 @@ fn run_send_once(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Ou
         .arg("--token")
         .arg(token);
     send_command.arg(source_path).output().unwrap()
+}
+
+fn loopback_invite(invite: &str) -> String {
+    let mut payload = QrInvitePayload::decode(invite).unwrap();
+    let port = payload.first_candidate().unwrap().port();
+    payload.candidates = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port).to_string()];
+    payload.encode()
+}
+
+fn run_with_timeout(command: &mut Command, timeout: Duration) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait().unwrap() {
+            Some(_) => return child.wait_with_output().unwrap(),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            None => {
+                let _ = child.kill();
+                let mut output = child.wait_with_output().unwrap();
+                output
+                    .stderr
+                    .extend_from_slice(b"\nsend command timed out in test\n");
+                return output;
+            }
+        }
+    }
 }
 
 fn loopback_addr_for(bound_addr: SocketAddr) -> SocketAddr {
