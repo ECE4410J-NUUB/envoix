@@ -15,7 +15,7 @@ pub const DEFAULT_PATH: &str = "/etc/envoix-relay/config.toml";
 /// `Ipv4`/`Ipv6` force a single family. The probed address is whichever the
 /// relay used to reach the rendezvous, so forcing the family pins what gets
 /// tested.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ProbeFamily {
     #[default]

@@ -80,6 +80,31 @@ enum ConfigAction {
         #[arg(long, default_value = config::DEFAULT_PATH)]
         path: PathBuf,
     },
+    /// Update deployment settings in the config file (no hand-editing). Only
+    /// the flags you pass are changed; the rest are left as they are.
+    Set(ConfigSetArgs),
+}
+
+/// Settable deployment parameters for `config set`. Each is optional; an
+/// absent flag leaves that setting untouched.
+#[derive(Args)]
+struct ConfigSetArgs {
+    #[arg(long, default_value = config::DEFAULT_PATH)]
+    path: PathBuf,
+    /// UDP listen address, e.g. "0.0.0.0:9104" or "[::]:9104".
+    #[arg(long)]
+    listen: Option<SocketAddr>,
+    /// Inclusive UDP port range, e.g. "9100-9105". Pass "none" to clear it
+    /// (single port).
+    #[arg(long)]
+    port_range: Option<String>,
+    /// Public rendezvous base URL for the reachability probe. Pass "none" to
+    /// clear it.
+    #[arg(long)]
+    rendezvous_url: Option<String>,
+    /// Address family for the reachability probe.
+    #[arg(long)]
+    probe_family: Option<config::ProbeFamily>,
 }
 
 /// Options for the `pair` subcommand.
@@ -231,7 +256,43 @@ fn run_config(args: ConfigArgs) {
                 "absent - generated on first run"
             });
         }
+        ConfigAction::Set(args) => run_config_set(args),
     }
+}
+
+/// Apply the provided `config set` flags to the config file and save it. Only
+/// flags that were passed are changed. The range/listen pair is validated
+/// before writing so an inconsistent config is never persisted.
+fn run_config_set(args: ConfigSetArgs) {
+    let mut cfg = config::Config::load(&args.path).unwrap_or_else(|e| die(format!("config: {e}")));
+    if let Some(listen) = args.listen {
+        cfg.listen = listen;
+    }
+    if let Some(range) = args.port_range {
+        cfg.port_range = match range.as_str() {
+            "none" | "" => None,
+            r => Some(r.to_string()),
+        };
+    }
+    if let Some(url) = args.rendezvous_url {
+        cfg.rendezvous_url = match url.as_str() {
+            "none" | "" => None,
+            u => Some(u.to_string()),
+        };
+    }
+    if let Some(family) = args.probe_family {
+        cfg.probe_family = family;
+    }
+    // Reject an inconsistent range/listen combo before persisting.
+    cfg.listen_ports(cfg.listen.port())
+        .unwrap_or_else(|e| die(format!("config: {e}")));
+    cfg.save(&args.path).unwrap_or_else(|e| die(format!("config: {e}")));
+
+    println!("updated {}", args.path.display());
+    println!("  listen        = {}", cfg.listen);
+    println!("  port_range    = {}", cfg.port_range.as_deref().unwrap_or("(single port)"));
+    println!("  rendezvous_url = {}", cfg.rendezvous_url.as_deref().unwrap_or("(unset)"));
+    println!("  probe_family  = {:?}", cfg.probe_family);
 }
 
 async fn run_server(args: RunArgs) {
