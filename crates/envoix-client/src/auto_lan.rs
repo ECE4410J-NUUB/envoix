@@ -4,6 +4,7 @@ use std::time::Duration;
 use envoix_discovery::{
     LanDiscoveryConfig, LanDiscoveryRecord, MdnsLanAdvertiser, MdnsLanDiscovery,
 };
+use envoix_error::CoreError;
 use envoix_session::{EventSink, NoopEventSink, SessionConfig, TransferDirection, TransferSummary};
 use envoix_transport::{ConnectionCandidate, FrameConnection, TransportListener};
 
@@ -12,6 +13,7 @@ use crate::{ClientEvent, ClientEventSink, PublicError, ReceiveRequest, SendReque
 /// Timeout used for LAN mDNS discovery.
 const LAN_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_AUTH_FAILURES: u32 = 50;
 
 pub(crate) async fn send(
     request: SendRequest,
@@ -140,7 +142,13 @@ where
     };
 
     let engine = envoix_session::TransferEngine::new(config.chunk_size);
-    let mut connection = accept_authenticated_connection(&listener, &config).await?;
+    let mut connection = match accept_authenticated_connection(&listener, &config).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            client_events.on_event(ClientEvent::TooManyAuthFailures);
+            return Err(e);
+        }
+    };
     drop(advertiser);
 
     let summary = engine
@@ -155,7 +163,9 @@ async fn accept_authenticated_connection(
     listener: &envoix_session::BoundListener,
     config: &SessionConfig,
 ) -> Result<Box<dyn FrameConnection>, PublicError> {
-    loop {
+    // TODO: consider concurrently trying multiple candidates to make the app
+    // more DoS resistant.
+    for _ in 0..MAX_AUTH_FAILURES {
         let mut connection = listener.accept().await?;
         let result = tokio::time::timeout(
             AUTH_TIMEOUT,
@@ -170,6 +180,10 @@ async fn accept_authenticated_connection(
             }
         }
     }
+
+    Err(CoreError::Protocol(format!(
+        "too many failed pairing attempts (threshold: {MAX_AUTH_FAILURES}); another peer may be using the wrong token or interfering"
+    )))
 }
 
 /// Generate a short random identifier for session names.
@@ -179,6 +193,8 @@ async fn accept_authenticated_connection(
 /// different machines) still produce distinct identifiers.  This is not
 /// cryptographically random but is more than sufficient for mDNS instance
 /// disambiguation on a LAN.
+/// The function should not be called in other places, especially where
+/// a crypto-secure random id is needed.
 fn fast_random_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

@@ -243,6 +243,8 @@ pub enum ClientEvent {
         /// Human-readable failure reason.
         reason: String,
     },
+    /// Pairing failed too many times while receiving.
+    TooManyAuthFailures,
 }
 
 /// Public facade for sending and receiving files.

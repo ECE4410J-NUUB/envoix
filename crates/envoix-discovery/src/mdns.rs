@@ -219,6 +219,10 @@ impl MdnsLanDiscovery {
                         if let Some(ref expected) = self.config.session_id
                             && &record.session_id != expected
                         {
+                            tracing::debug!(
+                                "candidates with unmatched session id: expect {expected}, get {}.",
+                                record.session_id
+                            );
                             continue;
                         }
 

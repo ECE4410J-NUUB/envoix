@@ -468,6 +468,11 @@ impl envoix_client::ClientEventSink for ConsoleClientEventSink {
             ClientEvent::LanDiscoveryFailed { reason } => {
                 eprintln!("  LAN discovery failed: {reason}");
             }
+            ClientEvent::TooManyAuthFailures => {
+                eprintln!(
+                    "  failed pairing attempts exceeded threshold: another peer may be using the wrong token or interfering"
+                );
+            }
         }
     }
 }
