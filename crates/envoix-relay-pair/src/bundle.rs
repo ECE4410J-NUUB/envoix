@@ -1,20 +1,18 @@
 //! The sealed credential bundle.
 //!
-//! Given the SPAKE2 shared key `K`, derive a one-shot AEAD key with HKDF and
-//! seal the relay's credentials with ChaCha20-Poly1305. Confidentiality and
+//! Given the SPAKE2 shared key `K`, derive a one-shot AEAD key with the BLAKE3
+//! KDF and seal the relay's credentials with ChaCha20-Poly1305. Confidentiality and
 //! integrity come from `K`: an attacker who could not derive `K` (no pairing
 //! code) can neither read nor forge the bundle.
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 use crate::PairError;
 
-/// HKDF context separating this key from any other use of `K`.
-const BUNDLE_KEY_INFO: &[u8] = b"envoix-relay-pair bundle key v1";
+/// BLAKE3 KDF context separating this key from any other use of `K`.
+const BUNDLE_KEY_CONTEXT: &str = "envoix-relay-pair bundle key v1";
 
 /// ChaCha20-Poly1305 nonce length.
 const NONCE_LEN: usize = 12;
@@ -29,19 +27,15 @@ pub struct RelayProvision {
     pub ports: Option<[u16; 2]>,
 }
 
-/// Derive the one-shot AEAD key from the SPAKE2 shared key `k`.
-fn bundle_key(k: &[u8]) -> Result<Key, PairError> {
-    let mut key = [0u8; 32];
-    Hkdf::<Sha256>::new(None, k)
-        .expand(BUNDLE_KEY_INFO, &mut key)
-        .map_err(|_| PairError::KeyDerivation)?;
-    Ok(Key::from(key))
+/// Derive the one-shot AEAD key from the SPAKE2 shared key `k` (BLAKE3 KDF).
+fn bundle_key(k: &[u8]) -> Key {
+    Key::from(blake3::derive_key(BUNDLE_KEY_CONTEXT, k))
 }
 
 /// Seal `plaintext` under a key derived from the SPAKE2 key `k`. The output is
 /// `nonce(12) || ciphertext+tag`, safe to send over a cleartext channel.
 pub fn seal(k: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, PairError> {
-    let cipher = ChaCha20Poly1305::new(&bundle_key(k)?);
+    let cipher = ChaCha20Poly1305::new(&bundle_key(k));
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|_| PairError::Entropy)?;
     let ciphertext = cipher
@@ -60,7 +54,7 @@ pub fn open(k: &[u8], sealed: &[u8]) -> Result<Vec<u8>, PairError> {
         return Err(PairError::Malformed);
     }
     let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
-    let cipher = ChaCha20Poly1305::new(&bundle_key(k)?);
+    let cipher = ChaCha20Poly1305::new(&bundle_key(k));
     cipher
         .decrypt(Nonce::from_slice(nonce), ciphertext)
         .map_err(|_| PairError::Decrypt)

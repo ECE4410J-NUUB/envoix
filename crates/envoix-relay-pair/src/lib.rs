@@ -23,8 +23,6 @@ pub use bundle::{RelayProvision, open, open_provision, seal, seal_provision};
 pub enum PairError {
     #[error("entropy source unavailable")]
     Entropy,
-    #[error("key derivation failed")]
-    KeyDerivation,
     #[error("sealed bundle is malformed or truncated")]
     Malformed,
     #[error("decryption failed: wrong pairing code or tampered data")]
