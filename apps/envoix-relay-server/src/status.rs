@@ -41,10 +41,7 @@ fn print_snapshot(s: &StatsSnapshot) {
     };
 
     println!("relay status (snapshot {} ago{stale})", stats::duration(age));
-    println!(
-        "  forwarding:    {}",
-        if s.forwarding_enabled { "enabled" } else { "disabled" }
-    );
+    println!("  forwarding:    {}", forwarding_summary(s));
     println!("  uptime:        {}", stats::duration(s.uptime_secs));
     println!("  active pairs:  {}", s.active_pairs);
     println!(
@@ -62,4 +59,34 @@ fn print_snapshot(s: &StatsSnapshot) {
         "  dropped:       invalid {}, over-quota {}, session-cap {}, capacity {}",
         s.invalid_total, s.quota_exceeded_total, s.session_cap_cutoff_total, s.rejected_capacity_total
     );
+}
+
+/// Human verdict for the forwarding state. Quota-exceeded is surfaced even
+/// though `forwarding_enabled` stays true, because the relay silently drops
+/// all traffic once over quota - the "looks up but nothing works" case.
+fn forwarding_summary(s: &StatsSnapshot) -> &'static str {
+    if !s.forwarding_enabled {
+        "manually paused"
+    } else if s.month_byte_limit > 0 && s.month_bytes >= s.month_byte_limit {
+        "DROPPING - monthly quota exceeded (resets at month start, UTC)"
+    } else {
+        "enabled"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarding_verdict() {
+        let under = StatsSnapshot { forwarding_enabled: true, month_bytes: 10, month_byte_limit: 100, ..Default::default() };
+        assert_eq!(forwarding_summary(&under), "enabled");
+
+        let over = StatsSnapshot { month_bytes: 100, ..under };
+        assert!(forwarding_summary(&over).contains("quota exceeded"));
+
+        let paused = StatsSnapshot { forwarding_enabled: false, ..Default::default() };
+        assert_eq!(forwarding_summary(&paused), "manually paused");
+    }
 }
