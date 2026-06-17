@@ -43,20 +43,6 @@ pub enum AuthFrame {
     Spake2Message(Spake2Message),
     /// Role-separated confirmation proof for the derived key.
     Spake2Confirm(Spake2Confirm),
-    /// A relay handing its master key + port range to a paired client, sent
-    /// only after SPAKE2 confirmation succeeds (so it crosses an authenticated
-    /// channel). This is how a custom relay provisions a client.
-    RelayProvision(RelayProvision),
-}
-
-/// Relay credentials delivered to a client over the confirmed pairing
-/// channel. Carries the secret that was deliberately kept out of the QR.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RelayProvision {
-    /// 64-hex relay master key the client uses to mint relay tokens.
-    pub key: String,
-    /// Inclusive [first, last] data-port range, or `None` for a single port.
-    pub ports: Option<[u16; 2]>,
 }
 
 /// Sender's initial SPAKE2 frame.
