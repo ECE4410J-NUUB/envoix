@@ -295,14 +295,14 @@ impl TransferEngine {
         let mut file = prepared.file;
         let mut hasher = prepared.hasher;
 
-        connection
-            .send_frame(Frame::ResumeStatus(ResumeStatus {
-                transfer_id: header.transfer_id.clone(),
-                next_chunk_index: prepared.state.next_chunk_index,
-                bytes_received: prepared.state.bytes_received,
-                prefix_hash: prepared.prefix_hash,
-            }))
-            .await?;
+        send_resume_status(
+            connection,
+            &header.transfer_id,
+            prepared.state.next_chunk_index,
+            prepared.state.bytes_received,
+            prepared.prefix_hash,
+        )
+        .await?;
 
         events.on_event(TransferEvent::Started {
             transfer_id: header.transfer_id.clone(),
@@ -413,11 +413,7 @@ impl TransferEngine {
                         &header.transfer_id,
                     )
                     .await?;
-                    connection
-                        .send_frame(Frame::CompleteAck(CompleteAck {
-                            transfer_id: header.transfer_id.clone(),
-                        }))
-                        .await?;
+                    send_complete_ack(connection, &header.transfer_id).await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
                         bytes_transferred: expected_offset,
@@ -588,26 +584,15 @@ async fn prepare_receive_state(
         LocalFileStorage::resumable_temp_path(output_dir, &state.file_name, &state.transfer_id)?;
     let mut hasher = blake3::Hasher::new();
     if state.bytes_received > 0 {
-        events.on_event(TransferEvent::HashStarted {
-            transfer_id: header.transfer_id.clone(),
-            direction: TransferDirection::Receive,
-            file_name: header.file_name.clone(),
-            bytes_to_hash: state.bytes_received,
-        });
-        let mut prefix_file = fs::File::open(&temp_path).await?;
-        hash_file_prefix(
-            &mut prefix_file,
+        hash_receive_prefix_with_events(
+            &temp_path,
             &mut hasher,
+            events,
+            header,
             state.bytes_received,
             buffer_size,
         )
         .await?;
-        events.on_event(TransferEvent::HashCompleted {
-            transfer_id: header.transfer_id.clone(),
-            direction: TransferDirection::Receive,
-            file_name: header.file_name.clone(),
-            bytes_hashed: state.bytes_received,
-        });
     }
     let prefix_hash = hasher.finalize().to_hex().to_string();
     write_resume_state_for_offset(
@@ -733,28 +718,16 @@ async fn receive_existing_final(
         )));
     }
 
-    events.on_event(TransferEvent::HashStarted {
-        transfer_id: header.transfer_id.clone(),
-        direction: TransferDirection::Receive,
-        file_name: header.file_name.clone(),
-        bytes_to_hash: header.file_size,
-    });
-    let final_hash = hash_file(&final_path).await?;
-    events.on_event(TransferEvent::HashCompleted {
-        transfer_id: header.transfer_id.clone(),
-        direction: TransferDirection::Receive,
-        file_name: header.file_name.clone(),
-        bytes_hashed: header.file_size,
-    });
+    let final_hash = hash_receive_file_with_events(&final_path, events, &header).await?;
 
-    connection
-        .send_frame(Frame::ResumeStatus(ResumeStatus {
-            transfer_id: header.transfer_id.clone(),
-            next_chunk_index: next_chunk_index(header.file_size, header.chunk_size),
-            bytes_received: header.file_size,
-            prefix_hash: final_hash.clone(),
-        }))
-        .await?;
+    send_resume_status(
+        connection,
+        &header.transfer_id,
+        next_chunk_index(header.file_size, header.chunk_size),
+        header.file_size,
+        final_hash.clone(),
+    )
+    .await?;
 
     match connection.recv_frame().await? {
         Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
@@ -780,11 +753,7 @@ async fn receive_existing_final(
         }
     }
 
-    connection
-        .send_frame(Frame::CompleteAck(CompleteAck {
-            transfer_id: header.transfer_id.clone(),
-        }))
-        .await?;
+    send_complete_ack(connection, &header.transfer_id).await?;
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
@@ -796,6 +765,78 @@ async fn receive_existing_final(
         file_name: header.file_name,
         bytes_transferred: header.file_size,
     })
+}
+
+async fn hash_receive_file_with_events(
+    path: &Path,
+    events: &dyn EventSink,
+    header: &FileHeader,
+) -> Result<String, TransferError> {
+    emit_receive_hash_started(events, header, header.file_size);
+    let hash = hash_file(path).await?;
+    emit_receive_hash_completed(events, header, header.file_size);
+    Ok(hash)
+}
+
+async fn hash_receive_prefix_with_events(
+    path: &Path,
+    hasher: &mut blake3::Hasher,
+    events: &dyn EventSink,
+    header: &FileHeader,
+    bytes_to_hash: u64,
+    buffer_size: usize,
+) -> Result<(), TransferError> {
+    emit_receive_hash_started(events, header, bytes_to_hash);
+    let mut file = fs::File::open(path).await?;
+    hash_file_prefix(&mut file, hasher, bytes_to_hash, buffer_size).await?;
+    emit_receive_hash_completed(events, header, bytes_to_hash);
+    Ok(())
+}
+
+fn emit_receive_hash_started(events: &dyn EventSink, header: &FileHeader, bytes_to_hash: u64) {
+    events.on_event(TransferEvent::HashStarted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_to_hash,
+    });
+}
+
+fn emit_receive_hash_completed(events: &dyn EventSink, header: &FileHeader, bytes_hashed: u64) {
+    events.on_event(TransferEvent::HashCompleted {
+        transfer_id: header.transfer_id.clone(),
+        direction: TransferDirection::Receive,
+        file_name: header.file_name.clone(),
+        bytes_hashed,
+    });
+}
+
+async fn send_resume_status(
+    connection: &mut dyn FrameConnection,
+    transfer_id: &TransferId,
+    next_chunk_index: u64,
+    bytes_received: u64,
+    prefix_hash: String,
+) -> Result<(), TransferError> {
+    connection
+        .send_frame(Frame::ResumeStatus(ResumeStatus {
+            transfer_id: transfer_id.clone(),
+            next_chunk_index,
+            bytes_received,
+            prefix_hash,
+        }))
+        .await
+}
+
+async fn send_complete_ack(
+    connection: &mut dyn FrameConnection,
+    transfer_id: &TransferId,
+) -> Result<(), TransferError> {
+    connection
+        .send_frame(Frame::CompleteAck(CompleteAck {
+            transfer_id: transfer_id.clone(),
+        }))
+        .await
 }
 
 async fn hash_file(path: &Path) -> Result<String, TransferError> {
@@ -877,8 +918,7 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -915,8 +955,6 @@ mod tests {
             tokio::fs::read(output_dir.join("hello.txt")).await.unwrap(),
             b"hello over frames"
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -957,8 +995,6 @@ mod tests {
                 .unwrap()
         );
         assert_no_sidecars(&output_dir).await;
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1031,8 +1067,6 @@ mod tests {
                 .unwrap(),
             b"resume over two connections"
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1091,8 +1125,6 @@ mod tests {
             source_bytes
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1150,8 +1182,6 @@ mod tests {
                 .unwrap(),
             source_bytes
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1210,8 +1240,6 @@ mod tests {
             tokio::fs::read(output_dir.join("fresh.txt")).await.unwrap(),
             source_bytes
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1279,8 +1307,6 @@ mod tests {
                 .is_none()
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1348,8 +1374,6 @@ mod tests {
                 .is_none()
         );
         assert!(!fs::try_exists(temp_path).await.unwrap());
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1390,8 +1414,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1428,8 +1450,6 @@ mod tests {
 
         assert_eq!(send_summary.bytes_transferred, 12);
         assert_eq!(receive_summary.bytes_transferred, 12);
-
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     struct MemoryFrameConnection {
@@ -1544,6 +1564,22 @@ mod tests {
                 .map_err(|error| CoreError::Transport(error.to_string()))
         }
 
+        async fn send_chunk(
+            &mut self,
+            transfer_id: &TransferId,
+            index: u64,
+            offset: u64,
+            bytes: &[u8],
+        ) -> Result<(), CoreError> {
+            self.send_frame(Frame::Chunk(Chunk {
+                transfer_id: transfer_id.clone(),
+                index,
+                offset,
+                bytes: bytes.to_vec(),
+            }))
+            .await
+        }
+
         async fn recv_frame(&mut self) -> Result<Frame, CoreError> {
             self.rx
                 .recv()
@@ -1575,17 +1611,28 @@ mod tests {
         }
     }
 
-    fn unique_test_dir() -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+    struct TestDir(tempfile::TempDir);
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
-            "envoix-transfer-test-{}-{nanos}-{counter}",
-            std::process::id()
-        ))
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn unique_test_dir() -> TestDir {
+        TestDir(
+            tempfile::Builder::new()
+                .prefix("envoix-transfer-test-")
+                .tempdir()
+                .unwrap(),
+        )
     }
 }

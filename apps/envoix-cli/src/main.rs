@@ -337,18 +337,13 @@ fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String
 /// Probes the OS routing table to find the preferred outbound LAN IP without
 /// sending any packets (connect on UDP never transmits data).
 fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
-    match ip_version {
-        IpVersion::Ipv4 => {
-            let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-            socket.connect("8.8.8.8:80").ok()?;
-            Some(socket.local_addr().ok()?.ip())
-        }
-        IpVersion::Ipv6 => {
-            let socket = UdpSocket::bind("[::]:0").ok()?;
-            socket.connect("[2001:4860:4860::8888]:80").ok()?;
-            Some(socket.local_addr().ok()?.ip())
-        }
-    }
+    let (bind_addr, probe_addr) = match ip_version {
+        IpVersion::Ipv4 => ("0.0.0.0:0", "8.8.8.8:80"),
+        IpVersion::Ipv6 => ("[::]:0", "[2001:4860:4860::8888]:80"),
+    };
+    let socket = UdpSocket::bind(bind_addr).ok()?;
+    socket.connect(probe_addr).ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 fn client_for_token(

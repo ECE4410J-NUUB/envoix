@@ -20,7 +20,7 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
 
-use envoix_types::{MIN_SHARED_TOKEN_LEN, PROTOCOL_VERSION};
+use envoix_types::{MIN_SHARED_TOKEN_LEN, PROTOCOL_VERSION, is_valid_shared_token};
 
 /// Prefix prepended to every encoded invite string.
 pub const INVITE_PREFIX: &str = "envoix:";
@@ -137,7 +137,7 @@ impl QrInvitePayload {
             return Err(QrError::NoCandidates);
         }
 
-        if !self.token.is_ascii() || self.token.len() < MIN_SHARED_TOKEN_LEN {
+        if !is_valid_shared_token(&self.token) {
             return Err(QrError::WeakToken);
         }
 

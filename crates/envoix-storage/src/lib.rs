@@ -188,6 +188,7 @@ impl LocalFileStorage {
         let mut file = File::create(&temp_state_path).await?;
         file.write_all(&bytes).await?;
         file.flush().await?;
+        file.sync_all().await?;
         drop(file);
         fs::rename(temp_state_path, state_path).await?;
         Ok(())
@@ -322,7 +323,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(fs::read(&final_path).await.unwrap(), text);
-        fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[tokio::test]
@@ -382,8 +382,6 @@ mod tests {
                 .unwrap(),
             None
         );
-
-        fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[tokio::test]
@@ -416,7 +414,6 @@ mod tests {
 
         assert_eq!(second_temp_path, temp_path);
         assert_eq!(fs::read(temp_path).await.unwrap(), b"hello world");
-        fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[tokio::test]
@@ -452,15 +449,30 @@ mod tests {
                 .unwrap(),
             Some(state)
         );
-
-        fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    fn unique_test_dir() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "envoix-storage-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ))
+    struct TestDir(tempfile::TempDir);
+
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn unique_test_dir() -> TestDir {
+        TestDir(
+            tempfile::Builder::new()
+                .prefix("envoix-storage-test-")
+                .tempdir()
+                .unwrap(),
+        )
     }
 }
