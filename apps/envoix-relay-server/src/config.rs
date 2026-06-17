@@ -10,6 +10,31 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PATH: &str = "/etc/envoix-relay/config.toml";
 
+/// Address family the reachability probe should use. `Auto` lets the system
+/// pick (curl's default); `Ipv4`/`Ipv6` force the family - needed because the
+/// observed address (and thus what the rendezvous can reach) depends on which
+/// family was used to contact it. Against an IPv4-only rendezvous, force
+/// `Ipv4`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeFamily {
+    #[default]
+    Auto,
+    Ipv4,
+    Ipv6,
+}
+
+impl ProbeFamily {
+    /// The curl flag that forces this family, if any.
+    pub fn curl_flag(self) -> Option<&'static str> {
+        match self {
+            ProbeFamily::Auto => None,
+            ProbeFamily::Ipv4 => Some("-4"),
+            ProbeFamily::Ipv6 => Some("-6"),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -28,6 +53,10 @@ pub struct Config {
     /// to probe this relay's port. Unset (the default) skips that check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendezvous_url: Option<String>,
+    /// Address family for the reachability probe. Force `ipv4` when the
+    /// rendezvous is IPv4-only (otherwise an IPv6-preferring host is probed
+    /// on an address the rendezvous cannot reach).
+    pub probe_family: ProbeFamily,
 }
 
 impl Default for Config {
@@ -44,6 +73,7 @@ impl Default for Config {
             sweep_interval_secs: 30,
             housekeeping_interval_secs: 30,
             rendezvous_url: None,
+            probe_family: ProbeFamily::Auto,
         }
     }
 }
@@ -84,6 +114,22 @@ mod tests {
     fn missing_file_is_defaults() {
         let c = Config::load(Path::new("/nonexistent/envoix/config.toml")).unwrap();
         assert_eq!(c.max_sessions, 64);
+        assert_eq!(c.probe_family, ProbeFamily::Auto);
+    }
+
+    #[test]
+    fn probe_family_parses_and_round_trips() {
+        let path = tmp("fam");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Parses the lowercase string form from a file.
+        std::fs::write(&path, "probe_family = \"ipv4\"\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().probe_family, ProbeFamily::Ipv4);
+        // And survives a save/load round trip.
+        let c = Config { probe_family: ProbeFamily::Ipv6, ..Config::default() };
+        c.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().probe_family, ProbeFamily::Ipv6);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

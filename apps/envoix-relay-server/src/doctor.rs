@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::Config;
+use crate::config::{Config, ProbeFamily};
 
 enum Status {
     Pass,
@@ -202,7 +202,7 @@ fn check_reachability(cfg: &Config) -> Option<Check> {
     let url = cfg.rendezvous_url.as_deref()?;
     let port = cfg.listen.port();
     let echo = spawn_echo_responder(cfg.listen);
-    let result = rendezvous_probe(url, port);
+    let result = rendezvous_probe(url, port, cfg.probe_family);
     if let Some(h) = echo {
         let _ = h.join();
     }
@@ -246,22 +246,24 @@ fn spawn_echo_responder(listen: SocketAddr) -> Option<std::thread::JoinHandle<()
 /// return whether the echo came back. Uses the system `curl` (the rendezvous
 /// is HTTPS via Cloudflare) - consistent with the other checks shelling out
 /// to system tools, and keeps the static binary free of a TLS stack.
-fn rendezvous_probe(base_url: &str, port: u16) -> Result<bool, String> {
+fn rendezvous_probe(base_url: &str, port: u16, family: ProbeFamily) -> Result<bool, String> {
     let url = format!("{}/api/v1/relay-probe", base_url.trim_end_matches('/'));
     let body = format!("{{\"port\":{port}}}");
+    let mut args = vec!["-sS", "--max-time", "8"];
+    if let Some(flag) = family.curl_flag() {
+        args.push(flag);
+    }
+    args.extend([
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &body,
+        &url,
+    ]);
     let out = Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            "8",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            &url,
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("curl not available: {e}"))?;
     if !out.status.success() {
