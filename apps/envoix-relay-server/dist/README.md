@@ -27,6 +27,34 @@ sudo envoix-relay-server up        # enable on boot + start
 envoix-relay-server status         # live stats
 ```
 
+## Packaging the relay (AlmaLinux/RHEL family)
+
+Build an `.rpm` with
+[`cargo-generate-rpm`](https://crates.io/crates/cargo-generate-rpm). It needs
+no `rpmbuild` and runs on any host, so you can build the RPM from a
+Debian/Ubuntu dev box. It packages the static `musl` binary, so the RPM has
+no shared-library dependencies and installs on any RHEL version:
+
+```sh
+cargo install cargo-generate-rpm                                       # once
+rustup target add x86_64-unknown-linux-musl                            # once
+cargo build --release --target x86_64-unknown-linux-musl -p envoix-relay-server
+strip target/x86_64-unknown-linux-musl/release/envoix-relay-server     # optional
+cargo generate-rpm -p apps/envoix-relay-server --target x86_64-unknown-linux-musl
+# -> target/x86_64-unknown-linux-musl/generate-rpm/envoix-relay-server-<version>-1.x86_64.rpm
+```
+
+It installs the same paths as the `.deb` (the unit goes to
+`/usr/lib/systemd/system/`) and enables, but does not start, the service.
+`config.toml` is a `%config(noreplace)` file, so your edits survive upgrades.
+
+```sh
+sudo dnf install ./envoix-relay-server-*.x86_64.rpm
+sudo envoix-relay-server test      # preflight: port, firewall, clock
+sudo envoix-relay-server up        # enable on boot + start
+envoix-relay-server status         # live stats
+```
+
 ## Static binary (any Linux, no `.deb`)
 
 A fully static `musl` build runs on any x86_64 Linux with no libc

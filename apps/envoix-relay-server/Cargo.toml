@@ -38,3 +38,30 @@ unit-name = "envoix-relay"
 unit-scripts = "dist"
 enable = true
 start = false
+
+# RPM packaging (AlmaLinux/RHEL family): build with
+# `cargo generate-rpm -p envoix-relay-server --target x86_64-unknown-linux-musl`.
+# Packages the static musl binary, so the RPM has no shared-library
+# dependencies (auto-req disabled) and runs on any RHEL version. The systemd
+# unit is enabled, but not started, on install -- mirroring the .deb.
+[package.metadata.generate-rpm]
+auto-req = "disabled"
+assets = [
+    { source = "target/x86_64-unknown-linux-musl/release/envoix-relay-server", dest = "/usr/bin/envoix-relay-server", mode = "0755" },
+    { source = "dist/config.toml", dest = "/etc/envoix-relay/config.toml", mode = "0644", config = "noreplace" },
+    { source = "dist/envoix-relay.service", dest = "/usr/lib/systemd/system/envoix-relay.service", mode = "0644" },
+]
+post_install_script = '''
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -eq 1 ]; then
+    systemctl enable envoix-relay.service >/dev/null 2>&1 || :
+fi
+'''
+pre_uninstall_script = '''
+if [ "$1" -eq 0 ]; then
+    systemctl --no-reload disable --now envoix-relay.service >/dev/null 2>&1 || :
+fi
+'''
+post_uninstall_script = '''
+systemctl daemon-reload >/dev/null 2>&1 || :
+'''
