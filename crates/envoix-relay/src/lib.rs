@@ -15,7 +15,10 @@ pub mod quota;
 pub mod table;
 pub mod token;
 
-pub use frame::{RELAY_HEADER_LEN, RELAY_MAGIC, RelayDatagram, encode};
+pub use frame::{
+    RELAY_HEADER_LEN, RELAY_MAGIC, RELAY_PROBE_LEN, RELAY_PROBE_MAGIC, RELAY_PROBE_NONCE_LEN,
+    RelayDatagram, encode, encode_probe, parse_probe,
+};
 pub use quota::MonthlyUsage;
 pub use table::{ForwardOutcome, RelayConfig, RelayTable, RelayTableStats};
 pub use token::{RELAY_TOKEN_LEN, RelayRole, RelaySessionId, RelayTokenKey};

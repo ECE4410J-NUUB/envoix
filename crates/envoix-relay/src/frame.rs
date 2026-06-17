@@ -50,6 +50,39 @@ pub fn encode(token: &[u8; RELAY_TOKEN_LEN], payload: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Reachability-probe magic. Same prefix as [`RELAY_MAGIC`], last byte `0x58`
+/// (vs `0x59`) so a probe is unmistakable from a real data-plane datagram on
+/// the same socket. A relay that receives `magic || nonce` echoes the exact
+/// bytes back to the sender, letting an external prober (the rendezvous)
+/// confirm the relay's UDP port is reachable. It carries no token: it proves
+/// only that a packet reached the port, nothing about any session.
+pub const RELAY_PROBE_MAGIC: [u8; 4] = [0x3f, 0x45, 0x56, 0x58];
+
+/// Probe nonce length. The prober picks a fresh random nonce per probe so a
+/// stray or replayed echo cannot be mistaken for the current one.
+pub const RELAY_PROBE_NONCE_LEN: usize = 16;
+
+/// Probe datagram length: `magic(4) || nonce(16)`. Any other length is not a
+/// probe.
+pub const RELAY_PROBE_LEN: usize = 4 + RELAY_PROBE_NONCE_LEN;
+
+/// If `buf` is a probe datagram, return its nonce; otherwise `None`.
+pub fn parse_probe(buf: &[u8]) -> Option<&[u8]> {
+    if buf.len() == RELAY_PROBE_LEN && buf[..4] == RELAY_PROBE_MAGIC {
+        Some(&buf[4..])
+    } else {
+        None
+    }
+}
+
+/// Build a probe datagram: `magic || nonce`.
+pub fn encode_probe(nonce: &[u8; RELAY_PROBE_NONCE_LEN]) -> [u8; RELAY_PROBE_LEN] {
+    let mut buf = [0u8; RELAY_PROBE_LEN];
+    buf[..4].copy_from_slice(&RELAY_PROBE_MAGIC);
+    buf[4..].copy_from_slice(nonce);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +102,28 @@ mod tests {
     fn magic_distinct_from_probe() {
         // Probe magic is 3f 45 56 58; relay is 3f 45 56 59.
         assert_eq!(RELAY_MAGIC, [0x3f, 0x45, 0x56, 0x59]);
+        assert_eq!(RELAY_PROBE_MAGIC, [0x3f, 0x45, 0x56, 0x58]);
+        assert_ne!(RELAY_MAGIC, RELAY_PROBE_MAGIC);
+    }
+
+    #[test]
+    fn probe_round_trip() {
+        let nonce = [0xa7u8; RELAY_PROBE_NONCE_LEN];
+        let buf = encode_probe(&nonce);
+        assert_eq!(buf.len(), RELAY_PROBE_LEN);
+        assert_eq!(parse_probe(&buf), Some(&nonce[..]));
+    }
+
+    #[test]
+    fn probe_rejects_wrong_magic_and_length() {
+        let nonce = [0x01u8; RELAY_PROBE_NONCE_LEN];
+        let mut buf = encode_probe(&nonce);
+        // Wrong length (a real relay datagram, or truncated) is not a probe.
+        assert!(parse_probe(&buf[..RELAY_PROBE_LEN - 1]).is_none());
+        assert!(parse_probe(&[]).is_none());
+        // The relay magic, even at probe length, is not a probe.
+        buf[3] = 0x59;
+        assert!(parse_probe(&buf).is_none());
     }
 
     #[test]
