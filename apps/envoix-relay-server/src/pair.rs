@@ -283,4 +283,89 @@ mod tests {
         assert!(result.is_err());
         assert!(relay.await.unwrap().is_err());
     }
+
+    /// End-to-end: a paired client uses the delivered master key to mint its
+    /// own relay tokens (custom relay -> the client is the issuer), then two
+    /// peers register and transfer a multi-datagram "file" through a real
+    /// relay bound with the same key. Proves the pairing actually authorizes
+    /// relay use.
+    #[tokio::test]
+    async fn paired_client_registers_and_transfers_a_file() {
+        use std::sync::Arc;
+        use std::time::{Duration, SystemTime};
+
+        use envoix_relay::{RelayConfig, RelayRole, RelaySessionId, RelayTokenKey, encode};
+        use tokio::net::UdpSocket;
+
+        use crate::server::RelayServer;
+
+        // The custom relay's master key. In production it lives in the relay's
+        // key file; `pair` reads it and seals it to the client over SPAKE2.
+        let master = [0x5au8; 32];
+        let master_hex: String = master.iter().map(|b| format!("{b:02x}")).collect();
+
+        // 1) Pair: deliver {key, ports} to a mock client over an in-memory pipe.
+        let provision = RelayProvision { key: master_hex, ports: Some([9100, 9105]) };
+        let code = "31-relay-pair";
+        let (mut relay_side, mut client_side) = tokio::io::duplex(8192);
+        let relay_pair = {
+            let provision = provision.clone();
+            tokio::spawn(async move {
+                relay_pair_session(&mut relay_side, code, &provision).await
+            })
+        };
+        let paired = client_pair_session(&mut client_side, code).await.expect("client pairs");
+        relay_pair.await.unwrap().expect("relay pairs");
+        assert_eq!(paired, provision);
+
+        // 2) Mint: the client turns the delivered key into its own tokens.
+        let client_key = RelayTokenKey::from_hex(&paired.key).expect("paired key is valid hex");
+        let session = RelaySessionId::from_bytes([0xa5; 16]);
+        let expires = SystemTime::now() + Duration::from_secs(300);
+        let sender_token = client_key.mint(&session, RelayRole::Sender, expires);
+        let receiver_token = client_key.mint(&session, RelayRole::Receiver, expires);
+
+        // 3) Run a real relay bound with the SAME master key.
+        let usage_path = std::env::temp_dir()
+            .join(format!("envoix-pair-int-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&usage_path);
+        let server = RelayServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            &[0],
+            RelayTokenKey::from_bytes(master),
+            RelayConfig::default(),
+            u64::MAX,
+            usage_path.clone(),
+        )
+        .await
+        .expect("bind relay");
+        let server = Arc::new(server);
+        let relay_addr = server.local_addrs()[0];
+        {
+            let run = server.clone();
+            tokio::spawn(async move { run.run().await });
+        }
+
+        // 4) Register + file transfer: sender registers, receiver streams the
+        //    "file" chunk by chunk; the relay cross-forwards each bare payload.
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender.send_to(&encode(&sender_token, b"hello"), relay_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let file: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 512]).collect();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 2048];
+        for chunk in &file {
+            receiver.send_to(&encode(&receiver_token, chunk), relay_addr).await.unwrap();
+            let (n, _) = tokio::time::timeout(Duration::from_secs(1), sender.recv_from(&mut buf))
+                .await
+                .expect("forward timed out")
+                .expect("recv");
+            received.push(buf[..n].to_vec());
+        }
+        assert_eq!(received, file, "relay forwarded the file intact");
+
+        let _ = std::fs::remove_file(&usage_path);
+    }
 }
