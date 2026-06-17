@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_discovery::{
@@ -14,6 +15,9 @@ use crate::{ClientEvent, ClientEventSink, PublicError, ReceiveRequest, SendReque
 const LAN_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_AUTH_FAILURES: u32 = 50;
+/// Cap on pairing handshakes running at once, so a flood of half-open
+/// connections cannot exhaust the receiver while we authenticate in parallel.
+const MAX_CONCURRENT_AUTH: usize = 16;
 
 pub(crate) async fn send(
     request: SendRequest,
@@ -111,7 +115,7 @@ where
 
     // Bind first, then report the address to the caller so they can
     // print a QR invite or log the port, then start mDNS advertising.
-    let listener = envoix_session::bind_quic_listener(request.listen_addr)?;
+    let listener = Arc::new(envoix_session::bind_quic_listener(request.listen_addr)?);
     let bound_addr = listener.local_addr()?;
     let port = bound_addr.port();
 
@@ -142,7 +146,7 @@ where
     };
 
     let engine = envoix_session::TransferEngine::new(config.chunk_size);
-    let mut connection = match accept_authenticated_connection(&listener, &config).await {
+    let mut connection = match accept_authenticated_connection(listener, &config).await {
         Ok(conn) => conn,
         Err(e) => {
             client_events.on_event(ClientEvent::TooManyAuthFailures);
@@ -160,25 +164,54 @@ where
 }
 
 async fn accept_authenticated_connection(
-    listener: &envoix_session::BoundListener,
+    listener: Arc<envoix_session::BoundListener>,
     config: &SessionConfig,
 ) -> Result<Box<dyn FrameConnection>, PublicError> {
-    // TODO: consider concurrently trying multiple candidates to make the app
-    // more DoS resistant.
-    for _ in 0..MAX_AUTH_FAILURES {
-        let mut connection = listener.accept().await?;
-        let result = tokio::time::timeout(
-            AUTH_TIMEOUT,
-            envoix_session::authenticate_receiver(&mut *connection, &config.pairing),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(())) => return Ok(connection),
-            Ok(Err(_)) | Err(_) => {
+    // Accept AND authenticate connections concurrently. A peer that connects
+    // but never finishes - whether it stalls opening its stream (so `accept`
+    // itself blocks) or stalls the SPAKE2 handshake (up to AUTH_TIMEOUT) - then
+    // only ties up one slot instead of blocking every peer behind it. We keep
+    // MAX_CONCURRENT_AUTH attempts in flight and the first to authenticate
+    // wins; remaining attempts are dropped when this returns. Total failures
+    // stay bounded by MAX_AUTH_FAILURES.
+    let spawn_attempt = |tasks: &mut tokio::task::JoinSet<Result<Box<dyn FrameConnection>, ()>>| {
+        let listener = listener.clone();
+        let pairing = config.pairing.clone();
+        tasks.spawn(async move {
+            let mut connection = listener.accept().await.map_err(|_| ())?;
+            let authenticated = matches!(
+                tokio::time::timeout(
+                    AUTH_TIMEOUT,
+                    envoix_session::authenticate_receiver(&mut *connection, &pairing),
+                )
+                .await,
+                Ok(Ok(())),
+            );
+            if authenticated {
+                Ok(connection)
+            } else {
                 let _ = connection.close().await;
+                Err(())
             }
+        });
+    };
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..MAX_CONCURRENT_AUTH {
+        spawn_attempt(&mut tasks);
+    }
+
+    let mut failures = 0u32;
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok(Ok(connection)) = joined {
+            return Ok(connection); // first authenticated peer wins
         }
+        // Auth failed/timed out, accept errored, or the task panicked.
+        failures += 1;
+        if failures >= MAX_AUTH_FAILURES {
+            break;
+        }
+        spawn_attempt(&mut tasks); // keep the pool topped up
     }
 
     Err(CoreError::Protocol(format!(
@@ -205,4 +238,79 @@ fn fast_random_id() -> String {
     // Mix PID and timestamp so simultaneous launches produce unique IDs.
     let combined = pid.wrapping_mul(31_337).wrapping_add(nanos as u64);
     format!("{:012x}", combined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    use envoix_auth::PairingConfig;
+    use envoix_transport::{ConnectionCandidate, TransportDialer};
+    use envoix_transport_quic::QuicDialer;
+
+    fn test_config(token: &str) -> SessionConfig {
+        SessionConfig {
+            chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
+            pairing: PairingConfig::Spake2SharedToken { token: token.to_string() },
+        }
+    }
+
+    /// A peer that connects but never authenticates must not block a peer
+    /// behind it: with sequential auth the receiver would wait AUTH_TIMEOUT
+    /// (10s) on the staller, so returning well inside that window proves the
+    /// handshakes run in parallel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalling_peer_does_not_block_a_good_peer() {
+        let config = test_config("shared-pairing-token");
+        let listener =
+            Arc::new(envoix_session::bind_quic_listener("127.0.0.1:0".parse().unwrap()).unwrap());
+        let addr = listener.local_addr().unwrap();
+
+        // Stalling peer: dial, then sit there without ever authenticating.
+        let staller = tokio::spawn(async move {
+            let conn = QuicDialer
+                .dial(ConnectionCandidate::Quic { addr })
+                .await
+                .expect("staller dials");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(conn);
+        });
+
+        // Let the staller connect first, so it is the one queued ahead.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Good peer: dial and complete the SPAKE2 handshake, then hold open.
+        let good_config = config.clone();
+        let good = tokio::spawn(async move {
+            let mut conn = QuicDialer
+                .dial(ConnectionCandidate::Quic { addr })
+                .await
+                .expect("good peer dials");
+            envoix_session::authenticate_sender(&mut *conn, &good_config.pairing)
+                .await
+                .expect("good peer authenticates");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let start = Instant::now();
+        // Outer timeout is below AUTH_TIMEOUT: a sequential receiver blocked on
+        // the staller would trip this, failing the test.
+        let accepted = tokio::time::timeout(
+            Duration::from_secs(5),
+            accept_authenticated_connection(listener, &config),
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+        staller.abort();
+        good.abort();
+
+        let accepted = accepted.expect("accept timed out: staller blocked the good peer");
+        assert!(accepted.is_ok(), "the good peer should have authenticated");
+        assert!(
+            elapsed < AUTH_TIMEOUT,
+            "accepted in {elapsed:?}, not faster than one auth timeout - not parallel?"
+        );
+    }
 }

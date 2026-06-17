@@ -391,6 +391,7 @@ dependencies = [
  "envoix-error",
  "envoix-session",
  "envoix-transport",
+ "envoix-transport-quic",
  "serde",
  "tokio",
  "toml",

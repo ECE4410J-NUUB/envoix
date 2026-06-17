@@ -13,3 +13,7 @@ envoix-transport.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+# Concrete QUIC dialer, used by tests to drive in-process client connections.
+envoix-transport-quic.workspace = true
