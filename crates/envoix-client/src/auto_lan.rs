@@ -5,12 +5,13 @@ use envoix_discovery::{
     LanDiscoveryConfig, LanDiscoveryRecord, MdnsLanAdvertiser, MdnsLanDiscovery,
 };
 use envoix_session::{EventSink, NoopEventSink, SessionConfig, TransferDirection, TransferSummary};
-use envoix_transport::{ConnectionCandidate, TransportListener};
+use envoix_transport::{ConnectionCandidate, FrameConnection, TransportListener};
 
 use crate::{ClientEvent, ClientEventSink, PublicError, ReceiveRequest, SendRequest};
 
 /// Timeout used for LAN mDNS discovery.
 const LAN_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) async fn send(
     request: SendRequest,
@@ -138,27 +139,37 @@ where
         }
     };
 
-    // Accept one connection, then stop advertising immediately.
-    // Once accept() returns, the receiver is committed to one connection
-    // and will not accept another; continuing to advertise would mislead
-    // other senders into discovering an unreachable receiver.
-    let mut connection = listener.accept().await?;
+    let engine = envoix_session::TransferEngine::new(config.chunk_size);
+    let mut connection = accept_authenticated_connection(&listener, &config).await?;
     drop(advertiser);
 
-    let engine = envoix_session::TransferEngine::new(config.chunk_size);
-
-    if let Err(error) =
-        envoix_session::authenticate_receiver(&mut *connection, &config.pairing).await
-    {
-        let _ = connection.close().await;
-        return Err(error);
-    }
     let summary = engine
         .receive_file(&mut *connection, output_dir, transfer_events.as_ref())
         .await?;
     let _ = connection.close().await;
 
     Ok(summary)
+}
+
+async fn accept_authenticated_connection(
+    listener: &envoix_session::BoundListener,
+    config: &SessionConfig,
+) -> Result<Box<dyn FrameConnection>, PublicError> {
+    loop {
+        let mut connection = listener.accept().await?;
+        let result = tokio::time::timeout(
+            AUTH_TIMEOUT,
+            envoix_session::authenticate_receiver(&mut *connection, &config.pairing),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(())) => return Ok(connection),
+            Ok(Err(_)) | Err(_) => {
+                let _ = connection.close().await;
+            }
+        }
+    }
 }
 
 /// Generate a short random identifier for session names.

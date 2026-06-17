@@ -97,6 +97,62 @@ fn qr_invite_loopback() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn qr_receiver_keeps_waiting_after_wrong_token() {
+    let root = unique_test_dir();
+    let source_dir = root.join("source");
+    let output_dir = root.join("received");
+    fs::create_dir_all(&source_dir).unwrap();
+
+    let source_path = source_dir.join("retry_after_wrong_token.txt");
+    let source_text = b"hello after wrong QR token";
+    fs::write(&source_path, source_text).unwrap();
+
+    let mut receiver = spawn_receiver_auto(&output_dir);
+    let wrong_invite = loopback_invite_with_token(&receiver.invite_str, WRONG_TOKEN);
+
+    let wrong_output = run_send_with_invite(&wrong_invite, &source_path);
+    assert!(
+        !wrong_output.status.success(),
+        "wrong-token invite unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&wrong_output.stdout),
+        String::from_utf8_lossy(&wrong_output.stderr)
+    );
+    assert!(
+        wait_for_child(&mut receiver.child, Duration::from_millis(250)).is_none(),
+        "receiver exited after failed QR authentication"
+    );
+
+    let invite = loopback_invite(&receiver.invite_str);
+    let send_output = retry_send(|| run_send_with_invite(&invite, &source_path));
+
+    if !send_output.status.success() {
+        let _ = receiver.child.kill();
+        panic!(
+            "send --invite failed after wrong-token attempt\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&send_output.stdout),
+            String::from_utf8_lossy(&send_output.stderr)
+        );
+    }
+
+    let receiver_status = wait_for_child(&mut receiver.child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = receiver.child.kill();
+            panic!("receiver did not exit after QR invite transfer");
+        })
+        .unwrap();
+
+    if !receiver_status.success() {
+        panic!("receiver failed after retry");
+    }
+
+    assert_eq!(
+        fs::read(output_dir.join("retry_after_wrong_token.txt")).unwrap(),
+        source_text
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 // The next two tests pass a nonexistent file ("ignored.txt") on purpose: invite
 // validation must reject the invite before the sender ever opens the file or
 // dials the peer, so a missing file never matters.
@@ -313,8 +369,17 @@ fn run_send_once(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Ou
 }
 
 fn loopback_invite(invite: &str) -> String {
+    loopback_invite_with(invite, |payload| payload.token.clone())
+}
+
+fn loopback_invite_with_token(invite: &str, token: &str) -> String {
+    loopback_invite_with(invite, |_| token.to_string())
+}
+
+fn loopback_invite_with(invite: &str, token: impl FnOnce(&QrInvitePayload) -> String) -> String {
     let mut payload = QrInvitePayload::decode(invite).unwrap();
     let port = payload.first_candidate().unwrap().port();
+    payload.token = token(&payload);
     payload.candidates = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port).to_string()];
     payload.encode()
 }
