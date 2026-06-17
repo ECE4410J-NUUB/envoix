@@ -41,10 +41,19 @@ impl Default for RelayConfig {
 }
 
 /// What the binary should do with a datagram.
+/// A peer's observed source address and the local relay port it arrived on.
+/// The local port matters when the relay listens on a range: a reply must
+/// leave the same port the peer is talking to, or its NAT drops it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PeerEndpoint {
+    pub addr: SocketAddr,
+    pub local_port: u16,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum ForwardOutcome {
-    /// Forward the bare payload to this peer address.
-    Forward(SocketAddr),
+    /// Forward the bare payload to this peer, out of its `local_port`.
+    Forward(PeerEndpoint),
     /// The other peer has not sent yet - drop (it will retransmit).
     PeerUnknown,
     /// This pair exceeded `max_bytes_per_session` and was removed - drop.
@@ -54,8 +63,8 @@ pub enum ForwardOutcome {
 }
 
 struct RelayPair {
-    receiver_addr: Option<SocketAddr>,
-    sender_addr: Option<SocketAddr>,
+    receiver: Option<PeerEndpoint>,
+    sender: Option<PeerEndpoint>,
     bytes_forwarded: u64,
     last_activity: Instant,
 }
@@ -63,24 +72,24 @@ struct RelayPair {
 impl RelayPair {
     fn new(now: Instant) -> Self {
         Self {
-            receiver_addr: None,
-            sender_addr: None,
+            receiver: None,
+            sender: None,
             bytes_forwarded: 0,
             last_activity: now,
         }
     }
 
-    fn slot(&mut self, role: RelayRole) -> &mut Option<SocketAddr> {
+    fn slot(&mut self, role: RelayRole) -> &mut Option<PeerEndpoint> {
         match role {
-            RelayRole::Receiver => &mut self.receiver_addr,
-            RelayRole::Sender => &mut self.sender_addr,
+            RelayRole::Receiver => &mut self.receiver,
+            RelayRole::Sender => &mut self.sender,
         }
     }
 
-    fn peer_addr(&self, role: RelayRole) -> Option<SocketAddr> {
+    fn peer(&self, role: RelayRole) -> Option<PeerEndpoint> {
         match role.peer() {
-            RelayRole::Receiver => self.receiver_addr,
-            RelayRole::Sender => self.sender_addr,
+            RelayRole::Receiver => self.receiver,
+            RelayRole::Sender => self.sender,
         }
     }
 }
@@ -127,6 +136,7 @@ impl RelayTable {
         session: RelaySessionId,
         role: RelayRole,
         from: SocketAddr,
+        local_port: u16,
         payload_len: usize,
     ) -> ForwardOutcome {
         let now = Instant::now();
@@ -148,11 +158,14 @@ impl RelayTable {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        *pair.slot(role) = Some(from);
+        *pair.slot(role) = Some(PeerEndpoint {
+            addr: from,
+            local_port,
+        });
         pair.last_activity = now;
         pair.bytes_forwarded = pair.bytes_forwarded.saturating_add(payload_len as u64);
         let over_cap = pair.bytes_forwarded > self.config.max_bytes_per_session;
-        let peer = pair.peer_addr(role);
+        let peer = pair.peer(role);
 
         if over_cap {
             pairs.remove(&session);
@@ -163,14 +176,14 @@ impl RelayTable {
         }
 
         match peer {
-            Some(addr) => {
+            Some(endpoint) => {
                 self.counters
                     .datagrams_forwarded_total
                     .fetch_add(1, Ordering::Relaxed);
                 self.counters
                     .bytes_forwarded_total
                     .fetch_add(payload_len as u64, Ordering::Relaxed);
-                ForwardOutcome::Forward(addr)
+                ForwardOutcome::Forward(endpoint)
             }
             None => ForwardOutcome::PeerUnknown,
         }
@@ -222,6 +235,13 @@ mod tests {
         RelayTable::new(RelayConfig::default())
     }
 
+    /// Default local port for tests that don't exercise the port range.
+    const P: u16 = 9104;
+
+    fn fwd(a: SocketAddr, local_port: u16) -> ForwardOutcome {
+        ForwardOutcome::Forward(PeerEndpoint { addr: a, local_port })
+    }
+
     #[tokio::test]
     async fn pairs_two_peers_and_cross_forwards() {
         let t = table();
@@ -231,18 +251,40 @@ mod tests {
 
         // Receiver sends first - sender unknown, drop.
         assert_eq!(
-            t.on_datagram(s, RelayRole::Receiver, a, 100).await,
+            t.on_datagram(s, RelayRole::Receiver, a, P, 100).await,
             ForwardOutcome::PeerUnknown
         );
         // Sender sends - now receiver is known, forward to receiver.
         assert_eq!(
-            t.on_datagram(s, RelayRole::Sender, b, 100).await,
-            ForwardOutcome::Forward(a)
+            t.on_datagram(s, RelayRole::Sender, b, P, 100).await,
+            fwd(a, P)
         );
         // Receiver again - forward to sender.
         assert_eq!(
-            t.on_datagram(s, RelayRole::Receiver, a, 100).await,
-            ForwardOutcome::Forward(b)
+            t.on_datagram(s, RelayRole::Receiver, a, P, 100).await,
+            fwd(b, P)
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_out_each_peer_local_port() {
+        // Peers arrive on DIFFERENT relay ports (a port range): each peer's
+        // reply must leave the port that peer is talking to.
+        let t = table();
+        let s = sid(1);
+        let a = addr("1.2.3.4:5000"); // receiver, on relay port 9101
+        let b = addr("9.8.7.6:6000"); // sender, on relay port 9103
+
+        t.on_datagram(s, RelayRole::Receiver, a, 9101, 100).await;
+        // Sender's datagram forwards to the receiver, out the receiver's 9101.
+        assert_eq!(
+            t.on_datagram(s, RelayRole::Sender, b, 9103, 100).await,
+            fwd(a, 9101)
+        );
+        // Receiver's datagram forwards to the sender, out the sender's 9103.
+        assert_eq!(
+            t.on_datagram(s, RelayRole::Receiver, a, 9101, 100).await,
+            fwd(b, 9103)
         );
     }
 
@@ -254,14 +296,14 @@ mod tests {
         let a2 = addr("1.2.3.4:7777"); // receiver remapped
         let b = addr("9.8.7.6:6000");
 
-        t.on_datagram(s, RelayRole::Receiver, a1, 100).await;
-        t.on_datagram(s, RelayRole::Sender, b, 100).await;
+        t.on_datagram(s, RelayRole::Receiver, a1, P, 100).await;
+        t.on_datagram(s, RelayRole::Sender, b, P, 100).await;
         // Receiver reappears from a new address; sender's next packet must
         // now forward to the new address.
-        t.on_datagram(s, RelayRole::Receiver, a2, 100).await;
+        t.on_datagram(s, RelayRole::Receiver, a2, P, 100).await;
         assert_eq!(
-            t.on_datagram(s, RelayRole::Sender, b, 100).await,
-            ForwardOutcome::Forward(a2)
+            t.on_datagram(s, RelayRole::Sender, b, P, 100).await,
+            fwd(a2, P)
         );
     }
 
@@ -275,21 +317,21 @@ mod tests {
         let s = sid(1);
         let a = addr("1.2.3.4:5000");
         let b = addr("9.8.7.6:6000");
-        t.on_datagram(s, RelayRole::Sender, b, 0).await; // register sender
+        t.on_datagram(s, RelayRole::Sender, b, P, 0).await; // register sender
 
         // 600 + 600 = 1200 > 1000 -> second one cuts off.
         assert_eq!(
-            t.on_datagram(s, RelayRole::Receiver, a, 600).await,
-            ForwardOutcome::Forward(b)
+            t.on_datagram(s, RelayRole::Receiver, a, P, 600).await,
+            fwd(b, P)
         );
         assert_eq!(
-            t.on_datagram(s, RelayRole::Receiver, a, 600).await,
+            t.on_datagram(s, RelayRole::Receiver, a, P, 600).await,
             ForwardOutcome::SessionCutOff
         );
         // Pair was removed: a fresh datagram starts a new pair (peer
         // unknown again).
         assert_eq!(
-            t.on_datagram(s, RelayRole::Receiver, a, 10).await,
+            t.on_datagram(s, RelayRole::Receiver, a, P, 10).await,
             ForwardOutcome::PeerUnknown
         );
     }
@@ -301,18 +343,18 @@ mod tests {
             ..RelayConfig::default()
         };
         let t = RelayTable::new(cfg);
-        t.on_datagram(sid(1), RelayRole::Receiver, addr("1.1.1.1:1"), 10)
+        t.on_datagram(sid(1), RelayRole::Receiver, addr("1.1.1.1:1"), P, 10)
             .await;
-        t.on_datagram(sid(2), RelayRole::Receiver, addr("2.2.2.2:2"), 10)
+        t.on_datagram(sid(2), RelayRole::Receiver, addr("2.2.2.2:2"), P, 10)
             .await;
         assert_eq!(
-            t.on_datagram(sid(3), RelayRole::Receiver, addr("3.3.3.3:3"), 10)
+            t.on_datagram(sid(3), RelayRole::Receiver, addr("3.3.3.3:3"), P, 10)
                 .await,
             ForwardOutcome::CapacityExceeded
         );
         // Existing sessions still work.
         assert_eq!(
-            t.on_datagram(sid(1), RelayRole::Receiver, addr("1.1.1.1:1"), 10)
+            t.on_datagram(sid(1), RelayRole::Receiver, addr("1.1.1.1:1"), P, 10)
                 .await,
             ForwardOutcome::PeerUnknown
         );
@@ -326,7 +368,7 @@ mod tests {
         };
         let t = RelayTable::new(cfg);
         let s = sid(1);
-        t.on_datagram(s, RelayRole::Receiver, addr("1.2.3.4:5000"), 100)
+        t.on_datagram(s, RelayRole::Receiver, addr("1.2.3.4:5000"), P, 100)
             .await;
         assert_eq!(t.stats().await.active_pairs, 1);
 
@@ -341,9 +383,9 @@ mod tests {
         let s = sid(1);
         let a = addr("1.2.3.4:5000");
         let b = addr("9.8.7.6:6000");
-        t.on_datagram(s, RelayRole::Sender, b, 0).await;
-        t.on_datagram(s, RelayRole::Receiver, a, 500).await; // forwards to b
-        t.on_datagram(s, RelayRole::Sender, b, 300).await; // forwards to a
+        t.on_datagram(s, RelayRole::Sender, b, P, 0).await;
+        t.on_datagram(s, RelayRole::Receiver, a, P, 500).await; // forwards to b
+        t.on_datagram(s, RelayRole::Sender, b, P, 300).await; // forwards to a
 
         let st = t.stats().await;
         assert_eq!(st.pairs_created_total, 1);
