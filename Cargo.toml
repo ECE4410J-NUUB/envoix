@@ -16,6 +16,7 @@ members = [
     "crates/envoix-storage",
     "crates/envoix-types",
     "crates/envoix-error",
+    "crates/envoix-qr",
 ]
 resolver = "2"
 
@@ -38,15 +39,18 @@ envoix-relay = { path = "crates/envoix-relay" }
 envoix-storage = { path = "crates/envoix-storage" }
 envoix-types = { path = "crates/envoix-types" }
 envoix-error = { path = "crates/envoix-error" }
+envoix-qr = { path = "crates/envoix-qr" }
 async-trait = "0.1"
 axum = "0.8"
 axum-test = "18"
+base64 = "0.22"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 hmac = "0.12"
 humantime = "2"
 log = "0.4"
+qrcode = { version = "0.14", default-features = false }
 quinn = "0.11"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
