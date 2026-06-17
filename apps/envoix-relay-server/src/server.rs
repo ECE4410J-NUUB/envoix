@@ -74,6 +74,15 @@ impl RelayServer {
     }
 
     async fn handle(&self, datagram: &[u8], from: SocketAddr) {
+        // Reachability probe: echo `magic || nonce` straight back to the
+        // sender. No token, no forwarding, not counted as traffic - it only
+        // lets an external prober confirm this port is reachable. The reply
+        // is the same size as the request (1:1, no amplification).
+        if envoix_relay::parse_probe(datagram).is_some() {
+            let _ = self.socket.send_to(datagram, from).await;
+            return;
+        }
+
         // Silent drop on anything invalid.
         let Some(dg) = RelayDatagram::parse(datagram) else {
             self.invalid_total.fetch_add(1, Ordering::Relaxed);
@@ -222,7 +231,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
-    use envoix_relay::{RelayRole, RelaySessionId, encode};
+    use envoix_relay::{RelayRole, RelaySessionId, encode, encode_probe};
 
     const KEY: [u8; 32] = [9u8; 32];
 
@@ -310,6 +319,27 @@ mod tests {
 
         let mut buf = [0u8; 64];
         assert!(recv_timeout(&peer, &mut buf).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_is_echoed_back() {
+        let server = spawn_server(RelayConfig::default(), u64::MAX, "probe").await;
+        let relay = server.local_addr();
+        let prober = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let nonce = [0x5cu8; 16];
+        let probe = encode_probe(&nonce);
+        prober.send_to(&probe, relay).await.unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = recv_timeout(&prober, &mut buf).await.expect("probe echoed");
+        assert_eq!(&buf[..n], &probe[..]); // exact magic||nonce back
+
+        // A probe echoes even while forwarding is paused (it is not traffic).
+        assert!(!server.toggle_forwarding());
+        prober.send_to(&probe, relay).await.unwrap();
+        let n = recv_timeout(&prober, &mut buf).await.expect("echoed when paused");
+        assert_eq!(&buf[..n], &probe[..]);
     }
 
     #[tokio::test]
