@@ -90,8 +90,7 @@ mod tests {
     fn save_load_round_trip() {
         let path = tmp("rt");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        let mut c = Config::default();
-        c.max_sessions = 7;
+        let c = Config { max_sessions: 7, ..Config::default() };
         c.save(&path).unwrap();
         let back = Config::load(&path).unwrap();
         assert_eq!(back.max_sessions, 7);
