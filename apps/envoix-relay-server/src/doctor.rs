@@ -214,6 +214,10 @@ fn check_state_dir(usage_file: &Path) -> Check {
 /// single family. The rendezvous is assumed dual-stack, so a probe that fails
 /// to reach a present family reflects the relay's own firewall/port-forward.
 ///
+/// If NO family could even reach the rendezvous, that is the relay's own
+/// network being down (not "this host lacks that family"), so it is surfaced
+/// explicitly rather than silently producing no line.
+///
 /// `test` is often run before the relay is started, so if the port is free we
 /// briefly answer the probe ourselves - the round-trip still proves the port
 /// is reachable. If the relay is already running, it echoes the probe instead.
@@ -232,7 +236,7 @@ fn check_reachability(cfg: &Config) -> Vec<Check> {
         ProbeFamily::Ipv4 => &[("reachability (IPv4)", "-4")],
         ProbeFamily::Ipv6 => &[("reachability (IPv6)", "-6")],
     };
-    families
+    let checks: Vec<Check> = families
         .iter()
         .filter_map(|&(name, flag)| {
             let echo = spawn_echo_responder(cfg.listen);
@@ -241,7 +245,9 @@ fn check_reachability(cfg: &Config) -> Vec<Check> {
                 let _ = h.join();
             }
             match result {
-                // Host has no connectivity on this family: not applicable, skip.
+                // Could not even reach the rendezvous over this family. Could
+                // be a missing family on this host (then another family still
+                // reports) or no network at all (handled below). Skip here.
                 Ok(None) => None,
                 Ok(Some(true)) => Some(Check::pass(
                     name,
@@ -257,7 +263,20 @@ fn check_reachability(cfg: &Config) -> Vec<Check> {
                 Err(e) => Some(Check::warn(name, format!("probe could not run: {e}"))),
             }
         })
-        .collect()
+        .collect();
+
+    // No family even reached the rendezvous: the relay's own network/DNS is
+    // down or the URL is wrong - flag it instead of silently showing nothing.
+    if checks.is_empty() {
+        return vec![Check::warn(
+            "reachability",
+            format!(
+                "relay could not reach the rendezvous ({url}) on any address \
+                 family; check this relay's network/DNS or rendezvous_url"
+            ),
+        )];
+    }
+    checks
 }
 
 /// Bind the relay port and echo one probe datagram. `None` if the port is in
