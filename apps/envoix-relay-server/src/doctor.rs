@@ -39,13 +39,18 @@ pub fn run(config_path: &Path) {
         std::process::exit(1);
     });
 
-    let checks = [
+    let mut checks = vec![
         check_bind(cfg.listen),
         check_firewall(cfg.listen.port()),
         check_clock(),
         check_key_perms(&cfg.key_file),
         check_state_dir(&cfg.usage_file),
     ];
+    // External reachability: only when a rendezvous URL is configured (this
+    // is the one check that makes a network call).
+    if let Some(c) = check_reachability(&cfg) {
+        checks.push(c);
+    }
 
     let mut failed = false;
     for c in &checks {
@@ -183,6 +188,92 @@ fn check_state_dir(usage_file: &Path) -> Check {
         }
         Err(e) => Check::fail("state dir", format!("{} not writable: {e}", dir.display())),
     }
+}
+
+/// External reachability via the rendezvous prober. `None` when no rendezvous
+/// URL is configured, so the check (and its network call) is skipped.
+///
+/// `test` is often run before the relay is started, so if the port is free we
+/// briefly answer the probe ourselves - the round-trip still proves the port
+/// is reachable from the internet. If the relay is already running, it echoes
+/// the probe instead. Unreachable is a WARN, not a FAIL: the firewall or
+/// port-forward may legitimately not be open yet at preflight time.
+fn check_reachability(cfg: &Config) -> Option<Check> {
+    let url = cfg.rendezvous_url.as_deref()?;
+    let port = cfg.listen.port();
+    let echo = spawn_echo_responder(cfg.listen);
+    let result = rendezvous_probe(url, port);
+    if let Some(h) = echo {
+        let _ = h.join();
+    }
+    Some(match result {
+        Ok(true) => Check::pass(
+            "reachability",
+            format!("rendezvous reached udp/{port} from the internet"),
+        ),
+        Ok(false) => Check::warn(
+            "reachability",
+            format!(
+                "rendezvous could NOT reach udp/{port}; check NAT/port-forward \
+                 and the provider's security group"
+            ),
+        ),
+        Err(e) => Check::warn("reachability", format!("probe could not run: {e}")),
+    })
+}
+
+/// Bind the relay port and echo one probe datagram. `None` if the port is in
+/// use (the running relay answers) or cannot be bound.
+fn spawn_echo_responder(listen: SocketAddr) -> Option<std::thread::JoinHandle<()>> {
+    let sock = std::net::UdpSocket::bind(listen).ok()?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok()?;
+    Some(std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        loop {
+            match sock.recv_from(&mut buf) {
+                Ok((n, from)) if envoix_relay::parse_probe(&buf[..n]).is_some() => {
+                    let _ = sock.send_to(&buf[..n], from);
+                    return;
+                }
+                Ok(_) => continue, // stray packet; keep waiting for a probe
+                Err(_) => return,  // read timeout / error
+            }
+        }
+    }))
+}
+
+/// Ask the rendezvous to probe this relay's `port` on our own public IP, and
+/// return whether the echo came back. Uses the system `curl` (the rendezvous
+/// is HTTPS via Cloudflare) - consistent with the other checks shelling out
+/// to system tools, and keeps the static binary free of a TLS stack.
+fn rendezvous_probe(base_url: &str, port: u16) -> Result<bool, String> {
+    let url = format!("{}/api/v1/relay-probe", base_url.trim_end_matches('/'));
+    let body = format!("{{\"port\":{port}}}");
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "8",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            &url,
+        ])
+        .output()
+        .map_err(|e| format!("curl not available: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("curl failed: {}", err.trim()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(text.trim()).map_err(|e| format!("bad probe response: {e}"))?;
+    v.get("reachable")
+        .and_then(|r| r.as_bool())
+        .ok_or_else(|| "malformed probe response".to_string())
 }
 
 /// Run a command, returning combined stdout+stderr, or `None` if the binary

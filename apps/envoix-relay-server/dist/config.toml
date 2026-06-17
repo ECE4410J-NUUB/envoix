@@ -18,3 +18,9 @@ max_sessions = 64
 idle_timeout_secs = 60
 sweep_interval_secs = 30
 housekeeping_interval_secs = 30
+
+# Public rendezvous base URL. When set, `envoix-relay-server test` also asks
+# the rendezvous to send a probe packet back to this relay, confirming the
+# port is reachable from the internet (NAT/firewall/security-group). Leave
+# unset to keep `test` local-only and offline.
+# rendezvous_url = "https://rdz.example.com/rdv"

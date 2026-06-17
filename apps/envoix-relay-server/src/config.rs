@@ -23,6 +23,11 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     pub sweep_interval_secs: u64,
     pub housekeeping_interval_secs: u64,
+    /// Public rendezvous base URL (e.g. "https://rdz.example.com/rdv"). When
+    /// set, `test` also checks external reachability by asking the rendezvous
+    /// to probe this relay's port. Unset (the default) skips that check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendezvous_url: Option<String>,
 }
 
 impl Default for Config {
@@ -38,6 +43,7 @@ impl Default for Config {
             idle_timeout_secs: 60,
             sweep_interval_secs: 30,
             housekeeping_interval_secs: 30,
+            rendezvous_url: None,
         }
     }
 }
