@@ -192,22 +192,58 @@ fn data_range(cfg: &Config) -> Result<Option<[u16; 2]>, String> {
     Ok((ports.len() > 1).then(|| [ports[0], ports[ports.len() - 1]]))
 }
 
-/// Placeholder reflexive discovery: ask a public IP-echo service for our
-/// public IPv4. The relay can't see its own public IP behind NAT.
+/// Public IP-echo endpoints, tried in order until one returns a valid IP. A
+/// censoring network may reset a specific TLS host (ipify's handshake is reset
+/// on the networks Envoix targets), so the list mixes domestic, plain-HTTP,
+/// and HTTPS sources rather than betting on one.
+const IP_ECHO_URLS: &[&str] = &[
+    "http://ip.3322.net",
+    "http://ifconfig.me",
+    "http://icanhazip.com",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://api.ipify.org",
+];
+
+/// Placeholder reflexive discovery: ask public IP-echo services for our public
+/// IPv4 (the relay can't see its own IP behind NAT). Tries each endpoint until
+/// one answers, so a single reset/blocked host doesn't sink discovery.
 fn discover_public_ip() -> io::Result<IpAddr> {
+    let mut errors = Vec::new();
+    for url in IP_ECHO_URLS {
+        match query_ip_echo(url) {
+            Ok(ip) => return Ok(ip),
+            Err(e) => errors.push(format!("{url} ({e})")),
+        }
+    }
+    Err(io::Error::other(format!(
+        "all ip-echo endpoints failed: {}",
+        errors.join("; ")
+    )))
+}
+
+/// Query one echo endpoint and parse the IP from its reply.
+fn query_ip_echo(url: &str) -> io::Result<IpAddr> {
     let out = Command::new("curl")
-        .args(["-4", "-sS", "--max-time", "8", "https://api.ipify.org"])
+        .args(["-4", "-sS", "--max-time", "6", url])
         .output()?;
     if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "ip-echo failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     let body = String::from_utf8_lossy(&out.stdout);
-    body.trim()
-        .parse::<IpAddr>()
-        .map_err(|_| io::Error::other(format!("unexpected ip-echo reply: {:?}", body.trim())))
+    parse_ip_echo(&body)
+        .ok_or_else(|| io::Error::other(format!("unexpected reply: {:?}", body.trim())))
+}
+
+/// Extract an IPv4 from an echo reply: either the whole body is a bare IP, or
+/// it is a `key=value` block (Cloudflare's `/cdn-cgi/trace`) with an `ip=` line.
+fn parse_ip_echo(body: &str) -> Option<IpAddr> {
+    if let Ok(ip) = body.trim().parse::<IpAddr>() {
+        return Some(ip);
+    }
+    body.lines()
+        .find_map(|line| line.strip_prefix("ip=").and_then(|v| v.trim().parse::<IpAddr>().ok()))
 }
 
 fn now_unix() -> u64 {
@@ -251,6 +287,19 @@ mod tests {
 
         let sealed = read_body(stream).await?;
         open_provision(paired.key(), &sealed).map_err(io::Error::other)
+    }
+
+    #[test]
+    fn parses_ip_echo_replies() {
+        // Bare IP (ip.3322.net, ifconfig.me, icanhazip - with/without newline).
+        assert_eq!(parse_ip_echo("203.0.113.7"), Some("203.0.113.7".parse().unwrap()));
+        assert_eq!(parse_ip_echo("203.0.113.7\n"), Some("203.0.113.7".parse().unwrap()));
+        // Cloudflare trace block: pull the `ip=` line.
+        let trace = "fl=1f\nh=www.cloudflare.com\nip=203.0.113.7\nts=1.0\n";
+        assert_eq!(parse_ip_echo(trace), Some("203.0.113.7".parse().unwrap()));
+        // Garbage / HTML error page -> None (caller tries the next endpoint).
+        assert_eq!(parse_ip_echo("<html>blocked</html>"), None);
+        assert_eq!(parse_ip_echo(""), None);
     }
 
     #[tokio::test]
