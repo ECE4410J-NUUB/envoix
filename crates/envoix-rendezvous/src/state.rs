@@ -83,6 +83,10 @@ pub struct Candidate {
     pub kind: CandidateKind,
     pub transport: Transport,
     pub addr: SocketAddr,
+    /// Inclusive (first, last) UDP port range for a relay candidate that
+    /// listens on more than `addr`'s port. The server only couriers this to
+    /// the peer; it never interprets it. `None` for a single-port endpoint.
+    pub ports: Option<(u16, u16)>,
     pub priority: i32,
     pub sequence: u64,
     pub published_at: SystemTime,
@@ -94,6 +98,7 @@ pub struct CandidatePublish {
     pub kind: CandidateKind,
     pub transport: Transport,
     pub addr: SocketAddr,
+    pub ports: Option<(u16, u16)>,
     pub priority: i32,
 }
 
@@ -392,6 +397,7 @@ impl SessionRegistry {
             kind: candidate.kind,
             transport: candidate.transport,
             addr: candidate.addr,
+            ports: candidate.ports,
             priority: candidate.priority,
             sequence: seq,
             published_at: SystemTime::now(),
@@ -674,6 +680,7 @@ mod tests {
             kind: CandidateKind::Host,
             transport: Transport::Quic,
             addr: addr.parse().unwrap(),
+            ports: None,
             priority: 100,
         }
     }

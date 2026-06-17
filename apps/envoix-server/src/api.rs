@@ -312,6 +312,10 @@ struct PublishBody {
     kind: KindBody,
     transport: TransportBody,
     addr: SocketAddr,
+    /// Optional [first, last] UDP port range for a relay candidate that
+    /// listens on more than `addr`'s port.
+    #[serde(default)]
+    ports: Option<[u16; 2]>,
     #[serde(default)]
     priority: i32,
 }
@@ -321,6 +325,8 @@ struct CandidateJson {
     kind: &'static str,
     transport: &'static str,
     addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ports: Option<[u16; 2]>,
     priority: i32,
     sequence: u64,
     published_at: String,
@@ -338,6 +344,7 @@ impl From<Candidate> for CandidateJson {
                 Transport::Quic => "quic",
             },
             addr: c.addr.to_string(),
+            ports: c.ports.map(|(first, last)| [first, last]),
             priority: c.priority,
             sequence: c.sequence,
             published_at: humantime::format_rfc3339_seconds(c.published_at).to_string(),
@@ -620,6 +627,37 @@ async fn publish_candidate(
         );
     }
 
+    // A port range only makes sense for a relay candidate, and `addr`'s port
+    // must fall inside it (the rendezvous only couriers it onward).
+    let ports = match body.ports {
+        None => None,
+        Some([first, last]) => {
+            if !matches!(body.kind, KindBody::Relay) {
+                return Err(Error::InvalidRequest(
+                    "ports is only valid on a relay candidate".into(),
+                )
+                .into());
+            }
+            let port = body.addr.port();
+            if first > last {
+                return Err(Error::InvalidRequest(format!("ports {first}-{last} is empty")).into());
+            }
+            if u32::from(last - first) + 1 > MAX_RELAY_RANGE_PORTS {
+                return Err(Error::InvalidRequest(format!(
+                    "ports {first}-{last} exceeds {MAX_RELAY_RANGE_PORTS}"
+                ))
+                .into());
+            }
+            if port < first || port > last {
+                return Err(Error::InvalidRequest(format!(
+                    "candidate addr port {port} is outside ports {first}-{last}"
+                ))
+                .into());
+            }
+            Some((first, last))
+        }
+    };
+
     let stored = state
         .registry
         .publish_candidate(
@@ -629,6 +667,7 @@ async fn publish_candidate(
                 kind: body.kind.into(),
                 transport: body.transport.into(),
                 addr: body.addr,
+                ports,
                 priority: body.priority,
             },
         )
@@ -998,6 +1037,52 @@ mod tests {
         assert_eq!(body["relay_endpoint"], "203.0.113.9:9104");
         assert!(body.get("relay_port_range").is_none());
         assert!(body.get("relay_ports").is_none());
+    }
+
+    #[tokio::test]
+    async fn relay_candidate_carries_port_range() {
+        // A custom relay (client-minted) advertises its port range in the
+        // candidate; the rendezvous couriers it back verbatim.
+        let (server, _) = test_server();
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({
+                "kind": "relay", "transport": "quic",
+                "addr": "203.0.113.9:9104", "ports": [9100, 9105]
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["kind"], "relay");
+        assert_eq!(body["ports"], json!([9100, 9105]));
+    }
+
+    #[tokio::test]
+    async fn candidate_ports_rejected_when_invalid() {
+        let (server, _) = test_server();
+        do_register(&server).await;
+        // ports on a non-relay candidate -> 400.
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({
+                "kind": "host", "transport": "quic",
+                "addr": "203.0.113.9:9104", "ports": [9100, 9105]
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        // addr port outside the range -> 400.
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/candidates"))
+            .authorization_bearer(RECEIVER_CAP)
+            .json(&json!({
+                "kind": "relay", "transport": "quic",
+                "addr": "203.0.113.9:9200", "ports": [9100, 9105]
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
