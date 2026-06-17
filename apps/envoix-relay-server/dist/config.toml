@@ -5,6 +5,9 @@
 # ENVOIX_RELAY_KEY environment variable for a public relay that must share a
 # key with the rendezvous server.
 
+# UDP listen address. "0.0.0.0:9104" serves IPv4 only; use "[::]:9104" to
+# serve BOTH IPv4 and IPv6 (Linux dual-stack), or for an IPv6-only host. If a
+# dual-stack host warns on IPv6 reachability, switch this to "[::]:9104".
 listen = "0.0.0.0:9104"
 key_file = "/var/lib/envoix-relay/relay.key"
 usage_file = "/var/lib/envoix-relay/usage.json"
