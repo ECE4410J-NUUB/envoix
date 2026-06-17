@@ -11,12 +11,18 @@
 //!
 //! Pure logic, no sockets: the relay-server performs the actual I/O.
 //!
-//! Part 1 (this module): the sealed bundle. Later parts add the SPAKE2
-//! handshake, key confirmation, and the wire driver.
+//! Parts: the sealed bundle (`bundle`) and the SPAKE2 handshake + key
+//! confirmation (`handshake`). A later part adds the wire driver that runs the
+//! exchange over a transport.
 
 mod bundle;
+mod handshake;
 
 pub use bundle::{RelayProvision, open, open_provision, seal, seal_provision};
+pub use handshake::{
+    Confirm, PakeResponse, PakeStart, Paired, client_start, relay_respond, ClientConfirming,
+    ClientPending, RelayConfirming,
+};
 
 /// Errors from the pairing protocol.
 #[derive(Debug, thiserror::Error)]
@@ -29,4 +35,10 @@ pub enum PairError {
     Decrypt,
     #[error("bundle is not valid JSON: {0}")]
     BadJson(String),
+    #[error("SPAKE2 failed: {0}")]
+    Spake2(String),
+    #[error("key confirmation failed: wrong pairing code or tampered handshake")]
+    Confirm,
+    #[error("malformed handshake message: {0}")]
+    BadMessage(String),
 }
