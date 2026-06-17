@@ -114,6 +114,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/relay-allocation",
             post(relay_allocation),
         )
+        .route("/api/v1/relay-probe", post(relay_probe))
         .route("/api/v1/stats", get(stats))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .layer(TraceLayer::new_for_http())
@@ -473,6 +474,76 @@ async fn allocate_relay(
         relay_token: token_hex,
         expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
     })
+}
+
+/// Body for `POST /api/v1/relay-probe`: the UDP port to test.
+#[derive(Deserialize)]
+struct RelayProbeBody {
+    port: u16,
+}
+
+#[derive(Serialize)]
+struct RelayProbeResponse {
+    reachable: bool,
+    probed: String,
+}
+
+/// Reachability self-test for a relay operator. Sends one probe datagram to
+/// the *caller's own observed IP* (from `X-Real-IP`, never an arbitrary host,
+/// so it cannot target a third party) at `port`, and reports whether the
+/// relay listening there echoed it back.
+async fn relay_probe(headers: HeaderMap, AppJson(body): AppJson<RelayProbeBody>) -> Response {
+    if body.port == 0 {
+        return ApiError(Error::InvalidRequest("port must be non-zero".into())).into_response();
+    }
+    let Some(addr) = observed_http_addr(&headers) else {
+        return ApiError(Error::InvalidRequest(
+            "cannot determine your public IP from request headers".into(),
+        ))
+        .into_response();
+    };
+    let target = SocketAddr::new(addr.ip(), body.port);
+    let reachable = probe_udp(target).await;
+    tracing::info!(%target, reachable, "relay reachability probe");
+    Json(RelayProbeResponse {
+        reachable,
+        probed: target.to_string(),
+    })
+    .into_response()
+}
+
+/// Send one random-nonce probe to `target` and wait briefly for the matching
+/// echo. `target` is always the caller's own IP, so this cannot be turned
+/// into a UDP reflector toward a third party. One small packet per call, and
+/// the route is rate-limited upstream (nginx `limit_req`).
+async fn probe_udp(target: SocketAddr) -> bool {
+    let mut nonce = [0u8; envoix_relay::RELAY_PROBE_NONCE_LEN];
+    if getrandom::fill(&mut nonce).is_err() {
+        return false;
+    }
+    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let Ok(sock) = tokio::net::UdpSocket::bind(bind).await else {
+        return false;
+    };
+    if sock
+        .send_to(&envoix_relay::encode_probe(&nonce), target)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    // Single budget; ignore stray packets until the matching echo or timeout.
+    let matched = tokio::time::timeout(Duration::from_millis(1500), async {
+        let mut buf = [0u8; 64];
+        loop {
+            let (n, from) = sock.recv_from(&mut buf).await.ok()?;
+            if from.ip() == target.ip() && envoix_relay::parse_probe(&buf[..n]) == Some(&nonce[..]) {
+                return Some(());
+            }
+        }
+    })
+    .await;
+    matches!(matched, Ok(Some(())))
 }
 
 /// Publish one candidate. Returns the canonical stored record - for a
@@ -839,6 +910,63 @@ mod tests {
             .authorization_bearer(SENDER_CAP)
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn relay_probe_reachable_when_echoed() {
+        // A local UDP socket stands in for a reachable relay: echo one packet.
+        let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            if let Ok((n, from)) = echo.recv_from(&mut buf).await {
+                let _ = echo.send_to(&buf[..n], from).await;
+            }
+        });
+
+        let (server, _) = test_server();
+        let res = server
+            .post("/api/v1/relay-probe")
+            .add_header("x-real-ip", "127.0.0.1")
+            .json(&json!({ "port": port }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["reachable"], true);
+        assert_eq!(body["probed"], format!("127.0.0.1:{port}"));
+    }
+
+    #[tokio::test]
+    async fn relay_probe_unreachable_when_silent() {
+        // Bound but never echoes -> probe times out -> not reachable.
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let (server, _) = test_server();
+        let res = server
+            .post("/api/v1/relay-probe")
+            .add_header("x-real-ip", "127.0.0.1")
+            .json(&json!({ "port": port }))
+            .await;
+        res.assert_status_ok();
+        assert_eq!(res.json::<Value>()["reachable"], false);
+    }
+
+    #[tokio::test]
+    async fn relay_probe_rejects_missing_ip_and_zero_port() {
+        let (server, _) = test_server();
+        // No X-Real-IP -> cannot self-target -> 400.
+        let res = server
+            .post("/api/v1/relay-probe")
+            .json(&json!({ "port": 9104 }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        // Port 0 rejected even with an IP.
+        let res = server
+            .post("/api/v1/relay-probe")
+            .add_header("x-real-ip", "127.0.0.1")
+            .json(&json!({ "port": 0 }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
