@@ -205,13 +205,24 @@ const IP_ECHO_URLS: &[&str] = &[
 ];
 
 /// Placeholder reflexive discovery: ask public IP-echo services for our public
-/// IPv4 (the relay can't see its own IP behind NAT). Tries each endpoint until
-/// one answers, so a single reset/blocked host doesn't sink discovery.
+/// IPv4 (the relay can't see its own IP behind NAT). Queries every endpoint in
+/// parallel and takes the first success, so a slow or reset host neither sinks
+/// discovery nor adds its timeout to the total (worst case is one curl
+/// timeout, not the sum).
 fn discover_public_ip() -> io::Result<IpAddr> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for &url in IP_ECHO_URLS {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((url, query_ip_echo(url)));
+        });
+    }
+    drop(tx); // the loop ends once every worker thread has reported.
+
     let mut errors = Vec::new();
-    for url in IP_ECHO_URLS {
-        match query_ip_echo(url) {
-            Ok(ip) => return Ok(ip),
+    while let Ok((url, result)) = rx.recv() {
+        match result {
+            Ok(ip) => return Ok(ip), // first success wins; stragglers are ignored
             Err(e) => errors.push(format!("{url} ({e})")),
         }
     }
