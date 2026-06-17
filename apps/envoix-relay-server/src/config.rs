@@ -46,7 +46,15 @@ pub struct Config {
     /// rendezvous is IPv4-only (otherwise an IPv6-preferring host is probed
     /// on an address the rendezvous cannot reach).
     pub probe_family: ProbeFamily,
+    /// Inclusive UDP port range to listen on, e.g. "9100-9105", letting a
+    /// client try several ports when one is blocked/throttled. The `listen`
+    /// port must fall inside it. Unset (default) means a single port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<String>,
 }
+
+/// Largest port range we will bind (one socket + recv task per port).
+const MAX_RANGE_PORTS: u32 = 64;
 
 impl Default for Config {
     fn default() -> Self {
@@ -63,6 +71,7 @@ impl Default for Config {
             housekeeping_interval_secs: 30,
             rendezvous_url: None,
             probe_family: ProbeFamily::Auto,
+            port_range: None,
         }
     }
 }
@@ -86,6 +95,41 @@ impl Config {
         let body = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(path, body).map_err(|e| format!("{}: {e}", path.display()))
     }
+
+    /// The ports the relay should bind: the whole `port_range` if set (with
+    /// `primary` inside it), otherwise just `primary`. `primary` is passed in
+    /// so it reflects any CLI/env override of `listen`.
+    pub fn listen_ports(&self, primary: u16) -> Result<Vec<u16>, String> {
+        let Some(spec) = &self.port_range else {
+            return Ok(vec![primary]);
+        };
+        let (start, end) = spec
+            .split_once('-')
+            .ok_or_else(|| format!("port_range \"{spec}\" must be \"start-end\""))?;
+        let start: u16 = start
+            .trim()
+            .parse()
+            .map_err(|_| format!("port_range start \"{start}\" is not a port"))?;
+        let end: u16 = end
+            .trim()
+            .parse()
+            .map_err(|_| format!("port_range end \"{end}\" is not a port"))?;
+        if start > end {
+            return Err(format!("port_range {start}-{end} is empty (start > end)"));
+        }
+        let count = u32::from(end - start) + 1;
+        if count > MAX_RANGE_PORTS {
+            return Err(format!(
+                "port_range {start}-{end} spans {count} ports (max {MAX_RANGE_PORTS})"
+            ));
+        }
+        if primary < start || primary > end {
+            return Err(format!(
+                "listen port {primary} is outside port_range {start}-{end}"
+            ));
+        }
+        Ok((start..=end).collect())
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +148,32 @@ mod tests {
         let c = Config::load(Path::new("/nonexistent/envoix/config.toml")).unwrap();
         assert_eq!(c.max_sessions, 64);
         assert_eq!(c.probe_family, ProbeFamily::Auto);
+    }
+
+    #[test]
+    fn listen_ports_single_and_range() {
+        let mut c = Config::default();
+        // No range -> just the primary port.
+        assert_eq!(c.listen_ports(9104).unwrap(), vec![9104]);
+
+        // A range containing the primary -> the whole range.
+        c.port_range = Some("9100-9105".into());
+        assert_eq!(c.listen_ports(9104).unwrap(), vec![9100, 9101, 9102, 9103, 9104, 9105]);
+
+        // primary outside the range -> error.
+        assert!(c.listen_ports(8000).is_err());
+
+        // start > end -> error.
+        c.port_range = Some("9105-9100".into());
+        assert!(c.listen_ports(9104).is_err());
+
+        // Malformed -> error.
+        c.port_range = Some("oops".into());
+        assert!(c.listen_ports(9104).is_err());
+
+        // Over the cap -> error.
+        c.port_range = Some("9104-9999".into());
+        assert!(c.listen_ports(9104).is_err());
     }
 
     #[test]

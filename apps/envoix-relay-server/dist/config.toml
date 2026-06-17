@@ -9,6 +9,14 @@
 # serve BOTH IPv4 and IPv6 (Linux dual-stack), or for an IPv6-only host. If a
 # dual-stack host warns on IPv6 reachability, switch this to "[::]:9104".
 listen = "0.0.0.0:9104"
+
+# Optional inclusive UDP port range to bind, e.g. "9100-9105", so a client can
+# try several ports when one is throttled/blocked (e.g. by a censoring
+# firewall). The `listen` port must be inside the range, and the whole range
+# must be opened in the firewall. The rendezvous must advertise the same range
+# (ENVOIX_RELAY_ADVERTISE_PORTS). Unset = single port. Max 64 ports.
+# port_range = "9100-9105"
+
 key_file = "/var/lib/envoix-relay/relay.key"
 usage_file = "/var/lib/envoix-relay/usage.json"
 stats_file = "/var/lib/envoix-relay/stats.json"

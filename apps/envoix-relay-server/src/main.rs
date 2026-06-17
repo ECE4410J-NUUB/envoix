@@ -189,6 +189,12 @@ async fn run_server(args: RunArgs) {
     let cfg = config::Config::load(&args.config).unwrap_or_else(|e| die(format!("config: {e}")));
     init_tracing(args.debug);
 
+    // Resolve listen + the bound ports before any `cfg` field is moved below.
+    let listen = args.listen.unwrap_or(cfg.listen);
+    let ports = cfg
+        .listen_ports(listen.port())
+        .unwrap_or_else(|e| die(format!("config: {e}")));
+
     let key_file = args.key_file.unwrap_or(cfg.key_file);
     let key = match args.key {
         Some(hex) => {
@@ -200,7 +206,6 @@ async fn run_server(args: RunArgs) {
         None => keyfile::load_or_generate(&key_file)
             .unwrap_or_else(|e| die(format!("relay key: {e}"))),
     };
-    let listen = args.listen.unwrap_or(cfg.listen);
     let config = RelayConfig {
         max_sessions: args.max_sessions.unwrap_or(cfg.max_sessions),
         max_bytes_per_session: args.max_bytes_per_session.unwrap_or(cfg.max_bytes_per_session),
@@ -209,6 +214,7 @@ async fn run_server(args: RunArgs) {
 
     let server = RelayServer::bind(
         listen,
+        &ports,
         key,
         config,
         args.monthly_byte_limit.unwrap_or(cfg.monthly_byte_limit),
@@ -220,7 +226,11 @@ async fn run_server(args: RunArgs) {
     if args.debug {
         server.toggle_debug();
     }
-    tracing::info!(listen = %listen, "envoix relay data plane listening");
+    tracing::info!(
+        ip = %listen.ip(),
+        ports = ?ports,
+        "envoix relay data plane listening"
+    );
 
     spawn_background_tasks(
         server.clone(),

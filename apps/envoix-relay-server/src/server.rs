@@ -4,10 +4,11 @@
 //! the forwarding table, the persisted monthly counter, and the runtime
 //! flags (debug logging, forwarding pause).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use envoix_relay::{
@@ -19,7 +20,9 @@ use crate::stats::{self, StatsSnapshot};
 use crate::usage;
 
 pub struct RelayServer {
-    socket: UdpSocket,
+    /// One bound UDP socket per listen port, keyed by port. A reply leaves
+    /// the same port the destination peer is talking to (NAT-correct).
+    sockets: HashMap<u16, Arc<UdpSocket>>,
     table: RelayTable,
     key: RelayTokenKey,
     usage: Mutex<MonthlyUsage>,
@@ -32,17 +35,28 @@ pub struct RelayServer {
 }
 
 impl RelayServer {
+    /// Bind one socket per port in `ports` (all on `listen`'s IP). `ports`
+    /// must be non-empty; the first is the primary.
     pub async fn bind(
         listen: SocketAddr,
+        ports: &[u16],
         key: RelayTokenKey,
         table_config: RelayConfig,
         monthly_byte_limit: u64,
         usage_path: PathBuf,
     ) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind(listen).await?;
+        let mut sockets = HashMap::with_capacity(ports.len());
+        for &port in ports {
+            let addr = SocketAddr::new(listen.ip(), port);
+            let sock = UdpSocket::bind(addr).await?;
+            // Key by the actual bound port so an ephemeral request (port 0,
+            // used in tests) still maps correctly.
+            let actual = sock.local_addr()?.port();
+            sockets.insert(actual, Arc::new(sock));
+        }
         let usage = usage::load(&usage_path, monthly_byte_limit);
         Ok(Self {
-            socket,
+            sockets,
             table: RelayTable::new(table_config),
             key,
             usage: Mutex::new(usage),
@@ -56,30 +70,50 @@ impl RelayServer {
     }
 
     #[cfg(test)]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.socket.local_addr().expect("bound socket")
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        let mut v: Vec<SocketAddr> = self
+            .sockets
+            .values()
+            .map(|s| s.local_addr().expect("bound socket"))
+            .collect();
+        v.sort_by_key(|a| a.port());
+        v
     }
 
-    /// Receive loop. Runs until the process exits.
-    pub async fn run(&self) {
-        // Largest QUIC datagram + 61-byte header is well under 1500; 64 KiB
-        // buffer.
-        let mut buf = vec![0u8; 65536];
-        loop {
-            match self.socket.recv_from(&mut buf).await {
-                Ok((n, from)) => self.handle(&buf[..n], from).await,
-                Err(e) => tracing::warn!(error = %e, "relay recv error; continuing"),
-            }
+    /// Receive loop: one task per bound socket, each tagging datagrams with
+    /// the port it arrived on. Runs until the process exits.
+    pub async fn run(self: Arc<Self>) {
+        let mut tasks = Vec::with_capacity(self.sockets.len());
+        for (&port, socket) in &self.sockets {
+            let server = self.clone();
+            let socket = socket.clone();
+            tasks.push(tokio::spawn(async move {
+                // Largest QUIC datagram + 61-byte header is well under 1500;
+                // 64 KiB buffer.
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match socket.recv_from(&mut buf).await {
+                        Ok((n, from)) => server.handle(&buf[..n], from, port).await,
+                        Err(e) => tracing::warn!(error = %e, "relay recv error; continuing"),
+                    }
+                }
+            }));
+        }
+        for t in tasks {
+            let _ = t.await;
         }
     }
 
-    async fn handle(&self, datagram: &[u8], from: SocketAddr) {
+    /// Handle a datagram that arrived on the socket bound to `local_port`.
+    async fn handle(&self, datagram: &[u8], from: SocketAddr, local_port: u16) {
         // Reachability probe: echo `magic || nonce` straight back to the
-        // sender. No token, no forwarding, not counted as traffic - it only
-        // lets an external prober confirm this port is reachable. The reply
-        // is the same size as the request (1:1, no amplification).
+        // sender, out the same port it arrived on. No token, no forwarding,
+        // not counted as traffic - it only lets an external prober confirm
+        // this port is reachable. Reply is the same size (1:1, no amp).
         if envoix_relay::parse_probe(datagram).is_some() {
-            let _ = self.socket.send_to(datagram, from).await;
+            if let Some(sock) = self.sockets.get(&local_port) {
+                let _ = sock.send_to(datagram, from).await;
+            }
             return;
         }
 
@@ -111,11 +145,15 @@ impl RelayServer {
         let payload_len = dg.payload.len();
         match self
             .table
-            .on_datagram(session, role, from, payload_len)
+            .on_datagram(session, role, from, local_port, payload_len)
             .await
         {
             ForwardOutcome::Forward(peer) => {
-                if let Err(e) = self.socket.send_to(dg.payload, peer).await {
+                // Reply out the port the destination peer is talking to.
+                let Some(sock) = self.sockets.get(&peer.local_port) else {
+                    return;
+                };
+                if let Err(e) = sock.send_to(dg.payload, peer.addr).await {
                     tracing::debug!(error = %e, "forward send failed");
                     return;
                 }
@@ -124,7 +162,7 @@ impl RelayServer {
                     .expect("usage mutex")
                     .record(payload_len as u64);
                 if self.debug_mode.load(Ordering::Relaxed) {
-                    tracing::info!(?session, %from, %peer, bytes = payload_len, "forwarded");
+                    tracing::info!(?session, %from, peer = %peer.addr, out_port = peer.local_port, bytes = payload_len, "forwarded");
                 }
             }
             ForwardOutcome::PeerUnknown => {
@@ -245,8 +283,22 @@ mod tests {
     async fn spawn_server(config: RelayConfig, monthly_limit: u64, tag: &str) -> Arc<RelayServer> {
         let path = tmp_usage_path(tag);
         let _ = std::fs::remove_file(&path);
+        spawn_server_ports(config, monthly_limit, tag, &[0]).await
+    }
+
+    /// Like `spawn_server` but binds the given number of ports (use `&[0; N]`
+    /// for N ephemeral ports).
+    async fn spawn_server_ports(
+        config: RelayConfig,
+        monthly_limit: u64,
+        tag: &str,
+        ports: &[u16],
+    ) -> Arc<RelayServer> {
+        let path = tmp_usage_path(tag);
+        let _ = std::fs::remove_file(&path);
         let server = RelayServer::bind(
             "127.0.0.1:0".parse().unwrap(),
+            ports,
             RelayTokenKey::from_bytes(KEY),
             config,
             monthly_limit,
@@ -279,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn cross_forwards_between_two_peers() {
         let server = spawn_server(RelayConfig::default(), u64::MAX, "xfwd").await;
-        let relay = server.local_addr();
+        let relay = server.local_addrs()[0];
 
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -305,9 +357,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwards_across_a_port_range() {
+        // Two listen ports: peers reach the relay on DIFFERENT ports and the
+        // reply must leave the port the destination peer is talking to.
+        let server = spawn_server_ports(RelayConfig::default(), u64::MAX, "range", &[0, 0]).await;
+        let addrs = server.local_addrs(); // two distinct ports
+        let (p0, p1) = (addrs[0], addrs[1]);
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // Sender registers on port p1.
+        sender
+            .send_to(&encode(&token(RelayRole::Sender), b"S"), p1)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Receiver sends on the OTHER port p0 - still pairs by session id.
+        receiver
+            .send_to(&encode(&token(RelayRole::Receiver), b"hello-quic"), p0)
+            .await
+            .unwrap();
+
+        // Sender gets the payload, and the reply comes FROM p1 (its port),
+        // not p0 - so its NAT mapping holds.
+        let mut buf = [0u8; 64];
+        let (n, from) = tokio::time::timeout(Duration::from_millis(500), sender.recv_from(&mut buf))
+            .await
+            .expect("timeout")
+            .expect("recv");
+        assert_eq!(&buf[..n], b"hello-quic");
+        assert_eq!(from, p1, "reply must leave the sender's own port");
+    }
+
+    #[tokio::test]
     async fn invalid_token_is_dropped() {
         let server = spawn_server(RelayConfig::default(), u64::MAX, "bad").await;
-        let relay = server.local_addr();
+        let relay = server.local_addrs()[0];
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
         // Wrong magic / garbage token - no reply, no forward.
@@ -324,7 +411,7 @@ mod tests {
     #[tokio::test]
     async fn probe_is_echoed_back() {
         let server = spawn_server(RelayConfig::default(), u64::MAX, "probe").await;
-        let relay = server.local_addr();
+        let relay = server.local_addrs()[0];
         let prober = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
         let nonce = [0x5cu8; 16];
@@ -345,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn paused_forwarding_drops() {
         let server = spawn_server(RelayConfig::default(), u64::MAX, "pause").await;
-        let relay = server.local_addr();
+        let relay = server.local_addrs()[0];
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
@@ -377,7 +464,7 @@ mod tests {
     async fn monthly_quota_blocks_then_persists() {
         // Limit so small the first forwarded payload trips it.
         let server = spawn_server(RelayConfig::default(), 3, "quota").await;
-        let relay = server.local_addr();
+        let relay = server.local_addrs()[0];
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
