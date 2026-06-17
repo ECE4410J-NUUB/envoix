@@ -1,0 +1,15 @@
+[package]
+name = "envoix-relay-pair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SPAKE2-based pairing that hands a custom relay's master key + port range to a client over an untrusted channel."
+
+[dependencies]
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
