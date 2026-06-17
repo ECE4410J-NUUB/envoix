@@ -131,7 +131,7 @@ struct PairCliArgs {
     words: usize,
 
     /// How long the pairing window stays open (seconds).
-    #[arg(long, default_value_t = 180)]
+    #[arg(long, default_value_t = 300)]
     expires_secs: u64,
 
     /// Give up after this many failed pairing attempts.
