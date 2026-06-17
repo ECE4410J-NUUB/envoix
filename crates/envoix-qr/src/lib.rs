@@ -305,6 +305,32 @@ pub fn generate_token() -> Result<String, QrError> {
     Ok(token)
 }
 
+mod wordlist;
+
+/// Generates a human-typeable pairing code like `42-trombone-galaxy` - a
+/// 2-digit number plus `words` words (minimum 2) from [`wordlist::WORDS`]. The
+/// whole string is the SPAKE2 token: ASCII and always >= MIN_SHARED_TOKEN_LEN,
+/// so it passes [`is_valid_shared_token`]. It is intentionally **low entropy**
+/// for typeability, so the verifier MUST cap pairing attempts (each failed
+/// SPAKE2 confirmation is one online guess; PAKE makes offline guessing
+/// impossible).
+///
+/// Returns [`QrError::Entropy`] only if the OS entropy source is unavailable.
+pub fn generate_wordcode(words: usize) -> Result<String, QrError> {
+    let words = words.max(2);
+    let mut buf = vec![0u8; 1 + 2 * words];
+    getrandom::fill(&mut buf).map_err(|e| QrError::Entropy(e.to_string()))?;
+
+    // 2-digit number (10..=99) so the code is always >= MIN_SHARED_TOKEN_LEN.
+    let mut code = (10 + (buf[0] as usize % 90)).to_string();
+    for w in 0..words {
+        let idx = (((buf[1 + 2 * w] as usize) << 8) | buf[2 + 2 * w] as usize) % wordlist::WORDS.len();
+        code.push('-');
+        code.push_str(wordlist::WORDS[idx]);
+    }
+    Ok(code)
+}
+
 /// Renders `data` as a QR code and returns a UTF-8 string suitable for
 /// printing directly to a terminal.
 ///
@@ -592,5 +618,17 @@ mod tests {
         RelayInvitePayload::new(TOKEN.into(), "203.0.113.9:9104".into(), None, 300)
             .validate(0)
             .expect("single port valid");
+    }
+
+    #[test]
+    fn wordcode_is_a_valid_token() {
+        for n in [2usize, 3, 4] {
+            let code = generate_wordcode(n).unwrap();
+            assert!(is_valid_shared_token(&code), "{code:?} must be a valid token");
+            assert!(code.is_ascii());
+            assert_eq!(code.matches('-').count(), n); // number + n words
+        }
+        // fewer than 2 words is bumped to 2.
+        assert_eq!(generate_wordcode(0).unwrap().matches('-').count(), 2);
     }
 }
