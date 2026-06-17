@@ -617,6 +617,7 @@ dependencies = [
  "envoix-relay",
  "envoix-rendezvous",
  "envoix-types",
+ "getrandom 0.3.4",
  "humantime",
  "reqwest",
  "serde",
