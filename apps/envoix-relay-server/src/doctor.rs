@@ -47,10 +47,9 @@ pub fn run(config_path: &Path) {
         check_state_dir(&cfg.usage_file),
     ];
     // External reachability: only when a rendezvous URL is configured (this
-    // is the one check that makes a network call).
-    if let Some(c) = check_reachability(&cfg) {
-        checks.push(c);
-    }
+    // is the one check that makes a network call). `auto` yields one line per
+    // address family the host has; a forced family yields exactly one.
+    checks.extend(check_reachability(&cfg));
 
     let mut failed = false;
     for c in &checks {
@@ -190,36 +189,58 @@ fn check_state_dir(usage_file: &Path) -> Check {
     }
 }
 
-/// External reachability via the rendezvous prober. `None` when no rendezvous
+/// External reachability via the rendezvous prober. Empty when no rendezvous
 /// URL is configured, so the check (and its network call) is skipped.
+///
+/// `auto` probes both families and yields one line each; a family the host
+/// has no connectivity for is skipped (no false alarm). `ipv4`/`ipv6` force a
+/// single family. The rendezvous is assumed dual-stack, so a probe that fails
+/// to reach a present family reflects the relay's own firewall/port-forward.
 ///
 /// `test` is often run before the relay is started, so if the port is free we
 /// briefly answer the probe ourselves - the round-trip still proves the port
-/// is reachable from the internet. If the relay is already running, it echoes
-/// the probe instead. Unreachable is a WARN, not a FAIL: the firewall or
-/// port-forward may legitimately not be open yet at preflight time.
-fn check_reachability(cfg: &Config) -> Option<Check> {
-    let url = cfg.rendezvous_url.as_deref()?;
+/// is reachable. If the relay is already running, it echoes the probe instead.
+/// Unreachable is a WARN, not a FAIL: the firewall or port-forward may
+/// legitimately not be open yet at preflight time.
+fn check_reachability(cfg: &Config) -> Vec<Check> {
+    let Some(url) = cfg.rendezvous_url.as_deref() else {
+        return Vec::new();
+    };
     let port = cfg.listen.port();
-    let echo = spawn_echo_responder(cfg.listen);
-    let result = rendezvous_probe(url, port, cfg.probe_family);
-    if let Some(h) = echo {
-        let _ = h.join();
-    }
-    Some(match result {
-        Ok(true) => Check::pass(
-            "reachability",
-            format!("rendezvous reached udp/{port} from the internet"),
-        ),
-        Ok(false) => Check::warn(
-            "reachability",
-            format!(
-                "rendezvous could NOT reach udp/{port}; check NAT/port-forward \
-                 and the provider's security group"
-            ),
-        ),
-        Err(e) => Check::warn("reachability", format!("probe could not run: {e}")),
-    })
+    let families: &[(&'static str, &'static str)] = match cfg.probe_family {
+        ProbeFamily::Auto => &[
+            ("reachability (IPv4)", "-4"),
+            ("reachability (IPv6)", "-6"),
+        ],
+        ProbeFamily::Ipv4 => &[("reachability (IPv4)", "-4")],
+        ProbeFamily::Ipv6 => &[("reachability (IPv6)", "-6")],
+    };
+    families
+        .iter()
+        .filter_map(|&(name, flag)| {
+            let echo = spawn_echo_responder(cfg.listen);
+            let result = rendezvous_probe(url, port, flag);
+            if let Some(h) = echo {
+                let _ = h.join();
+            }
+            match result {
+                // Host has no connectivity on this family: not applicable, skip.
+                Ok(None) => None,
+                Ok(Some(true)) => Some(Check::pass(
+                    name,
+                    format!("rendezvous reached udp/{port} from the internet"),
+                )),
+                Ok(Some(false)) => Some(Check::warn(
+                    name,
+                    format!(
+                        "rendezvous could NOT reach udp/{port}; check the firewall/\
+                         port-forward and that the relay binds this family"
+                    ),
+                )),
+                Err(e) => Some(Check::warn(name, format!("probe could not run: {e}"))),
+            }
+        })
+        .collect()
 }
 
 /// Bind the relay port and echo one probe datagram. `None` if the port is in
@@ -242,39 +263,42 @@ fn spawn_echo_responder(listen: SocketAddr) -> Option<std::thread::JoinHandle<()
     }))
 }
 
-/// Ask the rendezvous to probe this relay's `port` on our own public IP, and
-/// return whether the echo came back. Uses the system `curl` (the rendezvous
-/// is HTTPS via Cloudflare) - consistent with the other checks shelling out
-/// to system tools, and keeps the static binary free of a TLS stack.
-fn rendezvous_probe(base_url: &str, port: u16, family: ProbeFamily) -> Result<bool, String> {
+/// Ask the rendezvous to probe this relay's `port` over the `family_flag`
+/// address family (curl `-4`/`-6`), and return whether the echo came back.
+/// `Ok(None)` means curl could not use that family from this host - i.e. the
+/// host has no connectivity there (the rendezvous is assumed dual-stack, so a
+/// forced-family failure is the local host's, not the rendezvous's). Uses the
+/// system `curl` (the rendezvous is HTTPS via Cloudflare) - consistent with
+/// the other checks and keeps the static binary free of a TLS stack.
+fn rendezvous_probe(base_url: &str, port: u16, family_flag: &str) -> Result<Option<bool>, String> {
     let url = format!("{}/api/v1/relay-probe", base_url.trim_end_matches('/'));
     let body = format!("{{\"port\":{port}}}");
-    let mut args = vec!["-sS", "--max-time", "8"];
-    if let Some(flag) = family.curl_flag() {
-        args.push(flag);
-    }
-    args.extend([
-        "-X",
-        "POST",
-        "-H",
-        "Content-Type: application/json",
-        "-d",
-        &body,
-        &url,
-    ]);
     let out = Command::new("curl")
-        .args(&args)
+        .args([
+            "-sS",
+            "--max-time",
+            "8",
+            family_flag,
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            &url,
+        ])
         .output()
         .map_err(|e| format!("curl not available: {e}"))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("curl failed: {}", err.trim()));
+        // Forced family + dual-stack rendezvous => this host lacks that family.
+        return Ok(None);
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value =
         serde_json::from_str(text.trim()).map_err(|e| format!("bad probe response: {e}"))?;
     v.get("reachable")
         .and_then(|r| r.as_bool())
+        .map(Some)
         .ok_or_else(|| "malformed probe response".to_string())
 }
 

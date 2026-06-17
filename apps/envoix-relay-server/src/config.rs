@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PATH: &str = "/etc/envoix-relay/config.toml";
 
-/// Address family the reachability probe should use. `Auto` lets the system
-/// pick (curl's default); `Ipv4`/`Ipv6` force the family - needed because the
-/// observed address (and thus what the rendezvous can reach) depends on which
-/// family was used to contact it. Against an IPv4-only rendezvous, force
-/// `Ipv4`.
+/// Address family the reachability probe should use. `Auto` probes BOTH
+/// families (one result line each, skipping a family the host lacks);
+/// `Ipv4`/`Ipv6` force a single family. The probed address is whichever the
+/// relay used to reach the rendezvous, so forcing the family pins what gets
+/// tested.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProbeFamily {
@@ -22,17 +22,6 @@ pub enum ProbeFamily {
     Auto,
     Ipv4,
     Ipv6,
-}
-
-impl ProbeFamily {
-    /// The curl flag that forces this family, if any.
-    pub fn curl_flag(self) -> Option<&'static str> {
-        match self {
-            ProbeFamily::Auto => None,
-            ProbeFamily::Ipv4 => Some("-4"),
-            ProbeFamily::Ipv6 => Some("-6"),
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

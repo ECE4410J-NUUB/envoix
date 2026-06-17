@@ -25,7 +25,8 @@ housekeeping_interval_secs = 30
 # unset to keep `test` local-only and offline.
 # rendezvous_url = "https://rdz.example.com/rdv"
 
-# Address family for the reachability probe: auto | ipv4 | ipv6. Force ipv4
-# when the rendezvous is IPv4-only, otherwise an IPv6-preferring host gets
-# probed on an address the rendezvous cannot reach.
+# Address family for the reachability probe: auto | ipv4 | ipv6.
+#   auto -> probe BOTH families, one result line each (skips a family this
+#           host has no connectivity for).
+#   ipv4 / ipv6 -> force a single family.
 probe_family = "auto"
