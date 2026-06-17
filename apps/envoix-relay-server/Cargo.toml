@@ -7,6 +7,8 @@ description = "Envoix relay data plane: a UDP forwarder for the Envoix relay fal
 
 [dependencies]
 envoix-relay.workspace = true
+envoix-relay-pair.workspace = true
+envoix-qr.workspace = true
 clap.workspace = true
 getrandom.workspace = true
 serde.workspace = true

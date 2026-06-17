@@ -4,7 +4,7 @@
 //! cross-forwards opaque QUIC datagrams between the two peers of a session.
 //! Never decrypts; not a trust party.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use envoix_relay::{RelayConfig, RelayTokenKey};
 mod config;
 mod doctor;
 mod keyfile;
+mod pair;
 mod server;
 mod service;
 mod stats;
@@ -52,6 +53,9 @@ enum Command {
         #[arg(long, default_value = config::DEFAULT_PATH)]
         config: PathBuf,
     },
+    /// Hand this relay's key + port range to a client via a SPAKE2 pairing
+    /// code (for a custom relay - the client mints its own tokens).
+    Pair(PairCliArgs),
     /// Enable on boot and start the relay service.
     Up,
     /// Stop the relay service.
@@ -76,6 +80,38 @@ enum ConfigAction {
         #[arg(long, default_value = config::DEFAULT_PATH)]
         path: PathBuf,
     },
+}
+
+/// Options for the `pair` subcommand.
+#[derive(Args)]
+struct PairCliArgs {
+    /// Config file (source of the master key and port range).
+    #[arg(long, default_value = config::DEFAULT_PATH)]
+    config: PathBuf,
+
+    /// TCP port to listen on for the pairing handshake. A dedicated port,
+    /// separate from the data-plane range; forward it temporarily while
+    /// pairing.
+    #[arg(long, default_value_t = 9099)]
+    pairing_port: u16,
+
+    /// Public IP to advertise in the invite. Defaults to reflexive discovery
+    /// via a public IP-echo service (the relay can't see its own IP behind
+    /// NAT).
+    #[arg(long)]
+    public_ip: Option<IpAddr>,
+
+    /// Number of words in the generated pairing code.
+    #[arg(long, default_value_t = 2)]
+    words: usize,
+
+    /// How long the pairing window stays open (seconds).
+    #[arg(long, default_value_t = 180)]
+    expires_secs: u64,
+
+    /// Give up after this many failed pairing attempts.
+    #[arg(long, default_value_t = 5)]
+    max_attempts: u32,
 }
 
 /// Data-plane server options (used when no subcommand is given). Each value
@@ -152,6 +188,19 @@ async fn main() {
         Some(Command::Config(c)) => run_config(c),
         Some(Command::Test { config }) => doctor::run(&config),
         Some(Command::Status { config }) => status::run(&config),
+        Some(Command::Pair(args)) => {
+            let args = pair::PairArgs {
+                config: args.config,
+                pairing_port: args.pairing_port,
+                public_ip: args.public_ip,
+                words: args.words,
+                expires_secs: args.expires_secs,
+                max_attempts: args.max_attempts,
+            };
+            if let Err(e) = pair::run(args).await {
+                die(format!("pair: {e}"));
+            }
+        }
         Some(Command::Up) => service::up(),
         Some(Command::Down) => service::down(),
     }
