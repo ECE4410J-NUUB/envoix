@@ -51,6 +51,12 @@ struct Cli {
     #[arg(long, env = "ENVOIX_RELAY_ADVERTISE", requires = "relay_key")]
     relay_advertise: Option<SocketAddr>,
 
+    /// Advertised UDP port range the relay listens on, e.g. "9100-9105", so
+    /// a client can try several ports when one is blocked. The advertised
+    /// port must be inside it. Requires `--relay-advertise`.
+    #[arg(long, env = "ENVOIX_RELAY_ADVERTISE_PORTS", requires = "relay_advertise")]
+    relay_advertise_ports: Option<String>,
+
     /// Upgrade envoix log targets to debug (ignored if RUST_LOG is set).
     #[arg(long)]
     debug: bool,
@@ -68,7 +74,9 @@ async fn main() {
         max_ttl: Duration::from_secs(cli.max_ttl_seconds),
     };
     let relay = match (cli.relay_key, cli.relay_advertise) {
-        (Some(key), Some(advertise)) => Some((key, advertise.to_string())),
+        (Some(key), Some(advertise)) => {
+            Some((key, advertise.to_string(), cli.relay_advertise_ports))
+        }
         _ => None,
     };
     let state = api::AppState::new(SessionRegistry::new(config), cli.admin_token, relay);

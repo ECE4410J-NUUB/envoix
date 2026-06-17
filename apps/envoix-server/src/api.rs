@@ -43,6 +43,32 @@ struct RequestCounters {
 struct RelayState {
     key: RelayTokenKey,
     advertise: String,
+    /// Inclusive (first, last) UDP port range the relay listens on, if more
+    /// than the single advertised port. Advertised so a client can try
+    /// several ports when one is blocked.
+    port_range: Option<(u16, u16)>,
+}
+
+/// Largest advertised port range (kept in step with the relay's own cap).
+const MAX_RELAY_RANGE_PORTS: u32 = 64;
+
+/// Parse "first-last" and check `primary` is inside it.
+fn parse_relay_port_range(spec: &str, primary: u16) -> Result<(u16, u16), String> {
+    let (a, b) = spec
+        .split_once('-')
+        .ok_or_else(|| format!("\"{spec}\" must be \"first-last\""))?;
+    let first: u16 = a.trim().parse().map_err(|_| format!("bad first port \"{a}\""))?;
+    let last: u16 = b.trim().parse().map_err(|_| format!("bad last port \"{b}\""))?;
+    if first > last {
+        return Err(format!("{first}-{last} is empty"));
+    }
+    if u32::from(last - first) + 1 > MAX_RELAY_RANGE_PORTS {
+        return Err(format!("{first}-{last} exceeds {MAX_RELAY_RANGE_PORTS} ports"));
+    }
+    if primary < first || primary > last {
+        return Err(format!("advertised port {primary} is outside {first}-{last}"));
+    }
+    Ok((first, last))
 }
 
 #[derive(Clone)]
@@ -58,22 +84,35 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// `relay`: `(64-hex shared key, advertised "host:port")`. `Some`
-    /// enables the relay allocation endpoint; `None` disables it.
+    /// `relay`: `(64-hex shared key, advertised "host:port", optional
+    /// "first-last" port range)`. `Some` enables the relay allocation
+    /// endpoint; `None` disables it.
     pub fn new(
         registry: SessionRegistry,
         admin_token: Option<String>,
-        relay: Option<(String, String)>,
+        relay: Option<(String, String, Option<String>)>,
     ) -> Self {
         Self {
             registry: Arc::new(registry),
             shutting_down: Arc::new(AtomicBool::new(false)),
             admin_token_hash: admin_token.map(|t| blake3::hash(t.as_bytes())),
             request_counters: Arc::new(RequestCounters::default()),
-            relay: relay.map(|(key_hex, advertise)| {
+            relay: relay.map(|(key_hex, advertise, range)| {
                 let key = RelayTokenKey::from_hex(key_hex.trim())
                     .unwrap_or_else(|| panic!("--relay-key must be 64 hex characters"));
-                Arc::new(RelayState { key, advertise })
+                let port_range = range.map(|spec| {
+                    let primary = advertise
+                        .parse::<SocketAddr>()
+                        .unwrap_or_else(|_| panic!("--relay-advertise must be host:port"))
+                        .port();
+                    parse_relay_port_range(&spec, primary)
+                        .unwrap_or_else(|e| panic!("--relay-advertise-ports: {e}"))
+                });
+                Arc::new(RelayState {
+                    key,
+                    advertise,
+                    port_range,
+                })
             }),
             started_at: Instant::now(),
         }
@@ -417,7 +456,16 @@ async fn close(
 
 #[derive(Serialize)]
 struct RelayAllocationResponse {
+    /// Primary endpoint "host:port" - the first port of any range. Old
+    /// clients use just this.
     relay_endpoint: String,
+    /// Inclusive [first, last] port range, omitted when single-port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_port_range: Option<[u16; 2]>,
+    /// Every port in the range, omitted when single-port. Redundant with
+    /// `relay_port_range`; lets a client skip expanding the range itself.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    relay_ports: Vec<u16>,
     /// 114 hex chars - the 57-byte relay token. Opaque to the client;
     /// echoed in every data-plane datagram to the relay.
     relay_token: String,
@@ -468,9 +516,16 @@ async fn allocate_relay(
     );
     let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
 
+    let (relay_port_range, relay_ports) = match relay.port_range {
+        Some((first, last)) => (Some([first, last]), (first..=last).collect()),
+        None => (None, Vec::new()),
+    };
+
     tracing::info!(session_ref = &id[..8], ?role, "relay allocated");
     Ok(RelayAllocationResponse {
         relay_endpoint: relay.advertise.clone(),
+        relay_port_range,
+        relay_ports,
         relay_token: token_hex,
         expires_at: humantime::format_rfc3339_seconds(expires_at).to_string(),
     })
@@ -736,7 +791,7 @@ mod tests {
     fn test_server_with(
         config: RegistryConfig,
         admin_token: Option<String>,
-        relay: Option<(String, String)>,
+        relay: Option<(String, String, Option<String>)>,
     ) -> (TestServer, AppState) {
         let state = AppState::new(SessionRegistry::new(config), admin_token, relay);
         let server = TestServer::new(router(state.clone())).unwrap();
@@ -747,7 +802,7 @@ mod tests {
         test_server_with(
             RegistryConfig::default(),
             Some(ADMIN_TOKEN.into()),
-            Some((RELAY_KEY.into(), "203.0.113.9:9104".into())),
+            Some((RELAY_KEY.into(), "203.0.113.9:9104".into(), None)),
         )
     }
 
@@ -910,6 +965,39 @@ mod tests {
             .authorization_bearer(SENDER_CAP)
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn relay_allocation_advertises_port_range() {
+        let (server, _) = test_server_with(
+            RegistryConfig::default(),
+            Some(ADMIN_TOKEN.into()),
+            Some((RELAY_KEY.into(), "203.0.113.9:9104".into(), Some("9100-9105".into()))),
+        );
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["relay_endpoint"], "203.0.113.9:9104"); // primary = first
+        assert_eq!(body["relay_port_range"], json!([9100, 9105]));
+        assert_eq!(body["relay_ports"], json!([9100, 9101, 9102, 9103, 9104, 9105]));
+    }
+
+    #[tokio::test]
+    async fn relay_allocation_single_port_omits_range() {
+        let (server, _) = relay_test_server(); // no range configured
+        do_register(&server).await;
+        let res = server
+            .post(&format!("/api/v1/sessions/{SESSION_ID}/relay-allocation"))
+            .authorization_bearer(RECEIVER_CAP)
+            .await;
+        let body: Value = res.json();
+        assert_eq!(body["relay_endpoint"], "203.0.113.9:9104");
+        assert!(body.get("relay_port_range").is_none());
+        assert!(body.get("relay_ports").is_none());
     }
 
     #[tokio::test]
