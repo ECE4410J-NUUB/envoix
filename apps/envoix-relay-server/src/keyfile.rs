@@ -14,8 +14,12 @@ use envoix_relay::RelayTokenKey;
 /// (0600) if the file is absent. Errors on I/O failure or a malformed file.
 pub fn load_or_generate(path: &Path) -> Result<RelayTokenKey, String> {
     match fs::read_to_string(path) {
-        Ok(s) => RelayTokenKey::from_hex(s.trim())
-            .ok_or_else(|| format!("{}: not 64 hex characters", path.display())),
+        Ok(s) => {
+            let key = RelayTokenKey::from_hex(s.trim())
+                .ok_or_else(|| format!("{}: not 64 hex characters", path.display()))?;
+            tracing::info!(path = %path.display(), "loaded existing relay master key");
+            Ok(key)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => generate(path),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }

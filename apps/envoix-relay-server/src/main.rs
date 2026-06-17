@@ -191,8 +191,12 @@ async fn run_server(args: RunArgs) {
 
     let key_file = args.key_file.unwrap_or(cfg.key_file);
     let key = match args.key {
-        Some(hex) => RelayTokenKey::from_hex(hex.trim())
-            .unwrap_or_else(|| die("--key must be 64 hex characters")),
+        Some(hex) => {
+            let key = RelayTokenKey::from_hex(hex.trim())
+                .unwrap_or_else(|| die("--key must be 64 hex characters"));
+            tracing::info!("using relay master key from --key/ENVOIX_RELAY_KEY");
+            key
+        }
         None => keyfile::load_or_generate(&key_file)
             .unwrap_or_else(|e| die(format!("relay key: {e}"))),
     };
