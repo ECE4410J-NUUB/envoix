@@ -1,6 +1,7 @@
-//! Preflight diagnostics: check the local environment and tell the operator
-//! what is wrong and how to fix it. Local checks only; external reachability
-//! needs the rendezvous-assisted probe (separate work).
+//! Preflight diagnostics: check the environment and tell the operator what is
+//! wrong and how to fix it. Local checks (bind, host firewall, clock, key and
+//! state-dir permissions) plus, when `rendezvous_url` is configured, an
+//! external-reachability probe via the rendezvous.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -142,6 +143,22 @@ fn check_key_perms(path: &Path) -> Check {
             "key file",
             format!("{} absent (generated on first run)", path.display()),
         );
+    }
+    // Content: a present key file must be 64 hex chars, or the relay dies on
+    // start. WARN (not FAIL): the key may instead come from ENVOIX_RELAY_KEY,
+    // which the doctor cannot see, making a stale file harmless.
+    if let Ok(s) = std::fs::read_to_string(path) {
+        let t = s.trim();
+        if t.len() != 64 || !t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Check::warn(
+                "key file",
+                format!(
+                    "{} is not 64 hex characters; relay will fail to start \
+                     (unless ENVOIX_RELAY_KEY is set)",
+                    path.display()
+                ),
+            );
+        }
     }
     #[cfg(unix)]
     {
@@ -378,5 +395,30 @@ mod tests {
     fn clock_sync_parsed() {
         assert!(clock_synchronized("System clock synchronized: yes\nNTP service: active"));
         assert!(!clock_synchronized("System clock synchronized: no"));
+    }
+
+    #[test]
+    fn key_content_validated() {
+        let dir = std::env::temp_dir().join(format!("envoix-doctor-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.key");
+
+        // Absent -> pass (generated on first run).
+        assert!(matches!(check_key_perms(&path).status, Status::Pass));
+
+        // Present but not 64 hex -> warn (would fail relay start).
+        std::fs::write(&path, "not-hex").unwrap();
+        assert!(matches!(check_key_perms(&path).status, Status::Warn));
+
+        // Valid 64-hex with owner-only perms -> pass.
+        std::fs::write(&path, "a".repeat(64)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(matches!(check_key_perms(&path).status, Status::Pass));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
