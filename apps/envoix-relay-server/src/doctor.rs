@@ -201,9 +201,19 @@ fn ufw_port_allowed(status: &str, port: u16) -> bool {
         .any(|l| l.contains(&needle) && l.to_uppercase().contains("ALLOW"))
 }
 
+/// True if `port/udp` is covered by a firewalld `--list-ports` token, which is
+/// either a single port (`9104/udp`) or an inclusive range (`9100-9105/udp`).
 fn firewalld_port_open(ports: &str, port: u16) -> bool {
-    let needle = format!("{port}/udp");
-    ports.split_whitespace().any(|t| t == needle)
+    ports.split_whitespace().any(|t| {
+        let Some((spec, "udp")) = t.split_once('/') else { return false };
+        match spec.split_once('-') {
+            Some((lo, hi)) => matches!(
+                (lo.parse::<u16>(), hi.parse::<u16>()),
+                (Ok(lo), Ok(hi)) if lo <= port && port <= hi
+            ),
+            None => spec.parse::<u16>() == Ok(port),
+        }
+    })
 }
 
 fn clock_synchronized(timedatectl: &str) -> bool {
@@ -235,6 +245,16 @@ mod tests {
         assert!(firewalld_port_open("9104/udp 443/tcp", 9104));
         assert!(!firewalld_port_open("9104/tcp", 9104));
         assert!(!firewalld_port_open("", 9104));
+    }
+
+    #[test]
+    fn firewalld_ranges_parsed() {
+        assert!(firewalld_port_open("9100-9105/udp", 9104));
+        assert!(firewalld_port_open("8443/tcp 9100-9105/udp", 9100));
+        assert!(firewalld_port_open("9100-9105/udp", 9105));
+        assert!(!firewalld_port_open("9100-9105/udp", 9106));
+        assert!(!firewalld_port_open("9100-9105/tcp", 9104));
+        assert!(!firewalld_port_open("9100-/udp", 9104));
     }
 
     #[test]
