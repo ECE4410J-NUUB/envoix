@@ -174,11 +174,17 @@ async fn accept_authenticated_connection(
     // MAX_CONCURRENT_AUTH attempts in flight and the first to authenticate
     // wins; remaining attempts are dropped when this returns. Total failures
     // stay bounded by MAX_AUTH_FAILURES.
-    let spawn_attempt = |tasks: &mut tokio::task::JoinSet<Result<Box<dyn FrameConnection>, ()>>| {
+    // Per-attempt result: Ok = authenticated; Err(Some) = a real listener
+    // error (fatal, propagate it); Err(None) = this peer just failed to
+    // authenticate (count it and keep trying).
+    type Attempt = Result<Box<dyn FrameConnection>, Option<PublicError>>;
+    let spawn_attempt = |tasks: &mut tokio::task::JoinSet<Attempt>| {
         let listener = listener.clone();
         let pairing = config.pairing.clone();
         tasks.spawn(async move {
-            let mut connection = listener.accept().await.map_err(|_| ())?;
+            // A failed accept means the listener/endpoint is broken, not a bad
+            // peer - carry the error out so it is reported, not miscounted.
+            let mut connection = listener.accept().await.map_err(Some)?;
             let authenticated = matches!(
                 tokio::time::timeout(
                     AUTH_TIMEOUT,
@@ -191,7 +197,7 @@ async fn accept_authenticated_connection(
                 Ok(connection)
             } else {
                 let _ = connection.close().await;
-                Err(())
+                Err(None)
             }
         });
     };
@@ -203,10 +209,12 @@ async fn accept_authenticated_connection(
 
     let mut failures = 0u32;
     while let Some(joined) = tasks.join_next().await {
-        if let Ok(Ok(connection)) = joined {
-            return Ok(connection); // first authenticated peer wins
+        match joined {
+            Ok(Ok(connection)) => return Ok(connection), // first authenticated peer wins
+            Ok(Err(Some(error))) => return Err(error),   // listener broke; surface it
+            // Auth failed/timed out, or the task panicked.
+            Ok(Err(None)) | Err(_) => {}
         }
-        // Auth failed/timed out, accept errored, or the task panicked.
         failures += 1;
         if failures >= MAX_AUTH_FAILURES {
             break;
