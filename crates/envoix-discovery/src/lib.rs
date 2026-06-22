@@ -1,47 +1,42 @@
 //! Peer and connection candidate discovery.
+//!
+//! Supports manual peer lookup and LAN-based mDNS discovery so that two
+//! Envoix peers on the same local network can find each other without a
+//! centralised server.
 
-use std::net::SocketAddr;
+mod manual;
+mod mdns;
 
 use envoix_error::CoreError;
-use envoix_transport::ConnectionCandidate;
+use thiserror::Error;
 
-pub type DiscoveryError = CoreError;
+pub use manual::{DiscoveryProvider, ManualPeerDiscovery};
+pub use mdns::{
+    DEFAULT_DISCOVERY_TIMEOUT, ENVOIX_DISCOVERY_PROTO_VERSION, ENVOIX_SERVICE_TYPE,
+    LanDiscoveryConfig, LanDiscoveryRecord, MdnsLanAdvertiser, MdnsLanDiscovery,
+    deduplicate_candidates,
+};
 
-pub trait DiscoveryProvider: Send + Sync {
-    fn discover(&self) -> Result<Vec<ConnectionCandidate>, DiscoveryError>;
+/// Errors that can occur during discovery.
+#[derive(Clone, Debug, Error)]
+pub enum DiscoveryError {
+    /// Underlying mDNS subsystem failure (I/O, daemon crash, …).
+    #[error("mDNS error: {0}")]
+    Mdns(String),
+    /// A discovered record failed validation.
+    #[error("invalid discovery record: {0}")]
+    InvalidRecord(String),
+    /// Discovery timed out without finding any candidates.
+    #[error("LAN discovery timed out")]
+    Timeout,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ManualPeerDiscovery {
-    peer_addr: SocketAddr,
-}
-
-impl ManualPeerDiscovery {
-    pub fn new(peer_addr: SocketAddr) -> Self {
-        Self { peer_addr }
-    }
-}
-
-impl DiscoveryProvider for ManualPeerDiscovery {
-    fn discover(&self) -> Result<Vec<ConnectionCandidate>, DiscoveryError> {
-        Ok(vec![ConnectionCandidate::Quic {
-            addr: self.peer_addr,
-        }])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn manual_discovery_returns_exact_peer_candidate() {
-        let addr = "[::1]:9000".parse().unwrap();
-        let discovery = ManualPeerDiscovery::new(addr);
-
-        assert_eq!(
-            discovery.discover().unwrap(),
-            vec![ConnectionCandidate::Quic { addr }]
-        );
+impl From<DiscoveryError> for CoreError {
+    fn from(e: DiscoveryError) -> Self {
+        match e {
+            DiscoveryError::Mdns(msg) => CoreError::Discovery(msg),
+            DiscoveryError::InvalidRecord(msg) => CoreError::Discovery(msg),
+            DiscoveryError::Timeout => CoreError::Discovery("LAN discovery timed out".into()),
+        }
     }
 }

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    ClientConfig, ConnectionPolicy, EnvoixClient, EventSink, NoopClientEventSink, PairingConfig,
-    ReceiveFileRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, PairingConfig,
+    ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
     TransferDirection, TransferEvent,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
@@ -71,11 +71,13 @@ enum Command {
         /// Explicit TOML config file path.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Generate a random token and print a QR invite; cannot be combined with --token.
+        /// Automatic mode: listen and advertise over mDNS. When used without
+        /// --token, generates a random token and prints a QR invite.
         #[arg(long)]
         auto: bool,
         /// Shared ASCII pairing token (>=12 bytes). Required unless --auto is set.
-        #[arg(long, required_unless_present = "auto", conflicts_with = "auto")]
+        /// When combined with --auto, uses the given token for mDNS advertisement.
+        #[arg(long, required_unless_present = "auto")]
         token: Option<String>,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
@@ -159,7 +161,8 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             connection_policy: ConnectionPolicy::Auto,
                             resume,
                         },
-                        Box::new(NoopClientEventSink),
+                        Box::new(ConsoleClientEventSink),
+                        Box::new(ConsoleEventSink::new()),
                     )
                     .await?
             } else {
@@ -192,34 +195,62 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             token,
             ip_version,
         } => {
+            let listen_addr = receive_addr_for(ip_version);
             let summary = if auto {
-                // clap guarantees --token is absent here (conflicts_with = "auto").
-                let generated = generate_token().map_err(|e| {
-                    envoix_client::PublicError::InvalidInput(format!(
-                        "failed to generate token: {e}"
-                    ))
-                })?;
-                let client = client_for_token(generated.clone(), config.as_deref())?;
-                let expires_at = unix_now() + INVITE_TTL_SECS;
-                client
-                    .receive_file_with_bound_addr(
-                        ReceiveFileRequest {
-                            listen_addr: receive_addr_for(ip_version),
-                            output_dir: output,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        |bound_addr| {
-                            let candidates = build_candidates(bound_addr, ip_version);
-                            let payload = QrInvitePayload::new(generated, candidates, expires_at);
-                            let invite = payload.encode();
-                            if let Some(qr) = render_terminal_qr(&invite) {
-                                eprint!("{qr}");
-                            }
-                            eprintln!("invite: {invite}");
-                            eprintln!("waiting for sender...");
-                        },
-                    )
-                    .await?
+                match token {
+                    Some(t) => {
+                        // User-provided token for mDNS-based pairing.
+                        let client = client_for_token(t, config.as_deref())?;
+                        eprintln!("advertising over mDNS...");
+                        client
+                            .receive(
+                                ReceiveRequest {
+                                    output_dir: output,
+                                    connection_policy: ConnectionPolicy::Auto,
+                                    listen_addr,
+                                },
+                                Box::new(ConsoleClientEventSink),
+                                Box::new(ConsoleEventSink::new()),
+                                |addr| eprintln!("listening on {addr}"),
+                            )
+                            .await?
+                    }
+                    None => {
+                        // Auto-generate token and print QR invite for the sender.
+                        let generated = generate_token().map_err(|e| {
+                            envoix_client::PublicError::InvalidInput(format!(
+                                "failed to generate token: {e}"
+                            ))
+                        })?;
+                        let token_for_qr = generated.clone();
+                        let client = client_for_token(generated, config.as_deref())?;
+                        eprintln!("waiting for sender (QR + mDNS)...");
+                        client
+                            .receive(
+                                ReceiveRequest {
+                                    output_dir: output,
+                                    connection_policy: ConnectionPolicy::Auto,
+                                    listen_addr,
+                                },
+                                Box::new(ConsoleClientEventSink),
+                                Box::new(ConsoleEventSink::new()),
+                                move |bound_addr| {
+                                    let candidates = build_candidates(bound_addr, ip_version);
+                                    let payload = QrInvitePayload::new(
+                                        token_for_qr,
+                                        candidates,
+                                        unix_now() + INVITE_TTL_SECS,
+                                    );
+                                    let invite = payload.encode();
+                                    eprintln!("\ninvite: {invite}");
+                                    if let Some(qr) = render_terminal_qr(&invite) {
+                                        eprintln!("{qr}");
+                                    }
+                                },
+                            )
+                            .await?
+                    }
+                }
             } else {
                 // clap guarantees --token is present here (required_unless_present = "auto").
                 let token = token.expect("clap requires --token unless --auto is set");
@@ -289,10 +320,8 @@ fn unix_now() -> u64 {
 /// Builds the candidate list for a QR invite from the listener's bound address.
 ///
 /// Uses a UDP socket trick to find the machine's outbound LAN IP, then pairs
-/// it with the bound port.  On networks with no usable route (e.g. an offline
-/// LAN), detection fails and the bound IP is an unspecified address that a
-/// peer cannot dial, so we warn the user to supply a reachable address out of
-/// band.
+/// it with the bound port. On networks with no usable route, detection falls
+/// back to the bound address and warns if that address is not dialable.
 fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String> {
     let port = bound_addr.port();
     let ip = detect_local_ip(ip_version).unwrap_or(bound_addr.ip());
@@ -403,6 +432,41 @@ impl EventSink for ConsoleEventSink {
                 } else {
                     eprintln!("completed {bytes_transferred} bytes");
                 }
+            }
+        }
+    }
+}
+
+/// A [`ClientEventSink`] that logs client lifecycle events to stderr.
+#[derive(Clone, Copy, Debug)]
+struct ConsoleClientEventSink;
+
+impl envoix_client::ClientEventSink for ConsoleClientEventSink {
+    fn on_event(&self, event: ClientEvent) {
+        match event {
+            ClientEvent::NetworkDetectionStarted => {
+                eprintln!("detecting network environment...");
+            }
+            ClientEvent::AutoConnectionStarted { direction } => {
+                let dir = match direction {
+                    TransferDirection::Send => "send",
+                    TransferDirection::Receive => "receive",
+                };
+                eprintln!("starting auto {dir}...");
+            }
+            ClientEvent::LanDiscoveryStarted => {
+                eprintln!("scanning LAN for Envoix peers...");
+            }
+            ClientEvent::LanCandidateFound { candidate } => {
+                eprintln!("  found candidate: {candidate:?}");
+            }
+            ClientEvent::LanDiscoveryFailed { reason } => {
+                eprintln!("  LAN discovery failed: {reason}");
+            }
+            ClientEvent::TooManyAuthFailures => {
+                eprintln!(
+                    "  failed pairing attempts exceeded threshold: another peer may be using the wrong token or interfering"
+                );
             }
         }
     }
@@ -747,7 +811,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_receive_auto_with_token() {
+    fn receive_auto_with_token_is_valid() {
+        // --auto with --token is now the mDNS-based auto flow.
         assert!(
             Cli::try_parse_from([
                 "envoix",
@@ -758,8 +823,14 @@ mod tests {
                 "--token",
                 "abcdefghijkl",
             ])
-            .is_err()
+            .is_ok()
         );
+    }
+
+    #[test]
+    fn receive_auto_without_token_is_valid() {
+        // --auto without --token generates a random token and prints a QR invite.
+        assert!(Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "recv",]).is_ok());
     }
 
     #[test]

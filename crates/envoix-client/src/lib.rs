@@ -1,5 +1,7 @@
 //! Public application-facing facade for envoix clients.
 
+mod auto_lan;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,6 +12,7 @@ pub use envoix_session::{
     EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
 };
 use envoix_session::{SessionConfig, receive_file_with_bound_addr, send_file_manual};
+use envoix_transport::ConnectionCandidate;
 use serde::Deserialize;
 
 /// Environment variable overriding the runtime transfer chunk size.
@@ -157,7 +160,7 @@ pub struct ReceiveFileRequest {
     pub output_dir: PathBuf,
 }
 
-/// Automatic connection policy used by the mobile-facing facade.
+/// Automatic connection policy used by the facade.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConnectionPolicy {
     /// Try supported connection strategies according to the client default order.
@@ -182,6 +185,11 @@ pub struct ReceiveRequest {
     pub output_dir: PathBuf,
     /// Connection strategy policy for this operation.
     pub connection_policy: ConnectionPolicy,
+    /// Local socket address to bind the QUIC listener on.
+    ///
+    /// Use `"0.0.0.0:0"` for any IPv4 interface (auto port) or
+    /// `"[::]:0"` for any IPv6 interface (auto port).
+    pub listen_addr: SocketAddr,
 }
 
 /// Advisory snapshot of the local network environment.
@@ -223,6 +231,20 @@ pub enum ClientEvent {
         /// Direction of this local operation.
         direction: TransferDirection,
     },
+    /// LAN mDNS discovery has started.
+    LanDiscoveryStarted,
+    /// A LAN candidate was discovered via mDNS.
+    LanCandidateFound {
+        /// The discovered connection candidate.
+        candidate: ConnectionCandidate,
+    },
+    /// LAN mDNS discovery failed.
+    LanDiscoveryFailed {
+        /// Human-readable failure reason.
+        reason: String,
+    },
+    /// Pairing failed too many times while receiving.
+    TooManyAuthFailures,
 }
 
 /// Public facade for sending and receiving files.
@@ -255,17 +277,24 @@ impl EnvoixClient {
     }
 
     /// Sends one file using automatic pairing and connection establishment.
+    ///
+    /// `client_events` receives client-level lifecycle events (discovery,
+    /// pairing, connection).  `transfer_events` receives transfer-level
+    /// progress events (chunk progress, hashing, completion).
     pub async fn send(
         &self,
         request: SendRequest,
-        events: Box<dyn ClientEventSink>,
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
-        let _ = request;
-        events.on_event(ClientEvent::AutoConnectionStarted {
-            direction: TransferDirection::Send,
-        });
-        Err(auto_not_implemented())
+        auto_lan::send(
+            request,
+            self.session_config(),
+            client_events,
+            transfer_events,
+        )
+        .await
     }
 
     /// Receives one file and reports the concrete bound address before accepting.
@@ -290,17 +319,33 @@ impl EnvoixClient {
     }
 
     /// Receives one file using automatic pairing and connection establishment.
-    pub async fn receive(
+    ///
+    /// `client_events` receives client-level lifecycle events (discovery,
+    /// pairing).  `transfer_events` receives transfer-level progress events
+    /// (chunk progress, hashing, completion).
+    ///
+    /// `on_bound` is called with the actual bound socket address after the QUIC
+    /// listener has been bound, allowing the caller to print a QR invite or
+    /// otherwise report the address before accepting a connection.
+    pub async fn receive<F>(
         &self,
         request: ReceiveRequest,
-        events: Box<dyn ClientEventSink>,
-    ) -> Result<TransferSummary, PublicError> {
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
+        on_bound: F,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(SocketAddr) + Send,
+    {
         self.validate_config()?;
-        let _ = request;
-        events.on_event(ClientEvent::AutoConnectionStarted {
-            direction: TransferDirection::Receive,
-        });
-        Err(auto_not_implemented())
+        auto_lan::receive(
+            request,
+            self.session_config(),
+            client_events,
+            transfer_events,
+            on_bound,
+        )
+        .await
     }
 
     /// Detects the local network environment for UI diagnostics and strategy hints.
@@ -325,10 +370,6 @@ impl EnvoixClient {
             pairing: self.config.pairing.clone(),
         }
     }
-}
-
-fn auto_not_implemented() -> PublicError {
-    CoreError::Discovery("automatic connection establishment is not implemented".into())
 }
 
 fn parse_chunk_size(value: &str) -> Result<usize, PublicError> {
@@ -383,6 +424,7 @@ fn validate_chunk_size(chunk_size: usize) -> Result<(), PublicError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn rejects_zero_chunk_size() {
@@ -479,6 +521,44 @@ mod tests {
         assert!(matches!(error, CoreError::InvalidInput(_)));
     }
 
+    #[tokio::test]
+    #[ignore = "requires local network access; run with: cargo test -- --ignored"]
+    async fn client_send_auto_emits_events_in_order() {
+        let client = EnvoixClient::new(ClientConfig {
+            chunk_size: 64 * 1024,
+            pairing: test_pairing(),
+        });
+
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = RecordingSink(recorded.clone());
+
+        // This will fail because there's no receiver on the LAN,
+        // but we can check the event order up to the failure.
+        let _result = client
+            .send(
+                SendRequest {
+                    file_path: "missing.txt".into(),
+                    connection_policy: ConnectionPolicy::Auto,
+                    resume: false,
+                },
+                Box::new(sink),
+                Box::new(NoopEventSink),
+            )
+            .await;
+
+        let events = recorded.lock().unwrap();
+        // At minimum, AutoConnectionStarted and LanDiscoveryStarted
+        // should have been emitted.
+        assert!(!events.is_empty());
+        assert_eq!(
+            events.first().unwrap(),
+            &ClientEvent::AutoConnectionStarted {
+                direction: TransferDirection::Send
+            }
+        );
+        assert_eq!(events.get(1).unwrap(), &ClientEvent::LanDiscoveryStarted);
+    }
+
     fn test_pairing() -> PairingConfig {
         PairingConfig::spake2_shared_token("abcdefghijkl").unwrap()
     }
@@ -510,6 +590,16 @@ mod tests {
                 .iter()
                 .find(|(candidate, _)| *candidate == name)
                 .map(|(_, value)| value.clone()))
+        }
+    }
+
+    /// A `ClientEventSink` that records events into a shared vector.
+    #[derive(Clone)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<ClientEvent>>>);
+
+    impl ClientEventSink for RecordingSink {
+        fn on_event(&self, event: ClientEvent) {
+            self.0.lock().unwrap().push(event);
         }
     }
 }
