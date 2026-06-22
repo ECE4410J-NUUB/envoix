@@ -1,0 +1,20 @@
+[package]
+name = "envoix-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "envoix"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+envoix-client.workspace = true
+envoix-qr.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

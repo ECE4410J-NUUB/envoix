@@ -1,0 +1,57 @@
+[workspace]
+members = [
+    "apps/envoix-cli",
+    "crates/envoix-auth",
+    "crates/envoix-client",
+    "crates/envoix-discovery",
+    "crates/envoix-error",
+    "crates/envoix-protocol",
+    "crates/envoix-qr",
+    "crates/envoix-session",
+    "crates/envoix-storage",
+    "crates/envoix-transfer",
+    "crates/envoix-transport",
+    "crates/envoix-transport-quic",
+    "crates/envoix-types",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+envoix-auth = { path = "crates/envoix-auth" }
+envoix-client = { path = "crates/envoix-client" }
+envoix-discovery = { path = "crates/envoix-discovery" }
+envoix-error = { path = "crates/envoix-error" }
+envoix-protocol = { path = "crates/envoix-protocol" }
+envoix-qr = { path = "crates/envoix-qr" }
+envoix-session = { path = "crates/envoix-session" }
+envoix-storage = { path = "crates/envoix-storage" }
+envoix-transfer = { path = "crates/envoix-transfer" }
+envoix-transport = { path = "crates/envoix-transport" }
+envoix-transport-quic = { path = "crates/envoix-transport-quic" }
+envoix-types = { path = "crates/envoix-types" }
+async-trait = "0.1"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+hmac = "0.12"
+num_enum = "0.7"
+quinn = "0.11"
+rcgen = "0.13"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
