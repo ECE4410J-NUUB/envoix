@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1500 1040" role="img" aria-label="Layered client crate dependency architecture diagram for Envoix">
+    <style><![CDATA[
+  .box { fill:#fff; stroke:#334155; stroke-width:1.6; rx:14; }
+  .box-blue { fill:#eff6ff; stroke:#2563eb; }
+  .box-green { fill:#ecfdf5; stroke:#059669; }
+  .box-orange { fill:#fff7ed; stroke:#ea580c; }
+  .box-red { fill:#fef2f2; stroke:#dc2626; }
+  .box-purple { fill:#f5f3ff; stroke:#7c3aed; }
+  .box-slate { fill:#f8fafc; stroke:#475569; }
+  .box-yellow { fill:#fefce8; stroke:#ca8a04; }
+  .label { font: 700 15px Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#0f172a; }
+  .small { font: 12px Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#334155; }
+  .tiny { font: 11px Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#475569; }
+  .flow { fill:none; stroke:#334155; stroke-width:2.1; marker-end:url(#arrow); }
+  .control { fill:none; stroke:#7c3aed; stroke-width:2; stroke-dasharray:7 5; marker-end:url(#arrowPurple); }
+  .fail { fill:none; stroke:#dc2626; stroke-width:2; stroke-dasharray:6 5; marker-end:url(#arrowRed); }
+  .relay { fill:none; stroke:#7c3aed; stroke-width:2.4; marker-end:url(#arrowPurple); }
+  .data { fill:none; stroke:#2563eb; stroke-width:2.4; stroke-dasharray:8 6; marker-end:url(#arrowBlue); }
+  .dep { fill:none; stroke:#64748b; stroke-width:1.8; marker-end:url(#arrowDep); }
+  .dep-main { fill:none; stroke:#7c3aed; stroke-width:2.2; marker-end:url(#arrowPurple); }
+  .legend-text { font: 12px Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#334155; }
+]]></style>
+    <defs>
+      <marker id="arrowDep" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/></marker>
+      <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#7c3aed"/></marker>
+    </defs>
+
+
+    <text x="70" y="155" class="tiny" font-weight="700">BINARY / FRONTEND</text>
+    <line x1="70" y1="166" x2="1430" y2="166" stroke="#e2e8f0" />
+    <text x="70" y="290" class="tiny" font-weight="700">PUBLIC CLIENT API</text>
+    <line x1="70" y1="301" x2="1430" y2="301" stroke="#e2e8f0" />
+    <text x="70" y="425" class="tiny" font-weight="700">ORCHESTRATION</text>
+    <line x1="70" y1="436" x2="1430" y2="436" stroke="#e2e8f0" />
+    <text x="70" y="590" class="tiny" font-weight="700">ENGINE SERVICES</text>
+    <line x1="70" y1="601" x2="1430" y2="601" stroke="#e2e8f0" />
+    <text x="70" y="865" class="tiny" font-weight="700">FOUNDATION</text>
+    <line x1="70" y1="876" x2="1430" y2="876" stroke="#e2e8f0" />
+
+    <!-- top chain -->
+    <rect x="610" y="185" width="280" height="70" class="box box-blue" />
+    <text x="750" y="215" text-anchor="middle" class="label">cli</text>
+    <text x="750" y="236" text-anchor="middle" class="small">desktop Rust binary</text>
+    <rect x="595" y="320" width="310" height="70" class="box box-green" />
+    <text x="750" y="350" text-anchor="middle" class="label">client</text>
+    <text x="750" y="371" text-anchor="middle" class="small">shared client-facing API</text>
+    <rect x="560" y="455" width="380" height="104" class="box box-purple" />
+    <text x="750" y="493" text-anchor="middle" class="label">session</text>
+    <text x="750" y="518" text-anchor="middle" class="small">central coordinator for pairing,</text>
+    <text x="750" y="538" text-anchor="middle" class="small">path selection, and file transfers</text>
+
+    <!-- engine services: high row -->
+    <rect x="145" y="635" width="190" height="74" class="box box-orange" />
+    <text x="240" y="666" text-anchor="middle" class="label">auth</text>
+    <text x="240" y="688" text-anchor="middle" class="small">identity + trust</text>
+    <rect x="425" y="635" width="190" height="74" class="box box-slate" />
+    <text x="520" y="666" text-anchor="middle" class="label">discovery</text>
+    <text x="520" y="688" text-anchor="middle" class="small">LAN / peer finding</text>
+    <rect x="705" y="635" width="190" height="74" class="box box-blue" />
+    <text x="800" y="666" text-anchor="middle" class="label">transfer</text>
+    <text x="800" y="688" text-anchor="middle" class="small">file chunks + resume</text>
+    <rect x="985" y="635" width="210" height="74" class="box box-green" />
+    <text x="1090" y="666" text-anchor="middle" class="label">transport-quic</text>
+    <text x="1090" y="688" text-anchor="middle" class="small">QUIC implementation</text>
+
+    <!-- engine services: lower row -->
+    <rect x="510" y="765" width="210" height="74" class="box box-green" />
+    <text x="615" y="796" text-anchor="middle" class="label">transport</text>
+    <text x="615" y="818" text-anchor="middle" class="small">transport interface</text>
+    <rect x="870" y="765" width="210" height="74" class="box box-slate" />
+    <text x="975" y="796" text-anchor="middle" class="label">storage</text>
+    <text x="975" y="818" text-anchor="middle" class="small">file state</text>
+
+    <!-- foundation -->
+    <rect x="370" y="905" width="190" height="70" class="box box-slate" />
+    <text x="465" y="935" text-anchor="middle" class="label">protocol</text>
+    <text x="465" y="956" text-anchor="middle" class="small">wire messages</text>
+    <rect x="655" y="905" width="190" height="70" class="box box-slate" />
+    <text x="750" y="935" text-anchor="middle" class="label">types</text>
+    <text x="750" y="956" text-anchor="middle" class="small">shared data models</text>
+    <rect x="940" y="905" width="190" height="70" class="box box-red" />
+    <text x="1035" y="935" text-anchor="middle" class="label">error</text>
+    <text x="1035" y="956" text-anchor="middle" class="small">common errors</text>
+
+    <!-- dependency arrows -->
+    <path d="M750 255 L750 320" class="dep-main" />
+    <path d="M750 390 L750 455" class="dep-main" />
+
+    <!-- session to high services -->
+    <path d="M605 559 C500 590 360 605 240 635" class="dep-main" />
+    <path d="M690 559 C635 590 575 605 520 635" class="dep-main" />
+    <path d="M800 559 L800 635" class="dep-main" />
+    <path d="M895 559 C960 590 1035 605 1090 635" class="dep-main" />
+
+    <!-- high services to lower services -->
+    <path d="M240 709 C330 745 470 745 615 765" class="dep" />
+    <path d="M520 709 C550 735 585 745 615 765" class="dep" />
+    <path d="M800 709 C740 735 680 745 615 765" class="dep" />
+    <path d="M800 709 C850 735 920 745 975 765" class="dep" />
+    <path d="M1090 709 C985 745 780 745 615 765" class="dep" />
+
+    <!-- lower services to foundation -->
+    <path d="M615 839 C575 865 520 880 465 905" class="dep" />
+    <path d="M975 839 C930 865 820 880 750 905" class="dep" />
+    <path d="M975 839 C995 870 1015 885 1035 905" class="dep" />
+
+    <!-- foundation dependencies -->
+    <path d="M465 975 C520 1002 690 1002 750 975" class="dep" />
+    <path d="M465 975 C610 1020 900 1020 1035 975" class="dep" />
+
+    <rect x="1000" y="185" width="355" height="70" rx="14" fill="#ffffff" stroke="#cbd5e1" />
+    <line x1="1025" y1="213" x2="1075" y2="213" class="dep-main" />
+    <text x="1090" y="217" class="legend-text">primary orchestration dependency</text>
+    <line x1="1025" y1="239" x2="1075" y2="239" class="dep" />
+    <text x="1090" y="243" class="legend-text">direct crate dependency</text>
+  </svg>
