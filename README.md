@@ -171,7 +171,7 @@ flowchart LR
 
 ### Engine architecture
 
-![Envoix client crate dependencies](docs/assets/envoix-client-crate-dependencies.svg)
+![Envoix client crate dependencies](docs/assets/envoix-dependencies-v2.svg)
 
 Applications depend on the public `envoix-client` facade. The client delegates
 session setup to orchestration code, while authentication, discovery, transfer,
@@ -197,7 +197,7 @@ engine.
 
 ### Data and control flow
 
-![Envoix runtime logic flow](docs/assets/envoix-runtime-logic-flow.svg)
+![Envoix runtime logic flow](docs/assets/envoix-runtime-flow-v2.svg)
 
 Control flow starts when an application submits a send or receive request.
 The client validates configuration and pairing material, gathers candidates,
