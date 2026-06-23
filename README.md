@@ -134,7 +134,7 @@ committed dependency yet.
 
 ### Story Map
 
-The story map organizes the product around seven user activities. The flow
+The story map organizes the product around five user activities. The flow
 below shows the user journey; the table defines the skeletal product, MVP, and
 stretch scope in an editable format. A downloadable copy of the original
 story-map and engine-architecture deck is available
@@ -144,21 +144,19 @@ story-map and engine-architecture deck is available
 flowchart LR
     A[1. Pair devices] --> B[2. Detect paths]
     B --> C[3. Select path]
-    C --> D[4. Establish secure transport]
-    D --> E[5. Transfer file data]
-    E --> F[6. Resume and verify]
-    F --> G[7. Cross-platform delivery]
+    C --> D[4. Secure connection]
+    D --> E[5. Transfer and resume]
 ```
 
 | User activity | Skeletal Product | MVP | Stretch Goals |
 | --- | --- | --- | --- |
-| **1. Pair Devices** | Authenticate with a SPAKE2 shared token before metadata. Encode and validate QR invites containing a token, candidate, expiry, version, and flags. | Accept mobile QR scans or deep links. Maintain an invite-to-authenticated-to-ready session state machine. Support QR and manually typed tokens. | Support multi-device and multi-recipient invites, self-hosted rendezvous payloads, and an audited PAKE implementation. |
-| **2. Detect Paths** | Parse manual or QR candidates, discover LAN candidates, validate IPv4/IPv6 socket addresses, and emit discovery errors. | Detect LAN, IPv4 direct, and IPv6 direct availability. Probe UDP/QUIC usability, NAT feasibility, rendezvous access, and relay reachability. | Diagnose NAT, DPI, and throttling behavior. Estimate candidate quality from latency, loss, and throughput. |
-| **3. Select Path** | Prefer LAN/direct QUIC and keep selection behind the transport abstraction. | Automatically try LAN/direct QUIC, IPv6 direct, QUIC hole punching, relay, and encrypted store-and-forward in priority order. Emit selected-strategy and failure-reason events. | Add restricted-network TCP/WebSocket fallback, parallel candidate racing, and adaptive path scoring. |
-| **4. Establish Secure Transport** | Use `TransportDialer`, `TransportListener`, and `FrameConnection`; open QUIC and export channel-binding material for authentication. | Add file encryption above transport so relay and store-and-forward paths cannot read plaintext. Bind keys to pairing and channel identity. | Add transport obfuscation and additional fallback transports for UDP-blocked or throttled networks. |
-| **5. Transfer File Data** | Transfer one file with typed frames, sequential configurable chunks, lifecycle events, and explicit completion acknowledgement. | Expose the shared Rust sender/receiver through a mobile binding while preserving the CLI transfer semantics. | Support folders, manifests, multi-file sessions, and multiple simultaneous transfers. |
-| **6. Resume and Verify** | Persist a deterministic `.part` file and JSON sidecar, validate resume compatibility, continue from a verified offset, and gate final rename on BLAKE3 verification. | Add per-chunk integrity and preserve resume state when the selected path changes. | Add user-controlled pause/resume, adaptive chunk sizing, parallel chunks, and out-of-order recovery. |
-| **7. Cross-Platform Delivery** | Provide a desktop CLI backed by the shared Rust core; applications depend on `envoix-client`, not low-level crates. | Deliver an Android client through UniFFI or an equivalent binding with identical pairing, transfer, resume, and verification behavior. | Add Apple-platform bindings and release packaging for Windows, macOS, Linux, Android, and iOS. |
+| **1. Pair** | **One-scan pairing.** Authenticate with a SPAKE2 shared token before metadata, and encode and validate QR invites containing a token, candidate, expiry, version, and flags. | Accept mobile QR scans, deep links, or typed codes. Maintain an invite-to-authenticated-to-ready session state machine. | Support multi-device and multi-recipient invites, self-hosted rendezvous payloads, and an audited PAKE implementation. |
+| **2. Detect** | **LAN auto-discovery.** Parse manual or QR candidates, discover LAN candidates, validate IPv4/IPv6 socket addresses, and emit discovery errors. | **Check every route.** Detect LAN, direct IPv4/IPv6, hole-punching, relay, and store-and-forward availability; probe UDP/QUIC usability and NAT feasibility. | Diagnose NAT, DPI, and throttling behavior. Estimate candidate quality from latency, loss, and throughput. |
+| **3. Select** | **Use the fast local path first, then relay fallback.** Keep path selection behind the transport abstraction and require no manual setup. | **Show the best path live.** Try viable routes in priority order and emit selected-strategy and failure-reason events. | Work on locked-down networks through TCP/WebSocket fallback, parallel candidate racing, and adaptive path scoring. |
+| **4. Secure** | Establish an encrypted connection bound to paired devices using QUIC and channel-binding material. | **Add end-to-end file encryption** so relay and store-and-forward paths cannot read plaintext. Bind keys to pairing and channel identity. | Add traffic obfuscation and additional fallback transports for UDP-blocked or throttled networks. |
+| **5. Transfer & Resume** | **Reliably send, resume, and verify a file.** Transfer typed sequential chunks with clear lifecycle and progress events, persist deterministic resume state, and gate final rename on BLAKE3 verification. | Deliver Android and desktop clients through the shared Rust core, add per-chunk integrity, and preserve resume state across path switches. | Support folders, manifests, multi-file sessions, user-controlled pause/resume, adaptive or parallel chunks, and out-of-order recovery. |
+
+**Bold** items are core technical barriers carrying the major project effort.
 
 ### Engine architecture
 
