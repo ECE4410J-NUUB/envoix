@@ -3,15 +3,12 @@ members = [
     "apps/envoix-cli",
     "crates/envoix-auth",
     "crates/envoix-client",
-    "crates/envoix-discovery",
     "crates/envoix-error",
     "crates/envoix-protocol",
     "crates/envoix-qr",
     "crates/envoix-session",
     "crates/envoix-storage",
     "crates/envoix-transfer",
-    "crates/envoix-transport",
-    "crates/envoix-transport-quic",
     "crates/envoix-types",
 ]
 resolver = "2"
@@ -24,27 +21,25 @@ license = "MIT"
 [workspace.dependencies]
 envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
-envoix-discovery = { path = "crates/envoix-discovery" }
 envoix-error = { path = "crates/envoix-error" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-qr = { path = "crates/envoix-qr" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-storage = { path = "crates/envoix-storage" }
 envoix-transfer = { path = "crates/envoix-transfer" }
-envoix-transport = { path = "crates/envoix-transport" }
-envoix-transport-quic = { path = "crates/envoix-transport-quic" }
 envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"
+anyhow = "1"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 hmac = "0.12"
+iroh = "1"
+iroh-mdns-address-lookup = "0.4"
+n0-future = "0.3"
 num_enum = "0.7"
-quinn = "0.11"
-rcgen = "0.13"
-rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

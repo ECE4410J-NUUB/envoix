@@ -12,10 +12,9 @@
 //! over an already-secure session).  Anyone who obtains the invite string before
 //! it expires can impersonate the receiver.
 
-use std::net::SocketAddr;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use envoix_protocol::PeerDescriptor;
 use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
@@ -27,7 +26,7 @@ pub const INVITE_PREFIX: &str = "envoix:";
 
 /// Current payload schema version.  Increment when the schema changes in a
 /// backward-incompatible way.
-pub const PAYLOAD_VERSION: u32 = 1;
+pub const PAYLOAD_VERSION: u32 = 2;
 
 /// Versioned invite payload carried inside a QR code or pasted as plain text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,8 +37,8 @@ pub struct QrInvitePayload {
     pub protocol_version: u32,
     /// SPAKE2 shared token (at least MIN_SHARED_TOKEN_LEN ASCII bytes).
     pub token: String,
-    /// Network candidates the sender should try, e.g. `["192.168.1.5:54321"]`.
-    pub candidates: Vec<String>,
+    /// Direct iroh endpoint descriptor the sender should dial.
+    pub peer: PeerDescriptor,
     /// Expiry as a Unix timestamp in seconds.  Senders reject payloads where
     /// `expires_at <= now`.
     pub expires_at: u64,
@@ -59,14 +58,14 @@ pub enum QrError {
     #[error("invite has expired")]
     Expired,
 
-    #[error("invite contains no network candidates")]
-    NoCandidates,
+    #[error("invite contains no direct peer addresses")]
+    NoDirectAddresses,
 
     #[error("token is too short or not ASCII (minimum {MIN_SHARED_TOKEN_LEN} ASCII bytes)")]
     WeakToken,
 
-    #[error("malformed candidate address: {0}")]
-    MalformedAddress(String),
+    #[error("malformed endpoint id: {0}")]
+    MalformedEndpointId(String),
 
     #[error("decode error: {0}")]
     DecodeError(String),
@@ -133,18 +132,16 @@ impl QrInvitePayload {
             return Err(QrError::Expired);
         }
 
-        if self.candidates.is_empty() {
-            return Err(QrError::NoCandidates);
+        if self.peer.direct_addrs.is_empty() {
+            return Err(QrError::NoDirectAddresses);
         }
 
         if !is_valid_shared_token(&self.token) {
             return Err(QrError::WeakToken);
         }
 
-        for candidate in &self.candidates {
-            candidate
-                .parse::<SocketAddr>()
-                .map_err(|_| QrError::MalformedAddress(candidate.clone()))?;
+        if let Err(error) = self.peer.endpoint_id.parse::<iroh::EndpointId>() {
+            return Err(QrError::MalformedEndpointId(error.to_string()));
         }
 
         if self.flags != 0 {
@@ -154,24 +151,22 @@ impl QrInvitePayload {
         Ok(())
     }
 
-    /// Returns the first candidate parsed as a [`SocketAddr`].
-    ///
-    /// Assumes the payload has already been validated; returns
-    /// [`QrError::NoCandidates`] if the list is empty.
-    pub fn first_candidate(&self) -> Result<SocketAddr, QrError> {
-        let s = self.candidates.first().ok_or(QrError::NoCandidates)?;
-        s.parse::<SocketAddr>()
-            .map_err(|_| QrError::MalformedAddress(s.clone()))
+    /// Returns the peer descriptor.
+    pub fn peer_descriptor(&self) -> Result<PeerDescriptor, QrError> {
+        if self.peer.direct_addrs.is_empty() {
+            return Err(QrError::NoDirectAddresses);
+        }
+        Ok(self.peer.clone())
     }
 
     /// Constructs a new payload with the current protocol version and schema
     /// version pre-filled.
-    pub fn new(token: String, candidates: Vec<String>, expires_at: u64) -> Self {
+    pub fn new(token: String, peer: PeerDescriptor, expires_at: u64) -> Self {
         Self {
             version: PAYLOAD_VERSION,
             protocol_version: PROTOCOL_VERSION,
             token,
-            candidates,
+            peer,
             expires_at,
             flags: 0,
         }
@@ -249,8 +244,16 @@ mod tests {
 
     const TOKEN: &str = "abcdefghijkl"; // exactly MIN_SHARED_TOKEN_LEN bytes
 
+    fn valid_peer() -> PeerDescriptor {
+        PeerDescriptor::new(
+            iroh::SecretKey::generate().public().to_string(),
+            vec!["127.0.0.1:9000".parse().unwrap()],
+        )
+        .unwrap()
+    }
+
     fn valid_payload(now: u64) -> QrInvitePayload {
-        QrInvitePayload::new(TOKEN.into(), vec!["127.0.0.1:9000".into()], now + 300)
+        QrInvitePayload::new(TOKEN.into(), valid_peer(), now + 300)
     }
 
     // --- encode / decode ---
@@ -343,11 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn no_candidates_is_rejected() {
+    fn empty_direct_addresses_are_rejected() {
         let mut payload = valid_payload(0);
-        payload.candidates.clear();
+        payload.peer.direct_addrs.clear();
         let err = payload.validate(0).unwrap_err();
-        assert_eq!(err, QrError::NoCandidates);
+        assert_eq!(err, QrError::NoDirectAddresses);
     }
 
     // Token exactly one byte short of the minimum must be rejected.
@@ -366,38 +369,40 @@ mod tests {
     }
 
     #[test]
-    fn malformed_candidate_is_rejected() {
+    fn malformed_endpoint_id_is_rejected() {
         let mut payload = valid_payload(0);
-        payload.candidates = vec!["not-an-address".into()];
+        payload.peer.endpoint_id = "not-an-endpoint-id".into();
         let err = payload.validate(0).unwrap_err();
-        assert!(matches!(err, QrError::MalformedAddress(_)));
+        assert!(matches!(err, QrError::MalformedEndpointId(_)));
     }
 
     #[test]
-    fn ipv6_candidate_is_accepted() {
+    fn ipv6_direct_address_is_accepted() {
         let mut payload = valid_payload(0);
-        payload.candidates = vec!["[::1]:9000".into()];
+        payload.peer.direct_addrs = vec!["[::1]:9000".parse().unwrap()];
         payload.validate(0).unwrap();
     }
 
-    // --- first_candidate ---
+    // --- peer_descriptor ---
 
-    // With multiple candidates the first one must be returned, not the last.
     #[test]
-    fn first_candidate_with_multiple_returns_first() {
+    fn peer_descriptor_returns_descriptor() {
         let mut payload = valid_payload(0);
-        payload.candidates = vec!["1.2.3.4:1000".into(), "5.6.7.8:2000".into()];
-        let addr = payload.first_candidate().unwrap();
-        assert_eq!(addr, "1.2.3.4:1000".parse::<SocketAddr>().unwrap());
+        payload.peer.direct_addrs = vec![
+            "1.2.3.4:1000".parse().unwrap(),
+            "5.6.7.8:2000".parse().unwrap(),
+        ];
+        let peer = payload.peer_descriptor().unwrap();
+        assert_eq!(peer.direct_addrs, payload.peer.direct_addrs);
     }
 
     #[test]
-    fn first_candidate_on_empty_list_returns_error() {
+    fn peer_descriptor_on_empty_direct_addresses_returns_error() {
         let mut payload = valid_payload(0);
-        payload.candidates.clear();
+        payload.peer.direct_addrs.clear();
         assert_eq!(
-            payload.first_candidate().unwrap_err(),
-            QrError::NoCandidates
+            payload.peer_descriptor().unwrap_err(),
+            QrError::NoDirectAddresses
         );
     }
 
@@ -416,7 +421,7 @@ mod tests {
     #[test]
     fn generated_token_passes_payload_validation() {
         let token = generate_token().unwrap();
-        let payload = QrInvitePayload::new(token, vec!["127.0.0.1:9000".into()], 999);
+        let payload = QrInvitePayload::new(token, valid_peer(), 999);
         payload.validate(0).unwrap();
     }
 

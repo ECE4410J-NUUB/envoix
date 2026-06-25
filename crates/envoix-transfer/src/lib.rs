@@ -5,13 +5,12 @@ use std::path::{Path, PathBuf};
 
 use envoix_error::CoreError;
 use envoix_protocol::{
-    Chunk, Complete, CompleteAck, FileHeader, Frame, Hello, Ready, ResumeStatus,
+    Chunk, Complete, CompleteAck, FileHeader, Frame, FrameConnection, Hello, Ready, ResumeStatus,
 };
 use envoix_storage::{LocalFileStorage, TransferResumeState};
-use envoix_transport::FrameConnection;
 use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Default sequential chunk size used by clients that do not override it.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
@@ -217,7 +216,7 @@ impl TransferEngine {
         let mut offset = start_offset;
 
         loop {
-            let bytes_read = file.read(&mut buffer).await?;
+            let bytes_read = read_full_chunk(&mut file, &mut buffer).await?;
             if bytes_read == 0 {
                 break;
             }
@@ -620,11 +619,27 @@ async fn prepare_existing_resume_state(
     header: &FileHeader,
     mut state: TransferResumeState,
 ) -> Result<Option<TransferResumeState>, TransferError> {
-    if state.bytes_received > state.file_size
-        || state.next_chunk_index != next_chunk_index(state.bytes_received, state.chunk_size)
-    {
+    if state.bytes_received > state.file_size {
+        tracing::warn!(
+            transfer_id = %state.transfer_id,
+            file_name = state.file_name,
+            bytes_received = state.bytes_received,
+            file_size = state.file_size,
+            "resume state records more bytes than file size; deleting it"
+        );
         delete_resume_candidate(output_dir, &state).await?;
         return Ok(None);
+    }
+    let expected_next_chunk_index = next_chunk_index(state.bytes_received, state.chunk_size);
+    if state.next_chunk_index != expected_next_chunk_index {
+        let message = format!(
+            "resume state has inconsistent chunk index: next_chunk_index={} expected_next_chunk_index={} bytes_received={} chunk_size={}",
+            state.next_chunk_index,
+            expected_next_chunk_index,
+            state.bytes_received,
+            state.chunk_size
+        );
+        return Err(CoreError::Transfer(message));
     }
 
     let old_transfer_id = state.transfer_id.clone();
@@ -879,6 +894,21 @@ async fn hash_file_prefix(
     Ok(())
 }
 
+async fn read_full_chunk<R>(reader: &mut R, buffer: &mut [u8]) -> Result<usize, TransferError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let bytes_read = reader.read(&mut buffer[filled..]).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        filled += bytes_read;
+    }
+    Ok(filled)
+}
+
 fn validate_header(header: &FileHeader, receiver_chunk_size: usize) -> Result<(), TransferError> {
     if receiver_chunk_size == 0 {
         return Err(CoreError::Transfer("chunk size must be positive".into()));
@@ -918,8 +948,33 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::io;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn read_full_chunk_accumulates_short_reads() {
+        let mut reader = ShortRead {
+            bytes: b"abcdef",
+            position: 0,
+            max_read: 2,
+        };
+        let mut buffer = [0_u8; 5];
+
+        let bytes_read = read_full_chunk(&mut reader, &mut buffer).await.unwrap();
+
+        assert_eq!(bytes_read, 5);
+        assert_eq!(&buffer, b"abcde");
+
+        let mut buffer = [0_u8; 5];
+        let bytes_read = read_full_chunk(&mut reader, &mut buffer).await.unwrap();
+
+        assert_eq!(bytes_read, 1);
+        assert_eq!(&buffer[..bytes_read], b"f");
+    }
 
     #[tokio::test]
     async fn transfers_file_over_frame_connection() {
@@ -1310,7 +1365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inconsistent_resume_state_is_deleted_before_fresh_transfer() {
+    async fn inconsistent_resume_index_fails_explicitly() {
         let root = unique_test_dir();
         let output_dir = root.join("output");
         tokio::fs::create_dir_all(&output_dir).await.unwrap();
@@ -1334,46 +1389,27 @@ mod tests {
                 .unwrap();
         tokio::fs::write(&temp_path, b"abcde").await.unwrap();
 
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receiver = tokio::spawn({
-            let output_dir = output_dir.clone();
-            async move {
-                TransferEngine::new(5)
-                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
-                    .await
-                    .unwrap()
-            }
-        });
+        let header = FileHeader {
+            transfer_id: TransferId::new("new-transfer"),
+            file_name: "bad-state.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            resume_requested: true,
+        };
+        let error = prepare_existing_resume_state(&output_dir, &header, state)
+            .await
+            .unwrap_err();
 
-        manual_send(
-            &mut sender_connection,
-            ManualSend {
-                file_name: "bad-state.txt",
-                source_bytes,
-                chunk_size: 5,
-                resume_requested: true,
-                bytes_to_send: source_bytes,
-                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
-                expected_resume_bytes: 0,
-            },
-        )
-        .await;
-        let receive_summary = receiver.await.unwrap();
-
-        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
-        assert_eq!(
-            tokio::fs::read(output_dir.join("bad-state.txt"))
-                .await
-                .unwrap(),
-            source_bytes
+        assert!(
+            matches!(error, CoreError::Transfer(message) if message.contains("inconsistent chunk index"))
         );
         assert!(
             LocalFileStorage::read_resume_state(&output_dir, "bad-state.txt", &old_transfer_id)
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
-        assert!(!fs::try_exists(temp_path).await.unwrap());
+        assert!(fs::try_exists(temp_path).await.unwrap());
     }
 
     #[tokio::test]
@@ -1608,6 +1644,32 @@ mod tests {
                 self.stopped.store(true, Ordering::SeqCst);
                 panic!("simulated receiver stop after {bytes_transferred} bytes");
             }
+        }
+    }
+
+    struct ShortRead<'a> {
+        bytes: &'a [u8],
+        position: usize,
+        max_read: usize,
+    }
+
+    impl AsyncRead for ShortRead<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.position >= self.bytes.len() || buffer.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let bytes_to_read = self
+                .max_read
+                .min(self.bytes.len() - self.position)
+                .min(buffer.remaining());
+            let end = self.position + bytes_to_read;
+            buffer.put_slice(&self.bytes[self.position..end]);
+            self.position = end;
+            Poll::Ready(Ok(()))
         }
     }
 

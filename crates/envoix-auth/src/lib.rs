@@ -1,8 +1,9 @@
 //! Pairing and peer-authentication configuration.
 
 use envoix_error::CoreError;
-use envoix_protocol::{AuthFrame, Frame, Spake2Confirm, Spake2Message, Spake2Start};
-use envoix_transport::FrameConnection;
+use envoix_protocol::{
+    AuthFrame, Frame, FrameConnection, Spake2Confirm, Spake2Message, Spake2Start,
+};
 use envoix_types::{PROTOCOL_VERSION, PeerRole, is_valid_shared_token};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -299,8 +300,7 @@ fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use envoix_protocol::{Chunk, Frame, Ready};
-    use envoix_transport::TransportError;
+    use envoix_protocol::{Chunk, Frame, ProtocolError, Ready};
     use envoix_types::TransferId;
     use tokio::sync::mpsc;
 
@@ -429,7 +429,7 @@ mod tests {
 
     #[async_trait]
     impl FrameConnection for MemoryFrameConnection {
-        async fn send_frame(&mut self, frame: Frame) -> Result<(), TransportError> {
+        async fn send_frame(&mut self, frame: Frame) -> Result<(), ProtocolError> {
             self.tx
                 .send(frame)
                 .await
@@ -442,7 +442,7 @@ mod tests {
             index: u64,
             offset: u64,
             bytes: &[u8],
-        ) -> Result<(), TransportError> {
+        ) -> Result<(), ProtocolError> {
             self.send_frame(Frame::Chunk(Chunk {
                 transfer_id: transfer_id.clone(),
                 index,
@@ -452,7 +452,7 @@ mod tests {
             .await
         }
 
-        async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
+        async fn recv_frame(&mut self) -> Result<Frame, ProtocolError> {
             self.rx
                 .recv()
                 .await
@@ -463,11 +463,11 @@ mod tests {
             &self,
             _label: &[u8],
             _context: &[u8],
-        ) -> Result<[u8; 32], TransportError> {
+        ) -> Result<[u8; 32], ProtocolError> {
             Ok(self.exporter)
         }
 
-        async fn close(&mut self) -> Result<(), TransportError> {
+        async fn close(&mut self) -> Result<(), ProtocolError> {
             Ok(())
         }
     }
@@ -478,7 +478,7 @@ mod tests {
 
         #[async_trait]
         impl FrameConnection for NoBindingConnection {
-            async fn send_frame(&mut self, _frame: Frame) -> Result<(), TransportError> {
+            async fn send_frame(&mut self, _frame: Frame) -> Result<(), ProtocolError> {
                 Ok(())
             }
 
@@ -488,15 +488,15 @@ mod tests {
                 _index: u64,
                 _offset: u64,
                 _bytes: &[u8],
-            ) -> Result<(), TransportError> {
+            ) -> Result<(), ProtocolError> {
                 Ok(())
             }
 
-            async fn recv_frame(&mut self) -> Result<Frame, TransportError> {
+            async fn recv_frame(&mut self) -> Result<Frame, ProtocolError> {
                 Ok(Frame::Ready(Ready))
             }
 
-            async fn close(&mut self) -> Result<(), TransportError> {
+            async fn close(&mut self) -> Result<(), ProtocolError> {
                 Ok(())
             }
         }

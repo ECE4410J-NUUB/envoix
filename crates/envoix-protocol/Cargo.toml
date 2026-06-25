@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 envoix-error.workspace = true
 envoix-types.workspace = true
 num_enum.workspace = true

@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -7,9 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, PairingConfig,
-    ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
-    TransferDirection, TransferEvent,
+    ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, IdentityConfig,
+    PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING,
+    SendFileRequest, SendRequest, TransferDirection, TransferEvent,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
@@ -26,10 +26,10 @@ const INVITE_TTL_SECS: u64 = 300;
     about = "Secure file transfer CLI",
     after_help = "Manual flow:
     envoix receive --output ./received --token <token>
-    envoix send --peer <receiver-ip>:<port> --token <token> <file>
+    envoix send --peer <endpoint-id>@<receiver-ip>:<port> --token <token> <file>
 
 QR flow (no manual token or address needed):
-    envoix receive --auto --output ./received
+    envoix receive --enable-mdns --output ./received
     envoix send --invite <invite-string> <file>
 "
 )]
@@ -42,23 +42,29 @@ struct Cli {
 enum Command {
     /// Send one file to a receiver address printed by `envoix receive`.
     Send {
-        /// Receiver address (manual mode). Cannot be combined with --invite.
+        /// Receiver peer descriptor (manual mode). Cannot be combined with --invite.
         #[arg(long, conflicts_with = "invite")]
-        peer: Option<SocketAddr>,
+        peer: Option<PeerDescriptor>,
         /// Explicit TOML config file path.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Use automatic discovery (placeholder). Cannot be combined with --invite.
+        /// Use iroh mDNS discovery when available. Cannot be combined with --invite.
         #[arg(long, conflicts_with = "invite")]
-        auto: bool,
+        enable_mdns: bool,
+        /// Persistent iroh identity file. Created if missing.
+        #[arg(long, conflicts_with = "ephemeral_identity")]
+        identity: Option<PathBuf>,
+        /// Use a fresh iroh identity for this run.
+        #[arg(long)]
+        ephemeral_identity: bool,
         /// Start a new transfer and ignore compatible receiver-side resume state.
         #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
         resume: bool,
         /// Shared ASCII pairing token (>=12 bytes). Required unless --invite is set.
         #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
         token: Option<String>,
-        /// Invite string printed by `envoix receive --auto`; sets peer and token automatically.
-        #[arg(long, conflicts_with_all = ["peer", "auto", "token"])]
+        /// Invite string printed by `envoix receive --enable-mdns`; sets peer and token automatically.
+        #[arg(long, conflicts_with_all = ["peer", "enable_mdns", "token"])]
         invite: Option<String>,
         /// File to send.
         file: PathBuf,
@@ -71,13 +77,18 @@ enum Command {
         /// Explicit TOML config file path.
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Automatic mode: listen and advertise over mDNS. When used without
+        /// Enable iroh mDNS/address discovery. When used without
         /// --token, generates a random token and prints a QR invite.
+        #[arg(long, visible_alias = "auto")]
+        enable_mdns: bool,
+        /// Persistent iroh identity file. Created if missing.
+        #[arg(long, conflicts_with = "ephemeral_identity")]
+        identity: Option<PathBuf>,
+        /// Use a fresh iroh identity for this run.
         #[arg(long)]
-        auto: bool,
-        /// Shared ASCII pairing token (>=12 bytes). Required unless --auto is set.
-        /// When combined with --auto, uses the given token for mDNS advertisement.
-        #[arg(long, required_unless_present = "auto")]
+        ephemeral_identity: bool,
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --enable-mdns is set.
+        #[arg(long, required_unless_present = "enable_mdns")]
         token: Option<String>,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
@@ -124,7 +135,9 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         Command::Send {
             peer,
             config,
-            auto,
+            enable_mdns,
+            identity,
+            ephemeral_identity: _,
             resume,
             token,
             invite,
@@ -134,31 +147,31 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 let resolved = resolve_invite(&invite_str)?;
                 eprintln!(
                     "connecting to {} (invite expires in {})",
-                    resolved.peer_addr,
+                    resolved.peer,
                     format_duration(Duration::from_secs(resolved.expires_in))
                 );
-                client_for_token(resolved.token, config.as_deref())?
+                client_for_token(resolved.token, config.as_deref(), identity_config(identity))?
                     .send_file(
                         SendFileRequest {
-                            peer_addr: resolved.peer_addr,
+                            peer: resolved.peer,
                             file_path: file,
                             resume,
                         },
                         Box::new(ConsoleEventSink::new()),
                     )
                     .await?
-            } else if auto {
+            } else if enable_mdns {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
-                        "use either --auto or --peer, not both".into(),
+                        "use either --enable-mdns or --peer, not both".into(),
                     ));
                 }
-                let token = token.expect("clap ensures --token is present with --auto");
-                client_for_token(token, config.as_deref())?
+                let token = token.expect("clap ensures --token is present with --enable-mdns");
+                client_for_token(token, config.as_deref(), identity_config(identity))?
                     .send(
                         SendRequest {
                             file_path: file,
-                            connection_policy: ConnectionPolicy::Auto,
+                            connection_policy: ConnectionPolicy::EnableMdns,
                             resume,
                         },
                         Box::new(ConsoleClientEventSink),
@@ -168,14 +181,14 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
-                        "send requires --peer unless --auto or --invite is set".into(),
+                        "send requires --peer unless --enable-mdns or --invite is set".into(),
                     )
                 })?;
                 let token = token.expect("clap ensures --token is present without --invite");
-                client_for_token(token, config.as_deref())?
+                client_for_token(token, config.as_deref(), identity_config(identity))?
                     .send_file(
                         SendFileRequest {
-                            peer_addr: peer,
+                            peer,
                             file_path: file,
                             resume,
                         },
@@ -191,27 +204,33 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         Command::Receive {
             output,
             config,
-            auto,
+            enable_mdns,
+            identity,
+            ephemeral_identity: _,
             token,
             ip_version,
         } => {
             let listen_addr = receive_addr_for(ip_version);
-            let summary = if auto {
+            let identity = identity_config(identity);
+            let summary = if enable_mdns {
                 match token {
                     Some(t) => {
-                        // User-provided token for mDNS-based pairing.
-                        let client = client_for_token(t, config.as_deref())?;
-                        eprintln!("advertising over mDNS...");
+                        let token_for_print = t.clone();
+                        let client = client_for_token(t, config.as_deref(), identity)?;
+                        eprintln!("waiting for sender...");
                         client
                             .receive(
                                 ReceiveRequest {
                                     output_dir: output,
-                                    connection_policy: ConnectionPolicy::Auto,
+                                    connection_policy: ConnectionPolicy::EnableMdns,
                                     listen_addr,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
-                                |addr| eprintln!("listening on {addr}"),
+                                move |peer| {
+                                    eprintln!("peer: {peer}");
+                                    eprintln!("token: {token_for_print}");
+                                },
                             )
                             .await?
                     }
@@ -223,25 +242,25 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             ))
                         })?;
                         let token_for_qr = generated.clone();
-                        let client = client_for_token(generated, config.as_deref())?;
-                        eprintln!("waiting for sender (QR + mDNS)...");
+                        let client = client_for_token(generated, config.as_deref(), identity)?;
+                        eprintln!("waiting for sender...");
                         client
                             .receive(
                                 ReceiveRequest {
                                     output_dir: output,
-                                    connection_policy: ConnectionPolicy::Auto,
+                                    connection_policy: ConnectionPolicy::EnableMdns,
                                     listen_addr,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
-                                move |bound_addr| {
-                                    let candidates = build_candidates(bound_addr, ip_version);
+                                move |peer| {
                                     let payload = QrInvitePayload::new(
                                         token_for_qr,
-                                        candidates,
+                                        peer.clone(),
                                         unix_now() + INVITE_TTL_SECS,
                                     );
                                     let invite = payload.encode();
+                                    eprintln!("peer: {peer}");
                                     eprintln!("\ninvite: {invite}");
                                     if let Some(qr) = render_terminal_qr(&invite) {
                                         eprintln!("{qr}");
@@ -252,16 +271,19 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     }
                 }
             } else {
-                // clap guarantees --token is present here (required_unless_present = "auto").
-                let token = token.expect("clap requires --token unless --auto is set");
-                client_for_token(token, config.as_deref())?
-                    .receive_file_with_bound_addr(
+                let token = token.expect("clap requires --token unless --enable-mdns is set");
+                let token_for_print = token.clone();
+                client_for_token(token, config.as_deref(), identity)?
+                    .receive_file_with_bound_peer(
                         ReceiveFileRequest {
                             listen_addr: receive_addr_for(ip_version),
                             output_dir: output,
                         },
                         Box::new(ConsoleEventSink::new()),
-                        |addr| eprintln!("listening on {addr}"),
+                        move |peer| {
+                            eprintln!("peer: {peer}");
+                            eprintln!("token: {token_for_print}");
+                        },
                     )
                     .await?
             };
@@ -285,7 +307,7 @@ fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
 
 /// Resolved fields extracted from a validated QR invite.
 struct ResolvedInvite {
-    peer_addr: SocketAddr,
+    peer: PeerDescriptor,
     token: String,
     expires_in: u64,
 }
@@ -300,10 +322,10 @@ fn resolve_invite(invite: &str) -> Result<ResolvedInvite, envoix_client::PublicE
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
     let now = unix_now();
     payload.validate(now).map_err(to_err)?;
-    let peer_addr = payload.first_candidate().map_err(to_err)?;
+    let peer = payload.peer_descriptor().map_err(to_err)?;
 
     Ok(ResolvedInvite {
-        peer_addr,
+        peer,
         token: payload.token,
         expires_in: payload.expires_at.saturating_sub(now),
     })
@@ -317,45 +339,21 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Builds the candidate list for a QR invite from the listener's bound address.
-///
-/// Uses a UDP socket trick to find the machine's outbound LAN IP, then pairs
-/// it with the bound port. On networks with no usable route, detection falls
-/// back to the bound address and warns if that address is not dialable.
-fn build_candidates(bound_addr: SocketAddr, ip_version: IpVersion) -> Vec<String> {
-    let port = bound_addr.port();
-    let ip = detect_local_ip(ip_version).unwrap_or(bound_addr.ip());
-    if ip.is_unspecified() {
-        eprintln!(
-            "warning: could not detect a reachable local IP; the invite contains \
-             {ip} which a sender cannot dial. Share a reachable address manually."
-        );
-    }
-    vec![SocketAddr::new(ip, port).to_string()]
-}
-
-/// Probes the OS routing table to find the preferred outbound LAN IP without
-/// sending any packets (connect on UDP never transmits data).
-fn detect_local_ip(ip_version: IpVersion) -> Option<IpAddr> {
-    let (bind_addr, probe_addr) = match ip_version {
-        IpVersion::Ipv4 => ("0.0.0.0:0", "8.8.8.8:80"),
-        IpVersion::Ipv6 => ("[::]:0", "[2001:4860:4860::8888]:80"),
-    };
-    let socket = UdpSocket::bind(bind_addr).ok()?;
-    socket.connect(probe_addr).ok()?;
-    Some(socket.local_addr().ok()?.ip())
-}
-
 fn client_for_token(
     token: String,
     config_path: Option<&std::path::Path>,
+    identity: IdentityConfig,
 ) -> Result<EnvoixClient, envoix_client::PublicError> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
     let pairing = PairingConfig::spake2_shared_token(token)?;
-    Ok(EnvoixClient::new(ClientConfig::from_runtime_sources(
-        pairing,
-        config_path,
-    )?))
+    let mut config = ClientConfig::from_runtime_sources(pairing, config_path)?;
+    config.identity = identity;
+    Ok(EnvoixClient::new(config))
+}
+
+fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
+    path.map(IdentityConfig::Persistent)
+        .unwrap_or(IdentityConfig::Ephemeral)
 }
 
 #[derive(Debug, Default)]
@@ -447,21 +445,28 @@ impl envoix_client::ClientEventSink for ConsoleClientEventSink {
             ClientEvent::NetworkDetectionStarted => {
                 eprintln!("detecting network environment...");
             }
-            ClientEvent::AutoConnectionStarted { direction } => {
+            ClientEvent::EndpointStarted { direction } => {
                 let dir = match direction {
                     TransferDirection::Send => "send",
                     TransferDirection::Receive => "receive",
                 };
-                eprintln!("starting auto {dir}...");
+                eprintln!("starting {dir} endpoint...");
             }
-            ClientEvent::LanDiscoveryStarted => {
-                eprintln!("scanning LAN for Envoix peers...");
+            ClientEvent::DirectAddressAvailable { peer } => {
+                eprintln!("  direct address: {peer}");
             }
-            ClientEvent::LanCandidateFound { candidate } => {
-                eprintln!("  found candidate: {candidate:?}");
+            ClientEvent::DialStarted { peer } => {
+                eprintln!("dialing {peer}...");
             }
-            ClientEvent::LanDiscoveryFailed { reason } => {
-                eprintln!("  LAN discovery failed: {reason}");
+            ClientEvent::Authenticated { direction } => {
+                let dir = match direction {
+                    TransferDirection::Send => "send",
+                    TransferDirection::Receive => "receive",
+                };
+                eprintln!("authenticated {dir} peer");
+            }
+            ClientEvent::ConnectionFailed { reason } => {
+                eprintln!("  connection failed: {reason}");
             }
             ClientEvent::TooManyAuthFailures => {
                 eprintln!(
@@ -592,13 +597,15 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    const PEER: &str = "peer@[::1]:9000";
+
     #[test]
     fn parses_send_command() {
         let cli = Cli::try_parse_from([
             "envoix",
             "send",
             "--peer",
-            "[::1]:9000",
+            PEER,
             "--token",
             "abcdefghijkl",
             "hello.txt",
@@ -610,13 +617,14 @@ mod tests {
             Command::Send {
                 peer,
                 config: None,
-                auto,
+                enable_mdns,
                 resume,
                 ref token,
                 invite: None,
                 ref file,
-            } if peer == Some("[::1]:9000".parse().unwrap())
-                && !auto
+                ..
+            } if peer == Some(PEER.parse().unwrap())
+                && !enable_mdns
                 && resume
                 && token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
@@ -624,11 +632,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_send_auto_command() {
+    fn parses_send_enable_mdns_command() {
         let cli = Cli::try_parse_from([
             "envoix",
             "send",
-            "--auto",
+            "--enable-mdns",
             "--token",
             "abcdefghijkl",
             "hello.txt",
@@ -640,11 +648,12 @@ mod tests {
             Command::Send {
                 peer: None,
                 config: None,
-                auto: true,
+                enable_mdns: true,
                 resume: true,
                 ref token,
                 invite: None,
                 ref file,
+                ..
             } if token.as_deref() == Some("abcdefghijkl")
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -656,7 +665,7 @@ mod tests {
             "envoix",
             "send",
             "--peer",
-            "[::1]:9000",
+            PEER,
             "--fresh",
             "--token",
             "abcdefghijkl",
@@ -684,29 +693,45 @@ mod tests {
             Command::Receive {
                 output,
                 config: None,
-                auto,
+                enable_mdns,
                 token: Some(ref token),
-                ip_version
+                ip_version,
+                ..
             } if output == std::path::Path::new("received")
-                && !auto
+                && !enable_mdns
                 && token == "abcdefghijkl"
                 && ip_version == IpVersion::Ipv4
         ));
     }
 
     #[test]
-    fn parses_receive_auto_command() {
+    fn parses_receive_enable_mdns_command() {
+        let cli =
+            Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "received"])
+                .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                output,
+                enable_mdns: true,
+                token: None,
+                ..
+            } if output == std::path::Path::new("received")
+        ));
+    }
+
+    #[test]
+    fn parses_receive_auto_alias() {
         let cli =
             Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"]).unwrap();
 
         assert!(matches!(
             cli.command,
             Command::Receive {
-                output,
-                auto: true,
-                token: None,
+                enable_mdns: true,
                 ..
-            } if output == std::path::Path::new("received")
+            }
         ));
     }
 
@@ -725,7 +750,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Receive {
-                auto: false,
+                enable_mdns: false,
                 token: Some(ref t),
                 ..
             } if t == "abcdefghijkl"
@@ -765,11 +790,12 @@ mod tests {
             Command::Send {
                 peer: None,
                 config: None,
-                auto: false,
+                enable_mdns: false,
                 resume: true,
                 token: None,
                 ref invite,
                 ref file,
+                ..
             } if invite.as_deref() == Some("envoix:dGVzdA")
                 && file == std::path::Path::new("hello.txt")
         ));
@@ -781,7 +807,7 @@ mod tests {
             "envoix",
             "send",
             "--peer",
-            "[::1]:9000",
+            PEER,
             "--config",
             "envoix.toml",
             "--token",
@@ -801,8 +827,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_token() {
-        let error = Cli::try_parse_from(["envoix", "send", "--peer", "[::1]:9000", "hello.txt"])
-            .unwrap_err();
+        let error =
+            Cli::try_parse_from(["envoix", "send", "--peer", PEER, "hello.txt"]).unwrap_err();
 
         assert_eq!(
             error.kind(),
@@ -811,13 +837,12 @@ mod tests {
     }
 
     #[test]
-    fn receive_auto_with_token_is_valid() {
-        // --auto with --token is now the mDNS-based auto flow.
+    fn receive_enable_mdns_with_token_is_valid() {
         assert!(
             Cli::try_parse_from([
                 "envoix",
                 "receive",
-                "--auto",
+                "--enable-mdns",
                 "--output",
                 "recv",
                 "--token",
@@ -828,9 +853,11 @@ mod tests {
     }
 
     #[test]
-    fn receive_auto_without_token_is_valid() {
-        // --auto without --token generates a random token and prints a QR invite.
-        assert!(Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "recv",]).is_ok());
+    fn receive_enable_mdns_without_token_is_valid() {
+        assert!(
+            Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "recv",])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -842,7 +869,7 @@ mod tests {
                 "--invite",
                 "envoix:dGVzdA",
                 "--peer",
-                "127.0.0.1:9000",
+                PEER,
                 "f.txt",
             ])
             .is_err()

@@ -1,5 +1,10 @@
 //! Wire protocol frame types and codecs.
 
+use std::fmt;
+use std::net::SocketAddr;
+use std::str::FromStr;
+
+use async_trait::async_trait;
 use envoix_error::CoreError;
 use envoix_types::{PeerRole, TransferId};
 use num_enum::TryFromPrimitive;
@@ -37,6 +42,117 @@ pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024 + 64 * 1024;
 
 /// Error type returned by protocol encoding and decoding.
 pub type ProtocolError = CoreError;
+
+/// A bidirectional frame stream used by authentication and transfer engines.
+#[async_trait]
+pub trait FrameConnection: Send {
+    /// Sends one protocol frame.
+    async fn send_frame(&mut self, frame: Frame) -> Result<(), ProtocolError>;
+
+    /// Sends one chunk frame, allowing transports to avoid copying payload bytes.
+    async fn send_chunk(
+        &mut self,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ProtocolError>;
+
+    /// Receives one protocol frame.
+    async fn recv_frame(&mut self) -> Result<Frame, ProtocolError>;
+
+    /// Exports 32 bytes of transport channel-binding material.
+    fn export_keying_material(
+        &self,
+        _label: &[u8],
+        _context: &[u8],
+    ) -> Result<[u8; 32], ProtocolError> {
+        Err(CoreError::Transport(
+            "transport channel binding is unavailable".into(),
+        ))
+    }
+
+    /// Closes the underlying transport connection.
+    async fn close(&mut self) -> Result<(), ProtocolError>;
+}
+
+/// Direct addressing data needed to dial an iroh endpoint without a relay.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
+pub struct PeerDescriptor {
+    /// iroh endpoint ID, encoded as z-base-32.
+    pub endpoint_id: String,
+    /// Direct socket addresses for this endpoint.
+    pub direct_addrs: Vec<SocketAddr>,
+}
+
+impl PeerDescriptor {
+    /// Creates a direct peer descriptor.
+    pub fn new(
+        endpoint_id: impl Into<String>,
+        direct_addrs: Vec<SocketAddr>,
+    ) -> Result<Self, ProtocolError> {
+        let descriptor = Self {
+            endpoint_id: endpoint_id.into(),
+            direct_addrs,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Validates the app-level constraints independent of iroh parsing.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.endpoint_id.trim().is_empty() {
+            return Err(CoreError::InvalidInput("endpoint id is empty".into()));
+        }
+        if self.direct_addrs.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "peer descriptor has no direct addresses".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parses the compact manual form: `<endpoint-id>@<addr>[,<addr>...]`.
+    pub fn parse_compact(input: &str) -> Result<Self, ProtocolError> {
+        input.parse()
+    }
+}
+
+impl fmt::Display for PeerDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}@", self.endpoint_id)?;
+        for (index, addr) in self.direct_addrs.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(",")?;
+            }
+            write!(formatter, "{addr}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for PeerDescriptor {
+    type Err = ProtocolError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (endpoint_id, addrs) = input
+            .trim()
+            .split_once('@')
+            .ok_or_else(|| CoreError::InvalidInput("peer descriptor must contain '@'".into()))?;
+        let endpoint_id = endpoint_id.trim();
+        let direct_addrs = addrs
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|addr| {
+                addr.parse::<SocketAddr>().map_err(|_| {
+                    CoreError::InvalidInput(format!("malformed peer address {addr:?}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(endpoint_id, direct_addrs)
+    }
+}
 
 /// A single wire message exchanged between sender and receiver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -61,6 +61,10 @@ name. If a transfer is interrupted, restart both sides with the same source file
 and output directory. The receiver resumes from its `.part` file and JSON sidecar
 state, then verifies the whole-file BLAKE3 hash before the final rename.
 
+For LAN transfers, prefer a `1M` chunk size. Larger chunks such as `4M` can be
+slower on typical local networks because each chunk is filled and flushed as one
+sequential protocol frame.
+
 See [docs/auth.md](docs/auth.md) for the pairing model and SPAKE2 prototype
 security caveat.
 
