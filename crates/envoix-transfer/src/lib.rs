@@ -46,6 +46,8 @@ pub enum TransferEvent {
         file_name: String,
         /// Total expected plaintext bytes.
         total_bytes: u64,
+        /// Plaintext bytes already present before this attempt started.
+        bytes_resumed: u64,
     },
     /// More plaintext bytes have been sent or persisted.
     Progress {
@@ -215,6 +217,7 @@ impl TransferEngine {
             direction: TransferDirection::Send,
             file_name: file_name.clone(),
             total_bytes,
+            bytes_resumed: start_offset,
         });
 
         file.seek(SeekFrom::Start(start_offset)).await?;
@@ -315,6 +318,7 @@ impl TransferEngine {
             direction: TransferDirection::Receive,
             file_name: header.file_name.clone(),
             total_bytes: header.file_size,
+            bytes_resumed: prepared.state.bytes_received,
         });
 
         let mut expected_index = prepared.state.next_chunk_index;

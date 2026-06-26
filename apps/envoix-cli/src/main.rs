@@ -372,6 +372,7 @@ struct ProgressState {
     file_name: String,
     direction: TransferDirection,
     total_bytes: u64,
+    bytes_resumed: u64,
     started_at: Instant,
     last_rendered_at: Instant,
 }
@@ -383,16 +384,18 @@ impl EventSink for ConsoleEventSink {
                 direction,
                 file_name,
                 total_bytes,
+                bytes_resumed,
                 ..
             } => {
                 let state = ProgressState {
                     file_name,
                     direction,
                     total_bytes,
+                    bytes_resumed,
                     started_at: Instant::now(),
                     last_rendered_at: Instant::now(),
                 };
-                render_progress_line(&state, 0, false);
+                render_progress_line(&state, bytes_resumed, false);
                 *self.progress.lock().unwrap() = Some(state);
             }
             TransferEvent::Progress {
@@ -534,12 +537,18 @@ fn render_progress_line(state: &ProgressState, bytes_transferred: u64, done: boo
         .checked_div(state.total_bytes)
         .unwrap_or(100);
     let elapsed = state.started_at.elapsed();
+    let bytes_this_attempt = bytes_transferred.saturating_sub(state.bytes_resumed);
     let bytes_per_second = if elapsed.is_zero() {
         0.0
     } else {
-        bytes_transferred as f64 / elapsed.as_secs_f64()
+        bytes_this_attempt as f64 / elapsed.as_secs_f64()
     };
-    let eta = eta(bytes_transferred, state.total_bytes, bytes_per_second);
+    let eta = eta(
+        bytes_transferred,
+        state.total_bytes,
+        bytes_this_attempt,
+        bytes_per_second,
+    );
     let verb = match state.direction {
         TransferDirection::Send => "send",
         TransferDirection::Receive => "recv",
@@ -581,11 +590,16 @@ fn display_file_name(file_name: &str) -> String {
     format!("~{suffix}")
 }
 
-fn eta(bytes_transferred: u64, total_bytes: u64, bytes_per_second: f64) -> String {
+fn eta(
+    bytes_transferred: u64,
+    total_bytes: u64,
+    bytes_this_attempt: u64,
+    bytes_per_second: f64,
+) -> String {
     if bytes_transferred >= total_bytes {
         return "00:00".into();
     }
-    if bytes_transferred == 0 || bytes_per_second <= 0.0 {
+    if bytes_this_attempt == 0 || bytes_per_second <= 0.0 {
         return "--:--".into();
     }
 
