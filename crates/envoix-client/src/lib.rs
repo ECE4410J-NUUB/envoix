@@ -8,11 +8,13 @@ pub use envoix_auth::{PairingConfig, SPAKE2_EXPERIMENTAL_WARNING};
 use envoix_error::CoreError;
 pub use envoix_protocol::PeerDescriptor;
 pub use envoix_session::{
-    EventSink, IdentityConfig, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
+    EventSink, IdentityConfig, NoopEventSink, TransferCancelToken, TransferDirection,
+    TransferEvent, TransferSummary,
 };
 use envoix_session::{
-    SessionConfig, bind_iroh_endpoint_enable_mdns, receive_file_with_bound_peer,
-    receive_with_auth_retries, send_file_enable_mdns, send_file_manual,
+    SessionConfig, bind_iroh_endpoint_enable_mdns, receive_file_with_bound_peer_with_cancel,
+    receive_with_auth_retries_with_cancel, send_file_enable_mdns_with_cancel,
+    send_file_manual_with_cancel,
 };
 use serde::Deserialize;
 
@@ -277,13 +279,25 @@ impl EnvoixClient {
         request: SendFileRequest,
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
+        self.send_file_with_cancel(request, events, TransferCancelToken::new())
+            .await
+    }
+
+    /// Sends one file according to `request`, stopping on cancellation.
+    pub async fn send_file_with_cancel(
+        &self,
+        request: SendFileRequest,
+        events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
-        send_file_manual(
+        send_file_manual_with_cancel(
             request.peer,
             request.file_path,
             request.resume,
             self.session_config(),
             events,
+            cancel,
         )
         .await
     }
@@ -299,17 +313,35 @@ impl EnvoixClient {
         client_events: Box<dyn ClientEventSink>,
         transfer_events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
+        self.send_with_cancel(
+            request,
+            client_events,
+            transfer_events,
+            TransferCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Sends one file using automatic connection setup, stopping on cancellation.
+    pub async fn send_with_cancel(
+        &self,
+        request: SendRequest,
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
         match request.connection_policy {
             ConnectionPolicy::EnableMdns => {
                 client_events.on_event(ClientEvent::EndpointStarted {
                     direction: TransferDirection::Send,
                 });
-                send_file_enable_mdns(
+                send_file_enable_mdns_with_cancel(
                     request.file_path,
                     request.resume,
                     self.session_config(),
                     transfer_events,
+                    cancel,
                 )
                 .await
             }
@@ -326,13 +358,34 @@ impl EnvoixClient {
     where
         F: FnOnce(PeerDescriptor) + Send,
     {
+        self.receive_file_with_bound_peer_with_cancel(
+            request,
+            events,
+            on_bound_peer,
+            TransferCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Receives one file and reports the bound address, stopping on cancellation.
+    pub async fn receive_file_with_bound_peer_with_cancel<F>(
+        &self,
+        request: ReceiveFileRequest,
+        events: Box<dyn EventSink>,
+        on_bound_peer: F,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(PeerDescriptor) + Send,
+    {
         self.validate_config()?;
-        receive_file_with_bound_peer(
+        receive_file_with_bound_peer_with_cancel(
             request.listen_addr,
             request.output_dir,
             self.session_config(),
             events,
             on_bound_peer,
+            cancel,
         )
         .await
     }
@@ -355,6 +408,28 @@ impl EnvoixClient {
     where
         F: FnOnce(PeerDescriptor) + Send,
     {
+        self.receive_with_cancel(
+            request,
+            client_events,
+            transfer_events,
+            on_bound,
+            TransferCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Receives one file using automatic setup, stopping on cancellation.
+    pub async fn receive_with_cancel<F>(
+        &self,
+        request: ReceiveRequest,
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
+        on_bound: F,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(PeerDescriptor) + Send,
+    {
         self.validate_config()?;
         client_events.on_event(ClientEvent::EndpointStarted {
             direction: TransferDirection::Receive,
@@ -364,11 +439,12 @@ impl EnvoixClient {
         let peer = endpoint.peer_descriptor()?;
         client_events.on_event(ClientEvent::DirectAddressAvailable { peer: peer.clone() });
         on_bound(peer);
-        receive_with_auth_retries(
+        receive_with_auth_retries_with_cancel(
             endpoint,
             request.output_dir,
             self.session_config(),
             transfer_events,
+            cancel,
         )
         .await
     }

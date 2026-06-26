@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,7 +10,8 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
     ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, IdentityConfig,
     PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING,
-    SendFileRequest, SendRequest, TransferDirection, TransferEvent,
+    SendFileRequest, SendRequest, TransferCancelToken, TransferDirection, TransferEvent,
+    TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
@@ -150,16 +152,22 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     resolved.peer,
                     format_duration(Duration::from_secs(resolved.expires_in))
                 );
-                client_for_token(resolved.token, config.as_deref(), identity_config(identity))?
-                    .send_file(
+                let client =
+                    client_for_token(resolved.token, config.as_deref(), identity_config(identity))?;
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.send_file_with_cancel(
                         SendFileRequest {
                             peer: resolved.peer,
                             file_path: file,
                             resume,
                         },
                         Box::new(ConsoleEventSink::new()),
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             } else if enable_mdns {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
@@ -167,8 +175,10 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     ));
                 }
                 let token = token.expect("clap ensures --token is present with --enable-mdns");
-                client_for_token(token, config.as_deref(), identity_config(identity))?
-                    .send(
+                let client = client_for_token(token, config.as_deref(), identity_config(identity))?;
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.send_with_cancel(
                         SendRequest {
                             file_path: file,
                             connection_policy: ConnectionPolicy::EnableMdns,
@@ -176,8 +186,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         },
                         Box::new(ConsoleClientEventSink),
                         Box::new(ConsoleEventSink::new()),
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
@@ -185,16 +198,21 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     )
                 })?;
                 let token = token.expect("clap ensures --token is present without --invite");
-                client_for_token(token, config.as_deref(), identity_config(identity))?
-                    .send_file(
+                let client = client_for_token(token, config.as_deref(), identity_config(identity))?;
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.send_file_with_cancel(
                         SendFileRequest {
                             peer,
                             file_path: file,
                             resume,
                         },
                         Box::new(ConsoleEventSink::new()),
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             };
             eprintln!(
                 "sent {} bytes from {}",
@@ -218,8 +236,9 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         let token_for_print = t.clone();
                         let client = client_for_token(t, config.as_deref(), identity)?;
                         eprintln!("waiting for sender...");
-                        client
-                            .receive(
+                        let cancel = TransferCancelToken::new();
+                        run_interruptible(
+                            client.receive_with_cancel(
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
@@ -231,8 +250,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                     eprintln!("peer: {peer}");
                                     eprintln!("token: {token_for_print}");
                                 },
-                            )
-                            .await?
+                                cancel.clone(),
+                            ),
+                            cancel,
+                        )
+                        .await?
                     }
                     None => {
                         // Auto-generate token and print QR invite for the sender.
@@ -244,8 +266,9 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         let token_for_qr = generated.clone();
                         let client = client_for_token(generated, config.as_deref(), identity)?;
                         eprintln!("waiting for sender...");
-                        client
-                            .receive(
+                        let cancel = TransferCancelToken::new();
+                        run_interruptible(
+                            client.receive_with_cancel(
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
@@ -266,15 +289,20 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                         eprintln!("{qr}");
                                     }
                                 },
-                            )
-                            .await?
+                                cancel.clone(),
+                            ),
+                            cancel,
+                        )
+                        .await?
                     }
                 }
             } else {
                 let token = token.expect("clap requires --token unless --enable-mdns is set");
                 let token_for_print = token.clone();
-                client_for_token(token, config.as_deref(), identity)?
-                    .receive_file_with_bound_peer(
+                let client = client_for_token(token, config.as_deref(), identity)?;
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.receive_file_with_bound_peer_with_cancel(
                         ReceiveFileRequest {
                             listen_addr: receive_addr_for(ip_version),
                             output_dir: output,
@@ -284,8 +312,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             eprintln!("peer: {peer}");
                             eprintln!("token: {token_for_print}");
                         },
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             };
             eprintln!(
                 "received {} bytes into {}",
@@ -295,6 +326,30 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     }
 
     Ok(())
+}
+
+async fn run_interruptible<F>(
+    operation: F,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, envoix_client::PublicError>
+where
+    F: Future<Output = Result<TransferSummary, envoix_client::PublicError>>,
+{
+    tokio::pin!(operation);
+
+    tokio::select! {
+        result = &mut operation => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| {
+                envoix_client::PublicError::Transfer(format!(
+                    "failed to listen for interrupt signal: {error}"
+                ))
+            })?;
+            eprintln!("interrupt received; notifying peer and shutting down...");
+            cancel.cancel();
+            operation.await
+        }
+    }
 }
 
 fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {

@@ -13,7 +13,8 @@ use envoix_error::CoreError;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, TransferEvent, TransferSummary,
+    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, TransferCancelToken, TransferEvent,
+    TransferSummary, USER_INTERRUPT_MESSAGE,
 };
 pub use envoix_types::TransferDirection;
 use iroh::{Endpoint, EndpointAddr};
@@ -74,6 +75,19 @@ pub async fn send_file_manual(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
+    let cancel = TransferCancelToken::new();
+    send_file_manual_with_cancel(peer, file_path, resume, config, events, cancel).await
+}
+
+/// Sends one file to a manually supplied peer descriptor, stopping on cancellation.
+pub async fn send_file_manual_with_cancel(
+    peer: PeerDescriptor,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
     let local_endpoint = build_dial_endpoint(&config.identity).await?;
     let mut connection = dial(local_endpoint.clone(), &peer).await?;
     let engine = TransferEngine::new(config.chunk_size);
@@ -84,7 +98,7 @@ pub async fn send_file_manual(
         return Err(error);
     }
     let result = engine
-        .send_file(&mut connection, file_path, resume, events.as_ref())
+        .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
     let _ = connection.close().await;
     local_endpoint.close().await;
@@ -97,6 +111,18 @@ pub async fn send_file_enable_mdns(
     resume: bool,
     config: SessionConfig,
     events: Box<dyn EventSink>,
+) -> Result<TransferSummary, SessionError> {
+    let cancel = TransferCancelToken::new();
+    send_file_enable_mdns_with_cancel(file_path, resume, config, events, cancel).await
+}
+
+/// Sends one file to the first mDNS-discovered iroh endpoint, stopping on cancellation.
+pub async fn send_file_enable_mdns_with_cancel(
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint = build_dial_endpoint(&config.identity).await?;
     let mdns = MdnsAddressLookup::builder()
@@ -118,15 +144,22 @@ pub async fn send_file_enable_mdns(
             break;
         }
 
-        let Some(event) = tokio::time::timeout_at(deadline, discoveries.next())
-            .await
-            .map_err(|_| {
-                CoreError::Discovery(format!(
-                    "no iroh mDNS peers discovered within {} seconds",
-                    MDNS_DISCOVERY_TIMEOUT.as_secs()
-                ))
-            })?
-        else {
+        let event = tokio::select! {
+            result = tokio::time::timeout_at(deadline, discoveries.next()) => {
+                result.map_err(|_| {
+                    CoreError::Discovery(format!(
+                        "no iroh mDNS peers discovered within {} seconds",
+                        MDNS_DISCOVERY_TIMEOUT.as_secs()
+                    ))
+                })?
+            }
+            () = cancel.cancelled() => {
+                local_endpoint.close().await;
+                return Err(interrupted_error());
+            }
+        };
+
+        let Some(event) = event else {
             break;
         };
 
@@ -149,6 +182,7 @@ pub async fn send_file_enable_mdns(
             resume,
             config.clone(),
             events.as_ref(),
+            &cancel,
         )
         .await
         {
@@ -161,6 +195,10 @@ pub async fn send_file_enable_mdns(
                     direction: TransferDirection::Send,
                     reason: error.to_string(),
                 });
+                if cancel.is_cancelled() {
+                    local_endpoint.close().await;
+                    return Err(error);
+                }
                 last_error = Some(error);
             }
         }
@@ -186,10 +224,34 @@ pub async fn receive_file_with_bound_peer<F>(
 where
     F: FnOnce(PeerDescriptor) + Send,
 {
+    let cancel = TransferCancelToken::new();
+    receive_file_with_bound_peer_with_cancel(
+        listen_addr,
+        output_dir,
+        config,
+        events,
+        on_bound_peer,
+        cancel,
+    )
+    .await
+}
+
+/// Receives one file and stops while waiting or transferring if cancelled.
+pub async fn receive_file_with_bound_peer_with_cancel<F>(
+    listen_addr: SocketAddr,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    on_bound_peer: F,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError>
+where
+    F: FnOnce(PeerDescriptor) + Send,
+{
     let bound_endpoint = bind_iroh_endpoint(listen_addr, &config.identity).await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
-    receive_one_authenticated(bound_endpoint, output_dir, config, events).await
+    receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
 }
 
 /// Receives one file on an already-bound endpoint.
@@ -199,7 +261,25 @@ pub async fn receive_one_authenticated(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection = bound_endpoint.accept().await?;
+    let cancel = TransferCancelToken::new();
+    receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
+}
+
+/// Receives one file on an already-bound endpoint, stopping on cancellation.
+pub async fn receive_one_authenticated_with_cancel(
+    bound_endpoint: BoundEndpoint,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
+    let mut connection = match accept_or_cancel(&bound_endpoint, &cancel).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            bound_endpoint.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let engine = TransferEngine::new(config.chunk_size);
 
     if let Err(error) = authenticate_receiver(&mut connection, &config.pairing).await {
@@ -208,7 +288,7 @@ pub async fn receive_one_authenticated(
         return Err(error);
     }
     let result = engine
-        .receive_file(&mut connection, output_dir, events.as_ref())
+        .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
     let _ = connection.close().await;
     bound_endpoint.local_endpoint.close().await;
@@ -222,10 +302,29 @@ pub async fn receive_with_auth_retries(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection = accept_authenticated_with_retries(&bound_endpoint, &config).await?;
+    let cancel = TransferCancelToken::new();
+    receive_with_auth_retries_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
+}
+
+/// Receives one file with pairing retries, stopping on cancellation.
+pub async fn receive_with_auth_retries_with_cancel(
+    bound_endpoint: BoundEndpoint,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
+    let mut connection =
+        match accept_authenticated_with_retries(&bound_endpoint, &config, &cancel).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                bound_endpoint.local_endpoint.close().await;
+                return Err(error);
+            }
+        };
     let engine = TransferEngine::new(config.chunk_size);
     let result = engine
-        .receive_file(&mut connection, output_dir, events.as_ref())
+        .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
     let _ = connection.close().await;
     bound_endpoint.local_endpoint.close().await;
@@ -235,10 +334,11 @@ pub async fn receive_with_auth_retries(
 async fn accept_authenticated_with_retries(
     bound_endpoint: &BoundEndpoint,
     config: &SessionConfig,
+    cancel: &TransferCancelToken,
 ) -> Result<IrohFrameConnection, SessionError> {
     let mut failures = 0_u32;
     loop {
-        let mut connection = bound_endpoint.accept().await?;
+        let mut connection = accept_or_cancel(bound_endpoint, cancel).await?;
         match authenticate_receiver(&mut connection, &config.pairing).await {
             Ok(()) => return Ok(connection),
             Err(_) => {
@@ -289,6 +389,7 @@ async fn send_file_to_peer_addr(
     resume: bool,
     config: SessionConfig,
     events: &dyn EventSink,
+    cancel: &TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
     let engine = TransferEngine::new(config.chunk_size);
@@ -297,8 +398,22 @@ async fn send_file_to_peer_addr(
         return Err(error);
     }
     let result = engine
-        .send_file(&mut connection, file_path, resume, events)
+        .send_file_with_cancel(&mut connection, file_path, resume, events, cancel)
         .await;
     let _ = connection.close().await;
     result
+}
+
+async fn accept_or_cancel(
+    bound_endpoint: &BoundEndpoint,
+    cancel: &TransferCancelToken,
+) -> Result<IrohFrameConnection, SessionError> {
+    tokio::select! {
+        result = bound_endpoint.accept() => result,
+        () = cancel.cancelled() => Err(interrupted_error()),
+    }
+}
+
+fn interrupted_error() -> SessionError {
+    CoreError::Transfer(USER_INTERRUPT_MESSAGE.into())
 }
