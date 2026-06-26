@@ -431,6 +431,14 @@ impl EventSink for ConsoleEventSink {
                     eprintln!("completed {bytes_transferred} bytes");
                 }
             }
+            TransferEvent::Failed { direction, reason } => {
+                let state = self.progress.lock().unwrap().take();
+                if let Some(state) = state {
+                    render_transfer_failure_line(&state, &reason);
+                } else {
+                    render_attempt_failure_line(direction, &reason);
+                }
+            }
         }
     }
 }
@@ -497,6 +505,27 @@ fn render_hash_line(direction: TransferDirection, file_name: &str, bytes_hashed:
         let _ = write!(stderr, "\r{line:<80}");
         let _ = stderr.flush();
     }
+}
+
+fn render_transfer_failure_line(state: &ProgressState, reason: &str) {
+    let verb = match state.direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    let line = format!(
+        "{:<24} failed: {}",
+        format!("{verb} {}", display_file_name(&state.file_name)),
+        reason
+    );
+    eprintln!("\r{line:<80}");
+}
+
+fn render_attempt_failure_line(direction: TransferDirection, reason: &str) {
+    let verb = match direction {
+        TransferDirection::Send => "send",
+        TransferDirection::Receive => "recv",
+    };
+    eprintln!("{verb} attempt failed: {reason}");
 }
 
 fn render_progress_line(state: &ProgressState, bytes_transferred: u64, done: bool) {

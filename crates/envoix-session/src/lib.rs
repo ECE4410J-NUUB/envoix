@@ -111,7 +111,6 @@ pub async fn send_file_enable_mdns(
     let mut discoveries = mdns.subscribe().await;
     let deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     let mut last_error = None;
-    let mut events = events;
 
     loop {
         let now = tokio::time::Instant::now();
@@ -149,7 +148,7 @@ pub async fn send_file_enable_mdns(
             file_path.clone(),
             resume,
             config.clone(),
-            events,
+            events.as_ref(),
         )
         .await
         {
@@ -158,8 +157,11 @@ pub async fn send_file_enable_mdns(
                 return Ok(summary);
             }
             Err(error) => {
+                events.on_event(TransferEvent::Failed {
+                    direction: TransferDirection::Send,
+                    reason: error.to_string(),
+                });
                 last_error = Some(error);
-                events = Box::new(NoopEventSink);
             }
         }
     }
@@ -286,7 +288,7 @@ async fn send_file_to_peer_addr(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
-    events: Box<dyn EventSink>,
+    events: &dyn EventSink,
 ) -> Result<TransferSummary, SessionError> {
     let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
     let engine = TransferEngine::new(config.chunk_size);
@@ -295,7 +297,7 @@ async fn send_file_to_peer_addr(
         return Err(error);
     }
     let result = engine
-        .send_file(&mut connection, file_path, resume, events.as_ref())
+        .send_file(&mut connection, file_path, resume, events)
         .await;
     let _ = connection.close().await;
     result

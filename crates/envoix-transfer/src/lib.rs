@@ -85,6 +85,13 @@ pub enum TransferEvent {
         /// Final plaintext byte count.
         bytes_transferred: u64,
     },
+    /// The current transfer attempt failed before completion.
+    Failed {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 /// Summary returned after a successful send or receive operation.
