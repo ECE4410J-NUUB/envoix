@@ -134,6 +134,7 @@ impl LocalFileStorage {
             return Ok(None);
         }
 
+        let mut best_state = None;
         let mut entries = fs::read_dir(output_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -165,11 +166,19 @@ impl LocalFileStorage {
                 && state.file_size == file_size
                 && state.chunk_size == chunk_size
             {
-                return Ok(Some(state));
+                let should_replace =
+                    best_state
+                        .as_ref()
+                        .is_none_or(|best: &TransferResumeState| {
+                            state.bytes_received > best.bytes_received
+                        });
+                if should_replace {
+                    best_state = Some(state);
+                }
             }
         }
 
-        Ok(None)
+        Ok(best_state)
     }
 
     /// Writes or replaces the JSON sidecar state for a resumable transfer.
@@ -448,6 +457,45 @@ mod tests {
                 .await
                 .unwrap(),
             Some(state)
+        );
+    }
+
+    #[tokio::test]
+    async fn find_resume_state_prefers_most_advanced_sidecar() {
+        let dir = unique_test_dir();
+        let stale = TransferResumeState {
+            transfer_id: TransferId::new("transfer-stale"),
+            file_name: "movie.mkv".into(),
+            file_size: 1024,
+            chunk_size: 64,
+            bytes_received: 0,
+            next_chunk_index: 0,
+            hash_bytes: 0,
+            hash_checkpoint: None,
+        };
+        let advanced = TransferResumeState {
+            transfer_id: TransferId::new("transfer-advanced"),
+            file_name: "movie.mkv".into(),
+            file_size: 1024,
+            chunk_size: 64,
+            bytes_received: 512,
+            next_chunk_index: 8,
+            hash_bytes: 512,
+            hash_checkpoint: Some("abc123".into()),
+        };
+
+        LocalFileStorage::write_resume_state(&dir, &stale)
+            .await
+            .unwrap();
+        LocalFileStorage::write_resume_state(&dir, &advanced)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            LocalFileStorage::find_resume_state(&dir, "movie.mkv", 1024, 64)
+                .await
+                .unwrap(),
+            Some(advanced)
         );
     }
 

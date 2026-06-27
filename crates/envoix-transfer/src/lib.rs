@@ -2,19 +2,26 @@
 
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use envoix_error::CoreError;
 use envoix_protocol::{
-    Chunk, Complete, CompleteAck, FileHeader, Frame, Hello, Ready, ResumeStatus,
+    Chunk, Complete, CompleteAck, ErrorFrame, FileHeader, Frame, FrameConnection, Hello, Ready,
+    ResumeStatus,
 };
 use envoix_storage::{LocalFileStorage, TransferResumeState};
-use envoix_transport::FrameConnection;
 use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Notify;
 
 /// Default sequential chunk size used by clients that do not override it.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
+/// Protocol error text sent when a local user interrupts a transfer.
+pub const USER_INTERRUPT_MESSAGE: &str = "transfer interrupted by user";
 const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
@@ -34,6 +41,48 @@ impl EventSink for NoopEventSink {
     fn on_event(&self, _event: TransferEvent) {}
 }
 
+/// Shared cancellation flag used for graceful user interrupts.
+#[derive(Clone, Debug, Default)]
+pub struct TransferCancelToken {
+    inner: Arc<CancelInner>,
+}
+
+#[derive(Debug, Default)]
+struct CancelInner {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl TransferCancelToken {
+    /// Creates a token in the non-cancelled state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests cancellation and wakes waiters.
+    pub fn cancel(&self) {
+        if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
+            self.inner.notify.notify_waiters();
+        }
+    }
+
+    /// Returns whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Waits until cancellation is requested.
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// User-visible transfer lifecycle event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransferEvent {
@@ -47,6 +96,8 @@ pub enum TransferEvent {
         file_name: String,
         /// Total expected plaintext bytes.
         total_bytes: u64,
+        /// Plaintext bytes already present before this attempt started.
+        bytes_resumed: u64,
     },
     /// More plaintext bytes have been sent or persisted.
     Progress {
@@ -86,6 +137,13 @@ pub enum TransferEvent {
         /// Final plaintext byte count.
         bytes_transferred: u64,
     },
+    /// The current transfer attempt failed before completion.
+    Failed {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 /// Summary returned after a successful send or receive operation.
@@ -119,6 +177,20 @@ impl TransferEngine {
         resume: bool,
         events: &dyn EventSink,
     ) -> Result<TransferSummary, TransferError> {
+        let cancel = TransferCancelToken::new();
+        self.send_file_with_cancel(connection, path, resume, events, &cancel)
+            .await
+    }
+
+    /// Sends one file and notifies the peer if `cancel` is triggered.
+    pub async fn send_file_with_cancel(
+        &self,
+        connection: &mut dyn FrameConnection,
+        path: PathBuf,
+        resume: bool,
+        events: &dyn EventSink,
+        cancel: &TransferCancelToken,
+    ) -> Result<TransferSummary, TransferError> {
         if self.chunk_size == 0 {
             return Err(CoreError::InvalidInput(
                 "chunk size must be positive".into(),
@@ -147,7 +219,7 @@ impl TransferEngine {
                 role: PeerRole::Sender,
             }))
             .await?;
-        expect_ready(connection.recv_frame().await?)?;
+        expect_ready(recv_frame_or_cancel(connection, cancel).await?)?;
 
         connection
             .send_frame(Frame::FileHeader(FileHeader {
@@ -159,7 +231,7 @@ impl TransferEngine {
             }))
             .await?;
         let resume_status = expect_resume_status(
-            connection.recv_frame().await?,
+            recv_frame_or_cancel(connection, cancel).await?,
             &transfer_id,
             self.chunk_size,
         )?;
@@ -182,13 +254,20 @@ impl TransferEngine {
                 file_name: file_name.clone(),
                 bytes_to_hash: resume_status.bytes_received,
             });
-            hash_file_prefix(
+            if let Err(error) = hash_file_prefix(
                 &mut file,
                 &mut hasher,
                 resume_status.bytes_received,
                 self.chunk_size,
+                cancel,
             )
-            .await?;
+            .await
+            {
+                if cancel.is_cancelled() {
+                    notify_interrupted(connection).await;
+                }
+                return Err(error);
+            }
             let prefix_hash = hasher.finalize().to_hex().to_string();
             events.on_event(TransferEvent::HashCompleted {
                 transfer_id: transfer_id.clone(),
@@ -209,6 +288,7 @@ impl TransferEngine {
             direction: TransferDirection::Send,
             file_name: file_name.clone(),
             total_bytes,
+            bytes_resumed: start_offset,
         });
 
         file.seek(SeekFrom::Start(start_offset)).await?;
@@ -217,15 +297,19 @@ impl TransferEngine {
         let mut offset = start_offset;
 
         loop {
-            let bytes_read = file.read(&mut buffer).await?;
+            check_cancelled(connection, cancel).await?;
+            let bytes_read = read_full_chunk(&mut file, &mut buffer).await?;
             if bytes_read == 0 {
                 break;
             }
 
             hasher.update(&buffer[..bytes_read]);
-            connection
+            if let Err(error) = connection
                 .send_chunk(&transfer_id, index, offset, &buffer[..bytes_read])
-                .await?;
+                .await
+            {
+                return Err(peer_closed_error(error));
+            }
 
             offset += bytes_read as u64;
             index += 1;
@@ -248,18 +332,11 @@ impl TransferEngine {
                 transfer_id: transfer_id.clone(),
                 file_hash: hasher.finalize().to_hex().to_string(),
             }))
-            .await?;
-        match connection.recv_frame().await {
-            Ok(frame) => expect_complete_ack(frame, &transfer_id).map_err(|error| {
-                CoreError::Transfer(format!(
-                    "transfer interrupted before completion acknowledgement: {error}"
-                ))
-            })?,
-            Err(error) => {
-                return Err(CoreError::Transfer(format!(
-                    "transfer interrupted before completion acknowledgement: {error}"
-                )));
-            }
+            .await
+            .map_err(peer_closed_error)?;
+        match recv_frame_or_cancel(connection, cancel).await {
+            Ok(frame) => expect_complete_ack(frame, &transfer_id)?,
+            Err(error) => return Err(peer_closed_error(error)),
         }
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
@@ -280,10 +357,23 @@ impl TransferEngine {
         output_dir: PathBuf,
         events: &dyn EventSink,
     ) -> Result<TransferSummary, TransferError> {
-        expect_sender_hello(connection.recv_frame().await?)?;
+        let cancel = TransferCancelToken::new();
+        self.receive_file_with_cancel(connection, output_dir, events, &cancel)
+            .await
+    }
+
+    /// Receives one file and notifies the peer if `cancel` is triggered.
+    pub async fn receive_file_with_cancel(
+        &self,
+        connection: &mut dyn FrameConnection,
+        output_dir: PathBuf,
+        events: &dyn EventSink,
+        cancel: &TransferCancelToken,
+    ) -> Result<TransferSummary, TransferError> {
+        expect_sender_hello(recv_frame_or_cancel(connection, cancel).await?)?;
         connection.send_frame(Frame::Ready(Ready)).await?;
 
-        let header = expect_file_header(connection.recv_frame().await?)?;
+        let header = expect_file_header(recv_frame_or_cancel(connection, cancel).await?)?;
         validate_header(&header, self.chunk_size)?;
         let final_path = output_dir.join(&header.file_name);
         if fs::try_exists(&final_path).await? {
@@ -309,6 +399,7 @@ impl TransferEngine {
             direction: TransferDirection::Receive,
             file_name: header.file_name.clone(),
             total_bytes: header.file_size,
+            bytes_resumed: prepared.state.bytes_received,
         });
 
         let mut expected_index = prepared.state.next_chunk_index;
@@ -321,7 +412,7 @@ impl TransferEngine {
         });
 
         loop {
-            let frame = match connection.recv_frame().await {
+            let frame = match recv_frame_or_cancel(connection, cancel).await {
                 Ok(frame) => frame,
                 Err(error) => {
                     file.flush().await?;
@@ -425,6 +516,7 @@ impl TransferEngine {
                         bytes_transferred: expected_offset,
                     });
                 }
+                Frame::Error(error) => return Err(peer_error(error)),
                 frame => {
                     return Err(CoreError::Transfer(format!(
                         "unexpected frame while receiving chunks: {frame:?}"
@@ -438,6 +530,7 @@ impl TransferEngine {
 fn expect_ready(frame: Frame) -> Result<(), TransferError> {
     match frame {
         Frame::Ready(_) => Ok(()),
+        Frame::Error(error) => Err(peer_error(error)),
         frame => Err(CoreError::Transfer(format!(
             "expected Ready, got {frame:?}"
         ))),
@@ -450,6 +543,7 @@ fn expect_sender_hello(frame: Frame) -> Result<(), TransferError> {
             protocol_version: PROTOCOL_VERSION,
             role: PeerRole::Sender,
         }) => Ok(()),
+        Frame::Error(error) => Err(peer_error(error)),
         frame => Err(CoreError::Transfer(format!(
             "expected sender Hello, got {frame:?}"
         ))),
@@ -459,6 +553,7 @@ fn expect_sender_hello(frame: Frame) -> Result<(), TransferError> {
 fn expect_file_header(frame: Frame) -> Result<FileHeader, TransferError> {
     match frame {
         Frame::FileHeader(header) => Ok(header),
+        Frame::Error(error) => Err(peer_error(error)),
         frame => Err(CoreError::Transfer(format!(
             "expected FileHeader, got {frame:?}"
         ))),
@@ -478,6 +573,7 @@ fn expect_resume_status(
         {
             Ok(status)
         }
+        Frame::Error(error) => Err(peer_error(error)),
         frame => Err(CoreError::Transfer(format!(
             "expected valid ResumeStatus for {transfer_id}, got {frame:?}"
         ))),
@@ -487,9 +583,63 @@ fn expect_resume_status(
 fn expect_complete_ack(frame: Frame, transfer_id: &TransferId) -> Result<(), TransferError> {
     match frame {
         Frame::CompleteAck(ack) if &ack.transfer_id == transfer_id => Ok(()),
+        Frame::Error(error) => Err(peer_error(error)),
         frame => Err(CoreError::Transfer(format!(
             "expected CompleteAck for {transfer_id}, got {frame:?}"
         ))),
+    }
+}
+
+async fn recv_frame_or_cancel(
+    connection: &mut dyn FrameConnection,
+    cancel: &TransferCancelToken,
+) -> Result<Frame, TransferError> {
+    tokio::select! {
+        frame = connection.recv_frame() => frame,
+        () = cancel.cancelled() => {
+            notify_interrupted(connection).await;
+            Err(interrupted_error())
+        }
+    }
+}
+
+async fn check_cancelled(
+    connection: &mut dyn FrameConnection,
+    cancel: &TransferCancelToken,
+) -> Result<(), TransferError> {
+    if cancel.is_cancelled() {
+        notify_interrupted(connection).await;
+        return Err(interrupted_error());
+    }
+
+    Ok(())
+}
+
+async fn notify_interrupted(connection: &mut dyn FrameConnection) {
+    let _ = connection
+        .send_frame(Frame::Error(ErrorFrame {
+            message: USER_INTERRUPT_MESSAGE.into(),
+        }))
+        .await;
+}
+
+fn interrupted_error() -> TransferError {
+    CoreError::Transfer(USER_INTERRUPT_MESSAGE.into())
+}
+
+fn peer_error(error: ErrorFrame) -> TransferError {
+    if error.message == USER_INTERRUPT_MESSAGE {
+        return CoreError::Transfer("transfer interrupted by peer".into());
+    }
+    CoreError::Transfer(format!("peer reported error: {}", error.message))
+}
+
+fn peer_closed_error(error: TransferError) -> TransferError {
+    match error {
+        CoreError::Io(_) | CoreError::Transport(_) => {
+            CoreError::Transfer("connection closed by peer".into())
+        }
+        error => error,
     }
 }
 
@@ -620,11 +770,27 @@ async fn prepare_existing_resume_state(
     header: &FileHeader,
     mut state: TransferResumeState,
 ) -> Result<Option<TransferResumeState>, TransferError> {
-    if state.bytes_received > state.file_size
-        || state.next_chunk_index != next_chunk_index(state.bytes_received, state.chunk_size)
-    {
+    if state.bytes_received > state.file_size {
+        tracing::warn!(
+            transfer_id = %state.transfer_id,
+            file_name = state.file_name,
+            bytes_received = state.bytes_received,
+            file_size = state.file_size,
+            "resume state records more bytes than file size; deleting it"
+        );
         delete_resume_candidate(output_dir, &state).await?;
         return Ok(None);
+    }
+    let expected_next_chunk_index = next_chunk_index(state.bytes_received, state.chunk_size);
+    if state.next_chunk_index != expected_next_chunk_index {
+        let message = format!(
+            "resume state has inconsistent chunk index: next_chunk_index={} expected_next_chunk_index={} bytes_received={} chunk_size={}",
+            state.next_chunk_index,
+            expected_next_chunk_index,
+            state.bytes_received,
+            state.chunk_size
+        );
+        return Err(CoreError::Transfer(message));
     }
 
     let old_transfer_id = state.transfer_id.clone();
@@ -788,7 +954,8 @@ async fn hash_receive_prefix_with_events(
 ) -> Result<(), TransferError> {
     emit_receive_hash_started(events, header, bytes_to_hash);
     let mut file = fs::File::open(path).await?;
-    hash_file_prefix(&mut file, hasher, bytes_to_hash, buffer_size).await?;
+    let cancel = TransferCancelToken::new();
+    hash_file_prefix(&mut file, hasher, bytes_to_hash, buffer_size, &cancel).await?;
     emit_receive_hash_completed(events, header, bytes_to_hash);
     Ok(())
 }
@@ -860,11 +1027,15 @@ async fn hash_file_prefix(
     hasher: &mut blake3::Hasher,
     bytes_to_hash: u64,
     buffer_size: usize,
+    cancel: &TransferCancelToken,
 ) -> Result<(), TransferError> {
     file.seek(SeekFrom::Start(0)).await?;
     let mut remaining = bytes_to_hash;
     let mut buffer = vec![0_u8; buffer_size.max(1)];
     while remaining > 0 {
+        if cancel.is_cancelled() {
+            return Err(interrupted_error());
+        }
         let limit = remaining.min(buffer.len() as u64) as usize;
         let bytes_read = file.read(&mut buffer[..limit]).await?;
         if bytes_read == 0 {
@@ -877,6 +1048,21 @@ async fn hash_file_prefix(
     }
 
     Ok(())
+}
+
+async fn read_full_chunk<R>(reader: &mut R, buffer: &mut [u8]) -> Result<usize, TransferError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let bytes_read = reader.read(&mut buffer[filled..]).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        filled += bytes_read;
+    }
+    Ok(filled)
 }
 
 fn validate_header(header: &FileHeader, receiver_chunk_size: usize) -> Result<(), TransferError> {
@@ -918,8 +1104,33 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::io;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn read_full_chunk_accumulates_short_reads() {
+        let mut reader = ShortRead {
+            bytes: b"abcdef",
+            position: 0,
+            max_read: 2,
+        };
+        let mut buffer = [0_u8; 5];
+
+        let bytes_read = read_full_chunk(&mut reader, &mut buffer).await.unwrap();
+
+        assert_eq!(bytes_read, 5);
+        assert_eq!(&buffer, b"abcde");
+
+        let mut buffer = [0_u8; 5];
+        let bytes_read = read_full_chunk(&mut reader, &mut buffer).await.unwrap();
+
+        assert_eq!(bytes_read, 1);
+        assert_eq!(&buffer[..bytes_read], b"f");
+    }
 
     #[tokio::test]
     async fn transfers_file_over_frame_connection() {
@@ -1067,6 +1278,138 @@ mod tests {
                 .unwrap(),
             b"resume over two connections"
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_notifies_peer_with_error_frame() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let cancel = TransferCancelToken::new();
+        let receiver_cancel = cancel.clone();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file_with_cancel(
+                        &mut receiver_connection,
+                        output_dir,
+                        &NoopEventSink,
+                        &receiver_cancel,
+                    )
+                    .await
+            }
+        });
+
+        let transfer_id = TransferId::new("cancel-transfer");
+        sender_connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
+        sender_connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: "cancel.txt".into(),
+                file_size: 8,
+                chunk_size: 4,
+                resume_requested: false,
+            }))
+            .await
+            .unwrap();
+        expect_resume_status(
+            sender_connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            4,
+        )
+        .unwrap();
+
+        cancel.cancel();
+
+        let frame = sender_connection.recv_frame().await.unwrap();
+        assert!(matches!(
+            frame,
+            Frame::Error(ErrorFrame { message }) if message == USER_INTERRUPT_MESSAGE
+        ));
+        let error = receiver.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message == USER_INTERRUPT_MESSAGE
+        ));
+    }
+
+    #[tokio::test]
+    async fn sender_reports_explicit_peer_interrupt() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("peer-interrupt.txt");
+        tokio::fs::write(&source_path, b"peer interrupt")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
+            loop {
+                match receiver_connection.recv_frame().await.unwrap() {
+                    Frame::Chunk(_) => {}
+                    Frame::Complete(_) => {
+                        receiver_connection
+                            .send_frame(Frame::Error(ErrorFrame {
+                                message: USER_INTERRUPT_MESSAGE.into(),
+                            }))
+                            .await
+                            .unwrap();
+                        break transfer_id;
+                    }
+                    frame => panic!("unexpected frame: {frame:?}"),
+                }
+            }
+        });
+
+        let error = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .unwrap_err();
+
+        receiver.await.unwrap();
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message == "transfer interrupted by peer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn sender_reports_peer_close_during_send() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("peer-close.txt");
+        tokio::fs::write(&source_path, b"peer closed while sending")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            receive_header_and_resume(&mut receiver_connection).await;
+        });
+
+        let error = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .unwrap_err();
+
+        receiver.await.unwrap();
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message == "connection closed by peer"
+        ));
     }
 
     #[tokio::test]
@@ -1310,7 +1653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inconsistent_resume_state_is_deleted_before_fresh_transfer() {
+    async fn inconsistent_resume_index_fails_explicitly() {
         let root = unique_test_dir();
         let output_dir = root.join("output");
         tokio::fs::create_dir_all(&output_dir).await.unwrap();
@@ -1334,46 +1677,27 @@ mod tests {
                 .unwrap();
         tokio::fs::write(&temp_path, b"abcde").await.unwrap();
 
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receiver = tokio::spawn({
-            let output_dir = output_dir.clone();
-            async move {
-                TransferEngine::new(5)
-                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
-                    .await
-                    .unwrap()
-            }
-        });
+        let header = FileHeader {
+            transfer_id: TransferId::new("new-transfer"),
+            file_name: "bad-state.txt".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            resume_requested: true,
+        };
+        let error = prepare_existing_resume_state(&output_dir, &header, state)
+            .await
+            .unwrap_err();
 
-        manual_send(
-            &mut sender_connection,
-            ManualSend {
-                file_name: "bad-state.txt",
-                source_bytes,
-                chunk_size: 5,
-                resume_requested: true,
-                bytes_to_send: source_bytes,
-                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
-                expected_resume_bytes: 0,
-            },
-        )
-        .await;
-        let receive_summary = receiver.await.unwrap();
-
-        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
-        assert_eq!(
-            tokio::fs::read(output_dir.join("bad-state.txt"))
-                .await
-                .unwrap(),
-            source_bytes
+        assert!(
+            matches!(error, CoreError::Transfer(message) if message.contains("inconsistent chunk index"))
         );
         assert!(
             LocalFileStorage::read_resume_state(&output_dir, "bad-state.txt", &old_transfer_id)
                 .await
                 .unwrap()
-                .is_none()
+                .is_some()
         );
-        assert!(!fs::try_exists(temp_path).await.unwrap());
+        assert!(fs::try_exists(temp_path).await.unwrap());
     }
 
     #[tokio::test]
@@ -1539,6 +1863,16 @@ mod tests {
         }
     }
 
+    async fn receive_header_and_resume(connection: &mut MemoryFrameConnection) -> TransferId {
+        expect_sender_hello(connection.recv_frame().await.unwrap()).unwrap();
+        connection.send_frame(Frame::Ready(Ready)).await.unwrap();
+        let header = expect_file_header(connection.recv_frame().await.unwrap()).unwrap();
+        send_resume_status(connection, &header.transfer_id, 0, 0, String::new())
+            .await
+            .unwrap();
+        header.transfer_id
+    }
+
     async fn assert_no_sidecars(output_dir: &Path) {
         if !fs::try_exists(output_dir).await.unwrap() {
             return;
@@ -1608,6 +1942,32 @@ mod tests {
                 self.stopped.store(true, Ordering::SeqCst);
                 panic!("simulated receiver stop after {bytes_transferred} bytes");
             }
+        }
+    }
+
+    struct ShortRead<'a> {
+        bytes: &'a [u8],
+        position: usize,
+        max_read: usize,
+    }
+
+    impl AsyncRead for ShortRead<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.position >= self.bytes.len() || buffer.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let bytes_to_read = self
+                .max_read
+                .min(self.bytes.len() - self.position)
+                .min(buffer.remaining());
+            let end = self.position + bytes_to_read;
+            buffer.put_slice(&self.bytes[self.position..end]);
+            self.position = end;
+            Poll::Ready(Ok(()))
         }
     }
 

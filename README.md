@@ -31,7 +31,7 @@ exchange or QR scanning — both sides just need the same shared token.
 cargo run -p envoix-cli -- receive --auto --output ./received --token "shared-token-123"
 
 # Terminal 2 — sender (discovers the receiver over mDNS)
-cargo run -p envoix-cli -- send --auto --token "shared-token-123" ./hello.txt
+cargo run -p envoix-cli -- send --enable-mdns --token "shared-token-123" ./hello.txt
 ```
 
 The receiver's QUIC listener binds to `0.0.0.0:0` and advertises its port over
@@ -60,6 +60,10 @@ The receiver writes the file into the output directory using the original file
 name. If a transfer is interrupted, restart both sides with the same source file
 and output directory. The receiver resumes from its `.part` file and JSON sidecar
 state, then verifies the whole-file BLAKE3 hash before the final rename.
+
+For LAN transfers, prefer a `1M` chunk size. Larger chunks such as `4M` can be
+slower on typical local networks because each chunk is filled and flushed as one
+sequential protocol frame.
 
 See [docs/auth.md](docs/auth.md) for the pairing model and SPAKE2 prototype
 security caveat.

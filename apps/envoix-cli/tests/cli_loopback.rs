@@ -6,10 +6,20 @@ use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use envoix_protocol::PeerDescriptor;
 use envoix_qr::QrInvitePayload;
 
 const TOKEN: &str = "abcdefghijkl";
 const WRONG_TOKEN: &str = "mnopqrstuvwx";
+const MDNS_TOKEN: &str = "abcdefghijkl-mdns";
+
+fn test_peer_descriptor() -> PeerDescriptor {
+    PeerDescriptor::new(
+        "peer",
+        vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000)],
+    )
+    .unwrap()
+}
 
 #[test]
 fn cli_transfers_file_over_default_quic_loopback() {
@@ -26,9 +36,9 @@ fn cli_wrong_token_does_not_finalize_or_create_sidecar() {
     let source_path = source_dir.join("secret.txt");
     fs::write(&source_path, b"must not be received").unwrap();
     let mut receiver = spawn_receiver(&output_dir, TOKEN);
-    let listen_addr = loopback_addr_for(receiver.bound_addr);
+    let peer = loopback_peer_for(&receiver.peer);
 
-    let send_output = run_send_with_retries(listen_addr, &source_path, WRONG_TOKEN);
+    let send_output = run_send_with_retries(&peer, &source_path, WRONG_TOKEN);
     assert!(
         !send_output.status.success(),
         "send unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
@@ -150,6 +160,43 @@ fn qr_receiver_keeps_waiting_after_wrong_token() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn cli_enable_mdns_flow() {
+    let root = unique_test_dir();
+    let source_dir = root.join("source");
+    let output_dir = root.join("received");
+    fs::create_dir_all(&source_dir).unwrap();
+
+    let source_path = source_dir.join("mdns.txt");
+    let source_text = b"hello via iroh mdns";
+    fs::write(&source_path, source_text).unwrap();
+
+    let mut receiver = spawn_receiver_enable_mdns(&output_dir, MDNS_TOKEN);
+    let send_output = run_send_enable_mdns(&source_path, MDNS_TOKEN);
+
+    if !send_output.status.success() {
+        let _ = receiver.child.kill();
+        panic!(
+            "send --enable-mdns failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&send_output.stdout),
+            String::from_utf8_lossy(&send_output.stderr)
+        );
+    }
+
+    let receiver_status = wait_for_child(&mut receiver.child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = receiver.child.kill();
+            panic!("receiver did not exit after mDNS transfer");
+        })
+        .unwrap();
+
+    if !receiver_status.success() {
+        panic!("receiver failed\nstderr:\n{}", read_stderr(receiver.child));
+    }
+
+    assert_eq!(fs::read(output_dir.join("mdns.txt")).unwrap(), source_text);
+}
+
 // The next two tests pass a nonexistent file ("ignored.txt") on purpose: invite
 // validation must reject the invite before the sender ever opens the file or
 // dials the peer, so a missing file never matters.
@@ -158,7 +205,7 @@ fn qr_receiver_keeps_waiting_after_wrong_token() {
 fn send_with_expired_invite_fails() {
     let expired = QrInvitePayload::new(
         "abcdefghijkl".into(),
-        vec!["127.0.0.1:9000".into()],
+        test_peer_descriptor(),
         0, // expires_at = 0 → always in the past
     )
     .encode();
@@ -181,11 +228,7 @@ fn send_with_expired_invite_fails() {
 
 #[test]
 fn send_with_version_mismatched_invite_fails() {
-    let mut payload = QrInvitePayload::new(
-        "abcdefghijkl".into(),
-        vec!["127.0.0.1:9000".into()],
-        u64::MAX,
-    );
+    let mut payload = QrInvitePayload::new("abcdefghijkl".into(), test_peer_descriptor(), u64::MAX);
     payload.version = 99;
     let invite = payload.encode();
 
@@ -216,9 +259,9 @@ fn run_cli_loopback() {
     fs::write(&source_path, source_text).unwrap();
 
     let mut receiver = spawn_receiver(&output_dir, TOKEN);
-    let listen_addr = loopback_addr_for(receiver.bound_addr);
+    let peer = loopback_peer_for(&receiver.peer);
 
-    let send_output = run_send_with_retries(listen_addr, &source_path, TOKEN);
+    let send_output = run_send_with_retries(&peer, &source_path, TOKEN);
 
     if !send_output.status.success() {
         let _ = receiver.child.kill();
@@ -245,7 +288,7 @@ fn run_cli_loopback() {
 
 struct SpawnedReceiver {
     child: Child,
-    bound_addr: SocketAddr,
+    peer: PeerDescriptor,
 }
 
 fn spawn_receiver(output_dir: &Path, token: &str) -> SpawnedReceiver {
@@ -261,8 +304,8 @@ fn spawn_receiver(output_dir: &Path, token: &str) -> SpawnedReceiver {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let bound_addr = read_bound_addr(&mut child);
-    SpawnedReceiver { child, bound_addr }
+    let peer = read_bound_peer(&mut child);
+    SpawnedReceiver { child, peer }
 }
 
 struct SpawnedAutoReceiver {
@@ -275,7 +318,7 @@ struct SpawnedAutoReceiver {
 
 fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
     let mut child = Command::new(env!("CARGO_BIN_EXE_envoix"))
-        .args(["receive", "--auto", "--output"])
+        .args(["receive", "--enable-mdns", "--output"])
         .arg(output_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -291,6 +334,24 @@ fn spawn_receiver_auto(output_dir: &Path) -> SpawnedAutoReceiver {
         invite_str,
         _stderr_drain: drain,
     }
+}
+
+fn spawn_receiver_enable_mdns(output_dir: &Path, token: &str) -> SpawnedReceiver {
+    let mut receiver_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
+    receiver_command
+        .arg("receive")
+        .arg("--enable-mdns")
+        .arg("--output")
+        .arg(output_dir)
+        .arg("--token")
+        .arg(token);
+    let mut child = receiver_command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let peer = read_bound_peer(&mut child);
+    SpawnedReceiver { child, peer }
 }
 
 /// Scans `stderr` line by line for the `invite: envoix:...` line, then
@@ -328,8 +389,20 @@ fn run_send_with_invite(invite: &str, source_path: &Path) -> Output {
     )
 }
 
-fn run_send_with_retries(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Output {
-    retry_send(|| run_send_once(listen_addr, source_path, token))
+fn run_send_enable_mdns(source_path: &Path, token: &str) -> Output {
+    run_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_envoix"))
+            .arg("send")
+            .arg("--enable-mdns")
+            .arg("--token")
+            .arg(token)
+            .arg(source_path),
+        Duration::from_secs(15),
+    )
+}
+
+fn run_send_with_retries(peer: &PeerDescriptor, source_path: &Path, token: &str) -> Output {
+    retry_send(|| run_send_once(peer, source_path, token))
 }
 
 /// Runs a send closure, retrying while the receiver's QUIC listener is still
@@ -352,12 +425,12 @@ fn retry_send(mut send: impl FnMut() -> Output) -> Output {
     }
 }
 
-fn run_send_once(listen_addr: SocketAddr, source_path: &Path, token: &str) -> Output {
+fn run_send_once(peer: &PeerDescriptor, source_path: &Path, token: &str) -> Output {
     let mut send_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
     send_command
         .arg("send")
         .arg("--peer")
-        .arg(listen_addr.to_string())
+        .arg(peer.to_string())
         .arg("--token")
         .arg(token);
     send_command.arg(source_path).output().unwrap()
@@ -373,9 +446,9 @@ fn loopback_invite_with_token(invite: &str, token: &str) -> String {
 
 fn loopback_invite_with(invite: &str, token: impl FnOnce(&QrInvitePayload) -> String) -> String {
     let mut payload = QrInvitePayload::decode(invite).unwrap();
-    let port = payload.first_candidate().unwrap().port();
+    let port = payload.peer.direct_addrs[0].port();
     payload.token = token(&payload);
-    payload.candidates = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port).to_string()];
+    payload.peer.direct_addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)];
     payload.encode()
 }
 
@@ -403,11 +476,16 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Output {
     }
 }
 
-fn loopback_addr_for(bound_addr: SocketAddr) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_addr.port())
+fn loopback_peer_for(peer: &PeerDescriptor) -> PeerDescriptor {
+    let port = peer.direct_addrs[0].port();
+    PeerDescriptor::new(
+        peer.endpoint_id.clone(),
+        vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
+    )
+    .unwrap()
 }
 
-fn read_bound_addr(child: &mut Child) -> SocketAddr {
+fn read_bound_peer(child: &mut Child) -> PeerDescriptor {
     let stderr = child.stderr.as_mut().unwrap();
     let mut line = String::new();
     let mut byte = [0_u8; 1];
@@ -415,8 +493,8 @@ fn read_bound_addr(child: &mut Child) -> SocketAddr {
     loop {
         stderr.read_exact(&mut byte).unwrap();
         if byte[0] == b'\n' {
-            if let Some(addr) = line.strip_prefix("listening on ") {
-                return addr.trim().parse().unwrap();
+            if let Some(peer) = line.strip_prefix("peer: ") {
+                return peer.trim().parse().unwrap();
             }
             line.clear();
         } else {

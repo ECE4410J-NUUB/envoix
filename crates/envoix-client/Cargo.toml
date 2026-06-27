@@ -5,15 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-envoix-discovery.workspace = true
 envoix-auth.workspace = true
 envoix-error.workspace = true
+envoix-protocol.workspace = true
 envoix-session.workspace = true
-envoix-transport.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
-
-[dev-dependencies]
-# Concrete QUIC dialer, used by tests to drive in-process client connections.
-envoix-transport-quic.workspace = true

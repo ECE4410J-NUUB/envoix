@@ -1,18 +1,21 @@
 //! Public application-facing facade for envoix clients.
 
-mod auto_lan;
-
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 pub use envoix_auth::{PairingConfig, SPAKE2_EXPERIMENTAL_WARNING};
 use envoix_error::CoreError;
+pub use envoix_protocol::PeerDescriptor;
 pub use envoix_session::{
-    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
+    EventSink, IdentityConfig, NoopEventSink, TransferCancelToken, TransferDirection,
+    TransferEvent, TransferSummary,
 };
-use envoix_session::{SessionConfig, receive_file_with_bound_addr, send_file_manual};
-use envoix_transport::ConnectionCandidate;
+use envoix_session::{
+    SessionConfig, bind_iroh_endpoint_enable_mdns, receive_file_with_bound_peer_with_cancel,
+    receive_with_auth_retries_with_cancel, send_file_enable_mdns_with_cancel,
+    send_file_manual_with_cancel,
+};
 use serde::Deserialize;
 
 /// Environment variable overriding the runtime transfer chunk size.
@@ -32,6 +35,8 @@ pub struct ClientConfig {
     pub chunk_size: usize,
     /// Pairing authentication required before transfer.
     pub pairing: PairingConfig,
+    /// iroh endpoint identity policy.
+    pub identity: IdentityConfig,
 }
 
 impl ClientConfig {
@@ -40,6 +45,7 @@ impl ClientConfig {
         Self {
             chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
             pairing,
+            identity: IdentityConfig::Ephemeral,
         }
     }
 
@@ -143,8 +149,8 @@ fn apply_chunk_size_override(config: &mut ClientConfig, value: &str) -> Result<(
 /// Request to send one local file to a peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SendFileRequest {
-    /// Peer socket address to connect to.
-    pub peer_addr: SocketAddr,
+    /// Peer descriptor to connect to.
+    pub peer: PeerDescriptor,
     /// Local file path to send.
     pub file_path: PathBuf,
     /// Whether receiver-side resume state may be used.
@@ -163,8 +169,8 @@ pub struct ReceiveFileRequest {
 /// Automatic connection policy used by the facade.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConnectionPolicy {
-    /// Try supported connection strategies according to the client default order.
-    Auto,
+    /// Use iroh mDNS/address discovery when available.
+    EnableMdns,
 }
 
 /// Request to send one local file using automatic pairing and connection setup.
@@ -226,20 +232,28 @@ impl ClientEventSink for NoopClientEventSink {
 pub enum ClientEvent {
     /// Advisory network probing has started.
     NetworkDetectionStarted,
-    /// Automatic connection setup has started.
-    AutoConnectionStarted {
+    /// Endpoint setup has started.
+    EndpointStarted {
         /// Direction of this local operation.
         direction: TransferDirection,
     },
-    /// LAN mDNS discovery has started.
-    LanDiscoveryStarted,
-    /// A LAN candidate was discovered via mDNS.
-    LanCandidateFound {
-        /// The discovered connection candidate.
-        candidate: ConnectionCandidate,
+    /// A direct address is available for this endpoint.
+    DirectAddressAvailable {
+        /// Direct descriptor callers can share with a peer.
+        peer: PeerDescriptor,
     },
-    /// LAN mDNS discovery failed.
-    LanDiscoveryFailed {
+    /// Dialing a peer has started.
+    DialStarted {
+        /// Peer being dialed.
+        peer: PeerDescriptor,
+    },
+    /// Pairing authentication completed.
+    Authenticated {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+    },
+    /// A connection attempt failed.
+    ConnectionFailed {
         /// Human-readable failure reason.
         reason: String,
     },
@@ -265,13 +279,25 @@ impl EnvoixClient {
         request: SendFileRequest,
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
+        self.send_file_with_cancel(request, events, TransferCancelToken::new())
+            .await
+    }
+
+    /// Sends one file according to `request`, stopping on cancellation.
+    pub async fn send_file_with_cancel(
+        &self,
+        request: SendFileRequest,
+        events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
         self.validate_config()?;
-        send_file_manual(
-            request.peer_addr,
+        send_file_manual_with_cancel(
+            request.peer,
             request.file_path,
             request.resume,
             self.session_config(),
             events,
+            cancel,
         )
         .await
     }
@@ -287,33 +313,79 @@ impl EnvoixClient {
         client_events: Box<dyn ClientEventSink>,
         transfer_events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
-        self.validate_config()?;
-        auto_lan::send(
+        self.send_with_cancel(
             request,
-            self.session_config(),
             client_events,
             transfer_events,
+            TransferCancelToken::new(),
         )
         .await
     }
 
+    /// Sends one file using automatic connection setup, stopping on cancellation.
+    pub async fn send_with_cancel(
+        &self,
+        request: SendRequest,
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
+        self.validate_config()?;
+        match request.connection_policy {
+            ConnectionPolicy::EnableMdns => {
+                client_events.on_event(ClientEvent::EndpointStarted {
+                    direction: TransferDirection::Send,
+                });
+                send_file_enable_mdns_with_cancel(
+                    request.file_path,
+                    request.resume,
+                    self.session_config(),
+                    transfer_events,
+                    cancel,
+                )
+                .await
+            }
+        }
+    }
+
     /// Receives one file and reports the concrete bound address before accepting.
-    pub async fn receive_file_with_bound_addr<F>(
+    pub async fn receive_file_with_bound_peer<F>(
         &self,
         request: ReceiveFileRequest,
         events: Box<dyn EventSink>,
-        on_bound_addr: F,
+        on_bound_peer: F,
     ) -> Result<TransferSummary, PublicError>
     where
-        F: FnOnce(SocketAddr) + Send,
+        F: FnOnce(PeerDescriptor) + Send,
+    {
+        self.receive_file_with_bound_peer_with_cancel(
+            request,
+            events,
+            on_bound_peer,
+            TransferCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Receives one file and reports the bound address, stopping on cancellation.
+    pub async fn receive_file_with_bound_peer_with_cancel<F>(
+        &self,
+        request: ReceiveFileRequest,
+        events: Box<dyn EventSink>,
+        on_bound_peer: F,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(PeerDescriptor) + Send,
     {
         self.validate_config()?;
-        receive_file_with_bound_addr(
+        receive_file_with_bound_peer_with_cancel(
             request.listen_addr,
             request.output_dir,
             self.session_config(),
             events,
-            on_bound_addr,
+            on_bound_peer,
+            cancel,
         )
         .await
     }
@@ -324,9 +396,8 @@ impl EnvoixClient {
     /// pairing).  `transfer_events` receives transfer-level progress events
     /// (chunk progress, hashing, completion).
     ///
-    /// `on_bound` is called with the actual bound socket address after the QUIC
-    /// listener has been bound, allowing the caller to print a QR invite or
-    /// otherwise report the address before accepting a connection.
+    /// `on_bound` is called with the peer descriptor after the iroh endpoint
+    /// has been bound, allowing the caller to print a QR invite.
     pub async fn receive<F>(
         &self,
         request: ReceiveRequest,
@@ -335,15 +406,45 @@ impl EnvoixClient {
         on_bound: F,
     ) -> Result<TransferSummary, PublicError>
     where
-        F: FnOnce(SocketAddr) + Send,
+        F: FnOnce(PeerDescriptor) + Send,
     {
-        self.validate_config()?;
-        auto_lan::receive(
+        self.receive_with_cancel(
             request,
-            self.session_config(),
             client_events,
             transfer_events,
             on_bound,
+            TransferCancelToken::new(),
+        )
+        .await
+    }
+
+    /// Receives one file using automatic setup, stopping on cancellation.
+    pub async fn receive_with_cancel<F>(
+        &self,
+        request: ReceiveRequest,
+        client_events: Box<dyn ClientEventSink>,
+        transfer_events: Box<dyn EventSink>,
+        on_bound: F,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError>
+    where
+        F: FnOnce(PeerDescriptor) + Send,
+    {
+        self.validate_config()?;
+        client_events.on_event(ClientEvent::EndpointStarted {
+            direction: TransferDirection::Receive,
+        });
+        let endpoint =
+            bind_iroh_endpoint_enable_mdns(request.listen_addr, &self.config.identity).await?;
+        let peer = endpoint.peer_descriptor()?;
+        client_events.on_event(ClientEvent::DirectAddressAvailable { peer: peer.clone() });
+        on_bound(peer);
+        receive_with_auth_retries_with_cancel(
+            endpoint,
+            request.output_dir,
+            self.session_config(),
+            transfer_events,
+            cancel,
         )
         .await
     }
@@ -368,6 +469,7 @@ impl EnvoixClient {
         SessionConfig {
             chunk_size: self.config.chunk_size,
             pairing: self.config.pairing.clone(),
+            identity: self.config.identity.clone(),
         }
     }
 }
@@ -431,12 +533,13 @@ mod tests {
         let client = EnvoixClient::new(ClientConfig {
             chunk_size: 0,
             pairing: test_pairing(),
+            identity: IdentityConfig::Ephemeral,
         });
 
         let error = client
             .send_file(
                 SendFileRequest {
-                    peer_addr: "[::1]:9000".parse().unwrap(),
+                    peer: PeerDescriptor::new("peer", vec!["[::1]:9000".parse().unwrap()]).unwrap(),
                     file_path: "missing.txt".into(),
                     resume: false,
                 },
@@ -523,10 +626,11 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires local network access; run with: cargo test -- --ignored"]
-    async fn client_send_auto_emits_events_in_order() {
+    async fn client_send_enable_mdns_emits_start_event() {
         let client = EnvoixClient::new(ClientConfig {
             chunk_size: 64 * 1024,
             pairing: test_pairing(),
+            identity: IdentityConfig::Ephemeral,
         });
 
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -538,7 +642,7 @@ mod tests {
             .send(
                 SendRequest {
                     file_path: "missing.txt".into(),
-                    connection_policy: ConnectionPolicy::Auto,
+                    connection_policy: ConnectionPolicy::EnableMdns,
                     resume: false,
                 },
                 Box::new(sink),
@@ -547,16 +651,13 @@ mod tests {
             .await;
 
         let events = recorded.lock().unwrap();
-        // At minimum, AutoConnectionStarted and LanDiscoveryStarted
-        // should have been emitted.
         assert!(!events.is_empty());
         assert_eq!(
             events.first().unwrap(),
-            &ClientEvent::AutoConnectionStarted {
+            &ClientEvent::EndpointStarted {
                 direction: TransferDirection::Send
             }
         );
-        assert_eq!(events.get(1).unwrap(), &ClientEvent::LanDiscoveryStarted);
     }
 
     fn test_pairing() -> PairingConfig {
