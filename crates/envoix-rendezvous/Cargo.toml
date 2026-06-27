@@ -1,0 +1,17 @@
+[package]
+name = "envoix-rendezvous"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Room rendezvous broker: match two peers by room id and blindly relay their end-to-end pairing handshake. Untrusted; never sees plaintext."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+# Drives realistic peers (SPAKE2 + sealed descriptor) through the broker in tests.
+envoix-pairing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
