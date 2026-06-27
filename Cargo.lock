@@ -981,6 +981,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-rendezvous-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "envoix-pairing",
+ "envoix-rendezvous",
+ "iroh",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "envoix-session"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "apps/envoix-rendezvous-server",
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-error",
