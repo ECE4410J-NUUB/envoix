@@ -1,0 +1,15 @@
+[package]
+name = "envoix-pairing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SPAKE2 peer pairing: turn a short shared code into a confirmed key and exchange sealed peer descriptors over an untrusted rendezvous."
+
+[dependencies]
+blake3.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spake2.workspace = true
+thiserror.workspace = true
