@@ -8,7 +8,7 @@ use std::time::Duration;
 use envoix_pairing::{
     Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
 };
-use envoix_rendezvous::{Join, Paired, PeerConn, RoomRegistry, Role, read_framed, write_framed};
+use envoix_rendezvous::{Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed};
 use tokio::io::DuplexStream;
 
 /// Wrap the broker's side of a duplex as a `PeerConn` (the halves own the
@@ -27,7 +27,13 @@ async fn run_initiator(
     my_descriptor: &str,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    write_framed(&mut writer, &Join { room_id: room.to_string() }).await?;
+    write_framed(
+        &mut writer,
+        &Join {
+            room_id: room.to_string(),
+        },
+    )
+    .await?;
     let paired: Paired = read_framed(&mut reader).await?;
 
     let (pending, start) = initiator_start(code)?;
@@ -39,9 +45,13 @@ async fn run_initiator(
     let key = confirming.verify(&responder_confirm)?;
 
     // Seal our descriptor under K and exchange.
-    write_framed(&mut writer, &seal_json(key.key(), &my_descriptor.to_string())?).await?;
+    write_framed(
+        &mut writer,
+        &seal_json(key.key(), b"room-test", &my_descriptor.to_string())?,
+    )
+    .await?;
     let sealed: Vec<u8> = read_framed(&mut reader).await?;
-    let other: String = open_json(key.key(), &sealed)?;
+    let other: String = open_json(key.key(), b"room-test", &sealed)?;
     Ok((paired.role, other))
 }
 
@@ -53,7 +63,13 @@ async fn run_responder(
     my_descriptor: &str,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    write_framed(&mut writer, &Join { room_id: room.to_string() }).await?;
+    write_framed(
+        &mut writer,
+        &Join {
+            room_id: room.to_string(),
+        },
+    )
+    .await?;
     let paired: Paired = read_framed(&mut reader).await?;
 
     let start: PakeStart = read_framed(&mut reader).await?;
@@ -63,9 +79,13 @@ async fn run_responder(
     let (key, confirm) = confirming.verify(&initiator_confirm)?;
     write_framed(&mut writer, &confirm).await?;
 
-    write_framed(&mut writer, &seal_json(key.key(), &my_descriptor.to_string())?).await?;
+    write_framed(
+        &mut writer,
+        &seal_json(key.key(), b"room-test", &my_descriptor.to_string())?,
+    )
+    .await?;
     let sealed: Vec<u8> = read_framed(&mut reader).await?;
-    let other: String = open_json(key.key(), &sealed)?;
+    let other: String = open_json(key.key(), b"room-test", &sealed)?;
     Ok((paired.role, other))
 }
 
@@ -112,13 +132,46 @@ async fn lone_peer_expires() {
 
     // Join a room nobody else joins.
     let (mut reader, mut writer) = tokio::io::split(&mut client);
-    write_framed(&mut writer, &Join { room_id: "empty".to_string() }).await.unwrap();
+    write_framed(
+        &mut writer,
+        &Join {
+            room_id: "empty".to_string(),
+        },
+    )
+    .await
+    .unwrap();
 
     // The broker gives up after the TTL.
     let result = serve.await.unwrap();
-    assert!(matches!(result, Err(envoix_rendezvous::RendezvousError::Expired)));
+    assert!(matches!(
+        result,
+        Err(envoix_rendezvous::RendezvousError::Expired)
+    ));
 
     // And the parked stream is closed, so the client sees EOF.
     let pending: Result<Paired, _> = read_framed(&mut reader).await;
     assert!(pending.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_long_room_id_is_rejected() {
+    let registry = Arc::new(RoomRegistry::new());
+    let (mut client, broker) = tokio::io::duplex(64 * 1024);
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+
+    let (_reader, mut writer) = tokio::io::split(&mut client);
+    write_framed(
+        &mut writer,
+        &Join {
+            room_id: "x".repeat(1024),
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = serve.await.unwrap();
+    assert!(matches!(
+        result,
+        Err(envoix_rendezvous::RendezvousError::Rejected(_))
+    ));
 }

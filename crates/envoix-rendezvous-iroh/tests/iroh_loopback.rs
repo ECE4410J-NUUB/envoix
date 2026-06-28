@@ -61,8 +61,16 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     });
 
     let join = Duration::from_secs(20);
-    let a_got = tokio::time::timeout(join, a).await.expect("A timed out").unwrap().expect("A pairs");
-    let b_got = tokio::time::timeout(join, b).await.expect("B timed out").unwrap().expect("B pairs");
+    let a_got = tokio::time::timeout(join, a)
+        .await
+        .expect("A timed out")
+        .unwrap()
+        .expect("A pairs");
+    let b_got = tokio::time::timeout(join, b)
+        .await
+        .expect("B timed out")
+        .unwrap()
+        .expect("B pairs");
 
     // Each recovered the OTHER peer's iroh descriptor, sealed under the shared key.
     assert_eq!(a_got.peer, desc_b);

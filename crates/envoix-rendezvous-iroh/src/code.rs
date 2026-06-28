@@ -19,10 +19,16 @@ const WORDS: &[&str] = &[
     "violet", "willow", "yarrow", "zephyr",
 ];
 
+/// Largest room-id space for the nameplate. 6 digits keeps the code typeable
+/// while making collisions between concurrent sessions rare; a colliding
+/// nameplate only causes a failed pairing (SPAKE2 mismatch), never a wrong
+/// pairing. Server-allocated nameplates would remove collisions entirely.
+const NAMEPLATE_SPACE: u32 = 1_000_000;
+
 /// Generate a pairing code with `words` random words after the nameplate.
 pub fn generate_code(words: usize) -> Result<String, String> {
-    let nameplate = random_u32()? % 10_000;
-    let mut code = format!("{nameplate:04}");
+    let nameplate = random_u32()? % NAMEPLATE_SPACE;
+    let mut code = format!("{nameplate:06}");
     for _ in 0..words.max(1) {
         let word = WORDS[random_index(WORDS.len())?];
         let _ = write!(code, "-{word}");
@@ -68,9 +74,9 @@ mod tests {
         let (room, password) = split_code(&code);
         assert_eq!(password, code);
         assert!(code.starts_with(room));
-        // "<4 digits>-word-word" -> 3 dash-separated parts.
+        // "<6 digits>-word-word" -> 3 dash-separated parts.
         assert_eq!(code.split('-').count(), 3);
-        assert_eq!(room.len(), 4);
+        assert_eq!(room.len(), 6);
         assert!(room.chars().all(|c| c.is_ascii_digit()));
     }
 }

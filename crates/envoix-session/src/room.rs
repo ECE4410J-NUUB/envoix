@@ -17,14 +17,17 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError, TransferSummary,
-    bind_iroh_endpoint, receive_one_authenticated, send_file_manual,
+    bind_iroh_endpoint, receive_with_auth_retries, send_file_manual,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker.
 async fn rendezvous_endpoint() -> Result<Endpoint, SessionError> {
-    build_endpoint("0.0.0.0:0".parse().expect("valid addr"), SecretKey::generate())
-        .await
-        .map_err(|error| CoreError::Transport(error.to_string()))
+    build_endpoint(
+        "0.0.0.0:0".parse().expect("valid addr"),
+        SecretKey::generate(),
+    )
+    .await
+    .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
 /// Wait until `bound` has a direct address, then return its descriptor.
@@ -38,21 +41,12 @@ async fn ready_descriptor(bound: &BoundEndpoint) -> Result<PeerDescriptor, Sessi
     bound.peer_descriptor()
 }
 
-/// An iroh endpoint's own descriptor (waiting for an address). Used for the
-/// sender's payload, which the receiver ignores - the sender only dials.
-async fn endpoint_descriptor(ep: &Endpoint) -> Result<PeerDescriptor, SessionError> {
-    for _ in 0..100 {
-        if ep.addr().ip_addrs().next().is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    PeerDescriptor::new(ep.id().to_string(), ep.addr().ip_addrs().copied().collect())
-}
-
 /// Override the pairing config with the token derived from the room pairing.
 fn with_room_token(config: SessionConfig, token: String) -> SessionConfig {
-    SessionConfig { pairing: PairingConfig::Spake2SharedToken { token }, ..config }
+    SessionConfig {
+        pairing: PairingConfig::Spake2SharedToken { token },
+        ..config
+    }
 }
 
 /// Receive a file by pairing in a room: bind the data endpoint, exchange its
@@ -75,8 +69,15 @@ pub async fn receive_file_via_room(
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
-    receive_one_authenticated(bound, output_dir, with_room_token(config, pairing.token), events)
-        .await
+    // Accept with retries: a stray or wrong-token dial must not kill the
+    // transfer before the legitimate sender connects.
+    receive_with_auth_retries(
+        bound,
+        output_dir,
+        with_room_token(config, pairing.token),
+        events,
+    )
+    .await
 }
 
 /// Send a file by pairing in a room: exchange descriptors with the receiver over
@@ -92,12 +93,23 @@ pub async fn send_file_via_room(
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
     let rdz = rendezvous_endpoint().await?;
-    let my_descriptor = endpoint_descriptor(&rdz).await?;
+    // The receiver ignores the sender's payload (the sender only dials), so send
+    // a placeholder instead of waiting for this endpoint to learn an address.
+    let placeholder = PeerDescriptor::new(
+        rdz.id().to_string(),
+        vec!["0.0.0.0:0".parse::<SocketAddr>().expect("valid addr")],
+    )?;
 
-    let pairing = pair_in_room(&rdz, broker, room_id, password, &my_descriptor)
+    let pairing = pair_in_room(&rdz, broker, room_id, password, &placeholder)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
-    send_file_manual(pairing.peer, file_path, resume, with_room_token(config, pairing.token), events)
-        .await
+    send_file_manual(
+        pairing.peer,
+        file_path,
+        resume,
+        with_room_token(config, pairing.token),
+        events,
+    )
+    .await
 }

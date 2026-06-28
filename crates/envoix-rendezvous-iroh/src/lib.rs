@@ -24,6 +24,15 @@ pub use code::{generate_code, split_code};
 /// BLAKE3 KDF context separating the data-plane token from any other use of K.
 const DATA_TOKEN_CONTEXT: &str = "envoix rendezvous data-plane token v1";
 
+/// AEAD associated data binding a sealed descriptor to the sender's role, so a
+/// relay cannot reflect one peer's ciphertext back as the other's.
+const INITIATOR_SEAL_AAD: &[u8] = b"envoix-pairing seal initiator v1";
+const RESPONDER_SEAL_AAD: &[u8] = b"envoix-pairing seal responder v1";
+
+/// Cap on the post-exchange graceful close, so a misbehaving peer or broker
+/// cannot hang the pairing after the descriptors are already exchanged.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Outcome of a successful room pairing.
 pub struct RoomPairing<T> {
     /// The peer's payload (for Envoix, its iroh `PeerDescriptor` to dial).
@@ -73,11 +82,21 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
     )
 }
 
-/// Accept pairing connections forever, serving each through `registry`.
+/// Cap on connections served at once, so a flood cannot exhaust the broker.
+const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
+/// Accept pairing connections forever, serving each through `registry`, up to
+/// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
 pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> Result<()> {
+    let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     while let Some(incoming) = endpoint.accept().await {
+        let Ok(permit) = limit.clone().try_acquire_owned() else {
+            tracing::warn!("rendezvous connection limit reached; dropping incoming");
+            continue;
+        };
         let registry = registry.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(error) = serve_incoming(incoming, &registry).await {
                 tracing::debug!(%error, "rendezvous connection ended");
             }
@@ -115,9 +134,20 @@ pub async fn join_room(
 ) -> Result<BrokerSession> {
     let connection = endpoint.connect(broker, RENDEZVOUS_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
-    write_framed(&mut send, &Join { room_id: room_id.to_string() }).await?;
+    write_framed(
+        &mut send,
+        &Join {
+            room_id: room_id.to_string(),
+        },
+    )
+    .await?;
     let paired: Paired = read_framed(&mut recv).await?;
-    Ok(BrokerSession { connection, send, recv, role: paired.role })
+    Ok(BrokerSession {
+        connection,
+        send,
+        recv,
+        role: paired.role,
+    })
 }
 
 /// Pair with a peer in `room_id` over the broker: run SPAKE2 with `password`,
@@ -139,8 +169,12 @@ where
         Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
     };
 
-    let BrokerSession { connection, mut send, mut recv, role } =
-        join_room(endpoint, broker, room_id).await?;
+    let BrokerSession {
+        connection,
+        mut send,
+        mut recv,
+        role,
+    } = join_room(endpoint, broker, room_id).await?;
 
     let key = match role {
         Role::Initiator => {
@@ -163,19 +197,28 @@ where
         }
     };
 
-    write_framed(&mut send, &seal_json(key.key(), mine)?).await?;
+    // Bind each sealed descriptor to the sender's role (AEAD aad); we seal with
+    // our role and open with the peer's, so a reflected ciphertext fails to open.
+    let (my_aad, peer_aad): (&[u8], &[u8]) = match role {
+        Role::Initiator => (INITIATOR_SEAL_AAD, RESPONDER_SEAL_AAD),
+        Role::Responder => (RESPONDER_SEAL_AAD, INITIATOR_SEAL_AAD),
+    };
+    write_framed(&mut send, &seal_json(key.key(), my_aad, mine)?).await?;
     let sealed: Vec<u8> = read_framed(&mut recv).await?;
-    let peer: T = open_json(key.key(), &sealed)?;
+    let peer: T = open_json(key.key(), peer_aad, &sealed)?;
 
     // Derive a strong data-plane token from K (both peers get the same one).
     let token = hex(&blake3::derive_key(DATA_TOKEN_CONTEXT, key.key()));
 
     // Graceful close: finish + wait for the broker to ack our FIN (so it is
     // delivered through the relay), then drain our recv to EOF before dropping.
-    // No more data is expected after the descriptor, so a tiny cap is fine.
+    // Bounded by CLOSE_TIMEOUT so a stalled peer cannot hang a done pairing.
     let _ = send.finish();
-    let _ = send.stopped().await;
-    let _ = recv.read_to_end(1024).await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+        let _ = send.stopped().await;
+        let _ = recv.read_to_end(1024).await;
+    })
+    .await;
     drop(connection);
 
     Ok(RoomPairing { peer, token })

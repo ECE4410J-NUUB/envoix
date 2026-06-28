@@ -96,7 +96,12 @@ fn proof(key: &[u8], transcript: &[u8], label: &[u8]) -> blake3::Hash {
 }
 
 /// Constant-time check that `received` is the expected proof.
-fn verify(key: &[u8], transcript: &[u8], label: &[u8], received: &[u8]) -> Result<(), PairingError> {
+fn verify(
+    key: &[u8],
+    transcript: &[u8],
+    label: &[u8],
+    received: &[u8],
+) -> Result<(), PairingError> {
     let received: [u8; 32] = received.try_into().map_err(|_| PairingError::Confirm)?;
     // blake3::Hash equality is constant-time.
     if proof(key, transcript, label) == blake3::Hash::from_bytes(received) {
@@ -117,7 +122,13 @@ pub fn initiator_start(password: &str) -> Result<(InitiatorPending, PakeStart), 
         &Identity::new(RESPONDER_ID),
     );
     let start = PakeStart { nonce, msg };
-    Ok((InitiatorPending { spake, start: start.clone() }, start))
+    Ok((
+        InitiatorPending {
+            spake,
+            start: start.clone(),
+        },
+        start,
+    ))
 }
 
 /// Initiator state awaiting the responder's [`PakeResponse`].
@@ -128,7 +139,10 @@ pub struct InitiatorPending {
 
 impl InitiatorPending {
     /// Finish SPAKE2 and produce the initiator's [`Confirm`] to send.
-    pub fn finish(self, response: &PakeResponse) -> Result<(InitiatorConfirming, Confirm), PairingError> {
+    pub fn finish(
+        self,
+        response: &PakeResponse,
+    ) -> Result<(InitiatorConfirming, Confirm), PairingError> {
         if response.nonce.len() != NONCE_LEN {
             return Err(PairingError::BadMessage("responder nonce length".into()));
         }
@@ -137,7 +151,9 @@ impl InitiatorPending {
             .finish(&response.msg)
             .map_err(|e| PairingError::Spake2(format!("{e:?}")))?;
         let transcript = transcript(&self.start, response);
-        let mac = proof(&key, &transcript, INITIATOR_CONFIRM_LABEL).as_bytes().to_vec();
+        let mac = proof(&key, &transcript, INITIATOR_CONFIRM_LABEL)
+            .as_bytes()
+            .to_vec();
         Ok((InitiatorConfirming { key, transcript }, Confirm { mac }))
     }
 }
@@ -151,7 +167,12 @@ pub struct InitiatorConfirming {
 impl InitiatorConfirming {
     /// Verify the responder's [`Confirm`]; on success the key is confirmed.
     pub fn verify(self, responder_confirm: &Confirm) -> Result<Paired, PairingError> {
-        verify(&self.key, &self.transcript, RESPONDER_CONFIRM_LABEL, &responder_confirm.mac)?;
+        verify(
+            &self.key,
+            &self.transcript,
+            RESPONDER_CONFIRM_LABEL,
+            &responder_confirm.mac,
+        )?;
         Ok(Paired { key: self.key })
     }
 }
@@ -190,8 +211,15 @@ impl ResponderConfirming {
     /// Verify the initiator's [`Confirm`]; on success return the responder's own
     /// [`Confirm`] to send back and the confirmed key.
     pub fn verify(self, initiator_confirm: &Confirm) -> Result<(Paired, Confirm), PairingError> {
-        verify(&self.key, &self.transcript, INITIATOR_CONFIRM_LABEL, &initiator_confirm.mac)?;
-        let mac = proof(&self.key, &self.transcript, RESPONDER_CONFIRM_LABEL).as_bytes().to_vec();
+        verify(
+            &self.key,
+            &self.transcript,
+            INITIATOR_CONFIRM_LABEL,
+            &initiator_confirm.mac,
+        )?;
+        let mac = proof(&self.key, &self.transcript, RESPONDER_CONFIRM_LABEL)
+            .as_bytes()
+            .to_vec();
         Ok((Paired { key: self.key }, Confirm { mac }))
     }
 }
@@ -210,7 +238,10 @@ mod tests {
         let (initiator_confirming, initiator_conf) = initiator.finish(&response)?;
         let (responder_paired, responder_conf) = responder.verify(&initiator_conf)?;
         let initiator_paired = initiator_confirming.verify(&responder_conf)?;
-        Ok((initiator_paired.key().to_vec(), responder_paired.key().to_vec()))
+        Ok((
+            initiator_paired.key().to_vec(),
+            responder_paired.key().to_vec(),
+        ))
     }
 
     #[test]
@@ -230,9 +261,9 @@ mod tests {
 
         // Each side seals a value the other opens with the same confirmed key.
         let from_initiator = vec!["addr-a".to_string()];
-        let sealed = seal_json(initiator_paired.key(), &from_initiator).unwrap();
+        let sealed = seal_json(initiator_paired.key(), b"aad", &from_initiator).unwrap();
         assert_eq!(
-            open_json::<Vec<String>>(responder_paired.key(), &sealed).unwrap(),
+            open_json::<Vec<String>>(responder_paired.key(), b"aad", &sealed).unwrap(),
             from_initiator
         );
     }
@@ -244,7 +275,10 @@ mod tests {
         let (initiator, start) = initiator_start(PW).unwrap();
         let (responder, response) = responder_respond("99-wrong-words-here", &start).unwrap();
         let (_c, initiator_conf) = initiator.finish(&response).unwrap();
-        assert!(matches!(responder.verify(&initiator_conf), Err(PairingError::Confirm)));
+        assert!(matches!(
+            responder.verify(&initiator_conf),
+            Err(PairingError::Confirm)
+        ));
     }
 
     #[test]
@@ -253,7 +287,10 @@ mod tests {
         let (responder, response) = responder_respond(PW, &start).unwrap();
         let (_c, mut initiator_conf) = initiator.finish(&response).unwrap();
         initiator_conf.mac[0] ^= 0x01;
-        assert!(matches!(responder.verify(&initiator_conf), Err(PairingError::Confirm)));
+        assert!(matches!(
+            responder.verify(&initiator_conf),
+            Err(PairingError::Confirm)
+        ));
     }
 
     #[test]
@@ -273,6 +310,9 @@ mod tests {
     fn bad_nonce_length_rejected() {
         let (_initiator, mut start) = initiator_start(PW).unwrap();
         start.nonce.truncate(4);
-        assert!(matches!(responder_respond(PW, &start), Err(PairingError::BadMessage(_))));
+        assert!(matches!(
+            responder_respond(PW, &start),
+            Err(PairingError::BadMessage(_))
+        ));
     }
 }

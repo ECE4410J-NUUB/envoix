@@ -18,6 +18,10 @@ const RELAY_TTL: Duration = Duration::from_secs(120);
 /// Grace period to wait for peers to close after relaying, so buffered data is
 /// delivered before the transports are dropped.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
+/// Reject a join whose room id is longer than this; room ids are short codes.
+const MAX_ROOM_ID_LEN: usize = 128;
+/// Cap on concurrently waiting (unpaired) rooms, to bound memory under abuse.
+const MAX_WAITING_ROOMS: usize = 4096;
 
 /// A peer parked in a room, waiting for a partner. `ready` lets the matching
 /// peer's task signal this peer's task to return once it has taken over.
@@ -35,12 +39,18 @@ pub struct RoomRegistry {
 impl RoomRegistry {
     /// A registry with the default room time-to-live.
     pub fn new() -> Self {
-        Self { waiting: Mutex::new(HashMap::new()), ttl: DEFAULT_ROOM_TTL }
+        Self {
+            waiting: Mutex::new(HashMap::new()),
+            ttl: DEFAULT_ROOM_TTL,
+        }
     }
 
     /// A registry with a custom room time-to-live (mostly for tests).
     pub fn with_ttl(ttl: Duration) -> Self {
-        Self { waiting: Mutex::new(HashMap::new()), ttl }
+        Self {
+            waiting: Mutex::new(HashMap::new()),
+            ttl,
+        }
     }
 
     /// Serve one peer connection: read its [`Join`], then either park it as the
@@ -49,20 +59,33 @@ impl RoomRegistry {
     /// over the relay; the second peer's task drives it.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
         let Join { room_id } = conn.read_control().await?;
+        if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
+            return Err(RendezvousError::Rejected("room id length out of range"));
+        }
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
         enum Decision {
             Matched(Waiter, PeerConn),
             Parked(oneshot::Receiver<()>),
+            Rejected(&'static str),
         }
         let decision = {
             let mut waiting = self.waiting.lock().expect("registry mutex");
             match waiting.remove(&room_id) {
                 Some(first) => Decision::Matched(first, conn),
+                None if waiting.len() >= MAX_WAITING_ROOMS => {
+                    Decision::Rejected("too many waiting rooms")
+                }
                 None => {
                     let (ready_tx, ready_rx) = oneshot::channel();
-                    waiting.insert(room_id.clone(), Waiter { conn, ready: ready_tx });
+                    waiting.insert(
+                        room_id.clone(),
+                        Waiter {
+                            conn,
+                            ready: ready_tx,
+                        },
+                    );
                     Decision::Parked(ready_rx)
                 }
             }
@@ -78,10 +101,14 @@ impl RoomRegistry {
             Decision::Parked(ready_rx) => match tokio::time::timeout(self.ttl, ready_rx).await {
                 Ok(_) => Ok(()),
                 Err(_) => {
-                    self.waiting.lock().expect("registry mutex").remove(&room_id);
+                    self.waiting
+                        .lock()
+                        .expect("registry mutex")
+                        .remove(&room_id);
                     Err(RendezvousError::Expired)
                 }
             },
+            Decision::Rejected(reason) => Err(RendezvousError::Rejected(reason)),
         }
     }
 }
@@ -99,8 +126,20 @@ async fn run_pair(initiator: PeerConn, responder: PeerConn) -> Result<(), Rendez
     let (mut iw, mut ir, i_close) = initiator.into_parts();
     let (mut rw, mut rr, r_close) = responder.into_parts();
 
-    crate::io::write_framed(&mut iw, &Paired { role: Role::Initiator }).await?;
-    crate::io::write_framed(&mut rw, &Paired { role: Role::Responder }).await?;
+    crate::io::write_framed(
+        &mut iw,
+        &Paired {
+            role: Role::Initiator,
+        },
+    )
+    .await?;
+    crate::io::write_framed(
+        &mut rw,
+        &Paired {
+            role: Role::Responder,
+        },
+    )
+    .await?;
 
     // Blind relay: the SPAKE2 + sealed-descriptor traffic flows through
     // opaquely. When one side finishes (EOF), propagate it as a clean shutdown
@@ -122,10 +161,9 @@ async fn run_pair(initiator: PeerConn, responder: PeerConn) -> Result<(), Rendez
 
     // Keep both transports open until the peers close them (after draining), so
     // their last buffered bytes are delivered before we drop the connections.
-    let _ = tokio::time::timeout(
-        CLOSE_GRACE,
-        async { tokio::join!(i_close.wait_closed(), r_close.wait_closed()) },
-    )
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        tokio::join!(i_close.wait_closed(), r_close.wait_closed())
+    })
     .await;
     Ok(())
 }

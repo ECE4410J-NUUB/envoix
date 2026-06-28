@@ -27,7 +27,9 @@ async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
 fn config() -> SessionConfig {
     SessionConfig {
         chunk_size: DEFAULT_CHUNK_SIZE,
-        pairing: PairingConfig::Spake2SharedToken { token: "unused-placeholder".into() },
+        pairing: PairingConfig::Spake2SharedToken {
+            token: "unused-placeholder".into(),
+        },
         identity: IdentityConfig::Ephemeral,
     }
 }
@@ -55,17 +57,39 @@ async fn file_transfers_through_the_rendezvous() {
     let (broker_r, broker_s) = (broker.clone(), broker.clone());
     let out_dir = out.clone();
     let recv = tokio::spawn(async move {
-        receive_file_via_room(broker_r, code, listen, out_dir, config(), Box::new(NoopEventSink)).await
+        receive_file_via_room(
+            broker_r,
+            code,
+            listen,
+            out_dir,
+            config(),
+            Box::new(NoopEventSink),
+        )
+        .await
     });
     // Let the receiver bind + start pairing first.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let send = tokio::spawn(async move {
-        send_file_via_room(broker_s, code, src, false, config(), Box::new(NoopEventSink)).await
+        send_file_via_room(
+            broker_s,
+            code,
+            src,
+            false,
+            config(),
+            Box::new(NoopEventSink),
+        )
+        .await
     });
 
     let join = Duration::from_secs(30);
-    let sent = tokio::time::timeout(join, send).await.expect("send timed out").unwrap();
-    let received = tokio::time::timeout(join, recv).await.expect("recv timed out").unwrap();
+    let sent = tokio::time::timeout(join, send)
+        .await
+        .expect("send timed out")
+        .unwrap();
+    let received = tokio::time::timeout(join, recv)
+        .await
+        .expect("recv timed out")
+        .unwrap();
     sent.expect("sender ok");
     received.expect("receiver ok");
 

@@ -32,4 +32,6 @@ pub enum RendezvousError {
     FrameTooLarge,
     #[error("pairing window expired before a partner joined the room")]
     Expired,
+    #[error("join rejected: {0}")]
+    Rejected(&'static str),
 }

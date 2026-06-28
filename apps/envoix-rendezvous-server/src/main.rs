@@ -12,7 +12,10 @@ use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, serve_endpoint};
 
 #[derive(Parser)]
-#[command(name = "envoix-rendezvous-server", about = "Envoix room rendezvous (iroh node)")]
+#[command(
+    name = "envoix-rendezvous-server",
+    about = "Envoix room rendezvous (iroh node)"
+)]
 struct Cli {
     /// UDP address to bind the iroh endpoint to.
     #[arg(long, default_value = "0.0.0.0:0")]

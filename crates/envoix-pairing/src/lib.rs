@@ -21,7 +21,7 @@ mod wire;
 
 pub use bundle::{open, open_json, seal, seal_json};
 pub use handshake::{
-    Confirm, InitiatorConfirming, InitiatorPending, PakeResponse, PakeStart, Paired,
+    Confirm, InitiatorConfirming, InitiatorPending, Paired, PakeResponse, PakeStart,
     ResponderConfirming, initiator_start, responder_respond,
 };
 pub use wire::{MAX_FRAME_BODY, frame, unframe};
