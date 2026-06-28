@@ -3,6 +3,7 @@
 mod connection;
 mod endpoint;
 mod identity;
+mod room;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ use endpoint::{
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
+pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
