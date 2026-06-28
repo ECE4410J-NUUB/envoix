@@ -8,6 +8,7 @@ members = [
     "crates/envoix-pairing",
     "crates/envoix-protocol",
     "crates/envoix-rendezvous",
+    "crates/envoix-rendezvous-iroh",
     "crates/envoix-qr",
     "crates/envoix-session",
     "crates/envoix-storage",
@@ -28,6 +29,7 @@ envoix-error = { path = "crates/envoix-error" }
 envoix-pairing = { path = "crates/envoix-pairing" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-rendezvous = { path = "crates/envoix-rendezvous" }
+envoix-rendezvous-iroh = { path = "crates/envoix-rendezvous-iroh" }
 envoix-qr = { path = "crates/envoix-qr" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-storage = { path = "crates/envoix-storage" }

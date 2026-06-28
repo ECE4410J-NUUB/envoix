@@ -9,7 +9,7 @@ use clap::Parser;
 use iroh::SecretKey;
 
 use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_server::{build_endpoint, serve_endpoint};
+use envoix_rendezvous_iroh::{build_endpoint, serve_endpoint};
 
 #[derive(Parser)]
 #[command(name = "envoix-rendezvous-server", about = "Envoix room rendezvous (iroh node)")]
@@ -22,7 +22,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoix_rendezvous_server=info,warn"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoix_rendezvous_iroh=info,warn"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cli = Cli::parse();

@@ -6,16 +6,11 @@ license.workspace = true
 description = "iroh-node rendezvous server: matches peers by room id and relays their end-to-end pairing handshake."
 
 [dependencies]
-envoix-pairing.workspace = true
 envoix-rendezvous.workspace = true
+envoix-rendezvous-iroh.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
-serde.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-# The test exchanges real iroh PeerDescriptors through the broker.
-envoix-protocol.workspace = true

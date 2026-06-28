@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use envoix_protocol::PeerDescriptor;
 use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_server::{build_endpoint, endpoint_addr, pair_in_room, serve_endpoint};
+use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, pair_in_room, serve_endpoint};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 /// Loopback bind, fresh identity.
