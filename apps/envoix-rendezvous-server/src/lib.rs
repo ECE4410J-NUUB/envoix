@@ -103,3 +103,61 @@ pub async fn join_room(
     let paired: Paired = read_framed(&mut recv).await?;
     Ok(BrokerSession { connection, send, recv, role: paired.role })
 }
+
+/// Pair with a peer in `room_id` over the broker: run SPAKE2 with `password`,
+/// then swap payloads sealed under the derived key. Returns the peer's payload
+/// (for Envoix, each side passes its iroh `PeerDescriptor`, so the result is the
+/// address to dial). The broker only relays ciphertext - it can neither read
+/// nor forge the exchanged payload.
+pub async fn pair_in_room<T>(
+    endpoint: &Endpoint,
+    broker: EndpointAddr,
+    room_id: &str,
+    password: &str,
+    mine: &T,
+) -> Result<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use envoix_pairing::{
+        Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
+    };
+
+    let BrokerSession { connection, mut send, mut recv, role } =
+        join_room(endpoint, broker, room_id).await?;
+
+    let key = match role {
+        Role::Initiator => {
+            let (pending, start) = initiator_start(password)?;
+            write_framed(&mut send, &start).await?;
+            let response: PakeResponse = read_framed(&mut recv).await?;
+            let (confirming, confirm) = pending.finish(&response)?;
+            write_framed(&mut send, &confirm).await?;
+            let responder_confirm: Confirm = read_framed(&mut recv).await?;
+            confirming.verify(&responder_confirm)?
+        }
+        Role::Responder => {
+            let start: PakeStart = read_framed(&mut recv).await?;
+            let (confirming, response) = responder_respond(password, &start)?;
+            write_framed(&mut send, &response).await?;
+            let initiator_confirm: Confirm = read_framed(&mut recv).await?;
+            let (key, confirm) = confirming.verify(&initiator_confirm)?;
+            write_framed(&mut send, &confirm).await?;
+            key
+        }
+    };
+
+    write_framed(&mut send, &seal_json(key.key(), mine)?).await?;
+    let sealed: Vec<u8> = read_framed(&mut recv).await?;
+    let peer: T = open_json(key.key(), &sealed)?;
+
+    // Graceful close: finish + wait for the broker to ack our FIN (so it is
+    // delivered through the relay), then drain our recv to EOF before dropping.
+    // No more data is expected after the descriptor, so a tiny cap is fine.
+    let _ = send.finish();
+    let _ = send.stopped().await;
+    let _ = recv.read_to_end(1024).await;
+    drop(connection);
+
+    Ok(peer)
+}

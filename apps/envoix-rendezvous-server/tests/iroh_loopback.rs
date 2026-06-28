@@ -1,17 +1,13 @@
 //! End-to-end over real iroh: two clients connect to a loopback rendezvous,
-//! join the same room, and run the full SPAKE2 + sealed-descriptor exchange
-//! through the broker's blind relay.
+//! join the same room, and pair via `pair_in_room`, exchanging their real iroh
+//! `PeerDescriptor`s through the broker's blind relay.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use envoix_pairing::{
-    Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
-};
-use envoix_rendezvous::{Role, RoomRegistry, read_framed, write_framed};
-use envoix_rendezvous_server::{
-    BrokerSession, build_endpoint, endpoint_addr, join_room, serve_endpoint,
-};
+use envoix_protocol::PeerDescriptor;
+use envoix_rendezvous::RoomRegistry;
+use envoix_rendezvous_server::{build_endpoint, endpoint_addr, pair_in_room, serve_endpoint};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 /// Loopback bind, fresh identity.
@@ -32,47 +28,10 @@ async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
     endpoint_addr(ep)
 }
 
-/// Run whichever pairing side the broker assigned; return (role, peer descriptor).
-async fn run_peer(
-    session: BrokerSession,
-    code: &str,
-    my_descriptor: &str,
-) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
-    let BrokerSession { connection, mut send, mut recv, role } = session;
-    let key = match role {
-        Role::Initiator => {
-            let (pending, start) = initiator_start(code)?;
-            write_framed(&mut send, &start).await?;
-            let response: PakeResponse = read_framed(&mut recv).await?;
-            let (confirming, confirm) = pending.finish(&response)?;
-            write_framed(&mut send, &confirm).await?;
-            let responder_confirm: Confirm = read_framed(&mut recv).await?;
-            confirming.verify(&responder_confirm)?
-        }
-        Role::Responder => {
-            let start: PakeStart = read_framed(&mut recv).await?;
-            let (confirming, response) = responder_respond(code, &start)?;
-            write_framed(&mut send, &response).await?;
-            let initiator_confirm: Confirm = read_framed(&mut recv).await?;
-            let (key, confirm) = confirming.verify(&initiator_confirm)?;
-            write_framed(&mut send, &confirm).await?;
-            key
-        }
-    };
-
-    write_framed(&mut send, &seal_json(key.key(), &my_descriptor.to_string())?).await?;
-    let sealed: Vec<u8> = read_framed(&mut recv).await?;
-    let other: String = open_json(key.key(), &sealed)?;
-
-    // Finish our send, then wait for the broker to acknowledge it (stopped) so
-    // the FIN is actually delivered through the relay. Then drain our recv to
-    // EOF so we have all relayed data before the connection is dropped.
-    let _ = send.finish();
-    let _ = send.stopped().await;
-    let mut drain = Vec::new();
-    let _ = tokio::io::AsyncReadExt::read_to_end(&mut recv, &mut drain).await;
-    drop(connection);
-    Ok((role, other))
+/// This endpoint's app-level descriptor (id + direct addrs).
+fn descriptor(ep: &Endpoint) -> PeerDescriptor {
+    PeerDescriptor::new(ep.id().to_string(), ep.addr().ip_addrs().copied().collect())
+        .expect("descriptor")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -82,38 +41,30 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     let broker = ready_addr(&server).await;
     tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new())));
 
-    // Two clients join the same room.
+    // Two clients, each with a real (address-ready) descriptor to exchange.
     let ca = endpoint().await;
     let cb = endpoint().await;
-    let broker_a = broker.clone();
-    let broker_b = broker.clone();
+    let _ = ready_addr(&ca).await;
+    let _ = ready_addr(&cb).await;
+    let desc_a = descriptor(&ca);
+    let desc_b = descriptor(&cb);
 
+    let (broker_a, broker_b) = (broker.clone(), broker.clone());
+    let (mine_a, mine_b) = (desc_a.clone(), desc_b.clone());
     let a = tokio::spawn(async move {
-        let session = join_room(&ca, broker_a, "room-7").await.unwrap();
-        run_peer(session, "7-amber-comet", "endpoint-A").await
+        pair_in_room(&ca, broker_a, "room-7", "7-amber-comet", &mine_a).await
     });
-    // Small stagger; run_peer handles either role assignment regardless.
+    // Small stagger; the SPAKE2 role is by arrival but pair_in_room handles either.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let b = tokio::spawn(async move {
-        let session = join_room(&cb, broker_b, "room-7").await.unwrap();
-        run_peer(session, "7-amber-comet", "endpoint-B").await
+        pair_in_room(&cb, broker_b, "room-7", "7-amber-comet", &mine_b).await
     });
 
     let join = Duration::from_secs(20);
-    let (role_a, a_got) = tokio::time::timeout(join, a)
-        .await
-        .expect("peer A timed out")
-        .unwrap()
-        .expect("peer A pairs");
-    let (role_b, b_got) = tokio::time::timeout(join, b)
-        .await
-        .expect("peer B timed out")
-        .unwrap()
-        .expect("peer B pairs");
+    let a_got = tokio::time::timeout(join, a).await.expect("A timed out").unwrap().expect("A pairs");
+    let b_got = tokio::time::timeout(join, b).await.expect("B timed out").unwrap().expect("B pairs");
 
-    // Exactly one initiator and one responder.
-    assert_ne!(role_a, role_b);
-    // Each received the OTHER peer's descriptor, sealed under the shared key.
-    assert_eq!(a_got, "endpoint-B");
-    assert_eq!(b_got, "endpoint-A");
+    // Each recovered the OTHER peer's iroh descriptor, sealed under the shared key.
+    assert_eq!(a_got, desc_b);
+    assert_eq!(b_got, desc_a);
 }
