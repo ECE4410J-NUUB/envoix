@@ -9,6 +9,8 @@ description = "iroh transport for the room rendezvous: server accept loop and cl
 envoix-pairing.workspace = true
 envoix-rendezvous.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
 iroh.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

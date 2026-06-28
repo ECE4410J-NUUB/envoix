@@ -985,9 +985,11 @@ name = "envoix-rendezvous-iroh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "envoix-pairing",
  "envoix-protocol",
  "envoix-rendezvous",
+ "getrandom 0.3.4",
  "iroh",
  "serde",
  "tokio",

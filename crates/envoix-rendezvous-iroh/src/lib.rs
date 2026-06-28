@@ -18,6 +18,22 @@ use envoix_rendezvous::{
     CloseWaiter, Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed,
 };
 
+mod code;
+pub use code::{generate_code, split_code};
+
+/// BLAKE3 KDF context separating the data-plane token from any other use of K.
+const DATA_TOKEN_CONTEXT: &str = "envoix rendezvous data-plane token v1";
+
+/// Outcome of a successful room pairing.
+pub struct RoomPairing<T> {
+    /// The peer's payload (for Envoix, its iroh `PeerDescriptor` to dial).
+    pub peer: T,
+    /// A strong shared token derived from the SPAKE2 key, so the existing
+    /// data-plane pairing (`envoix-auth` SPAKE2 over the iroh connection) can
+    /// run unchanged - both peers derive the same one.
+    pub token: String,
+}
+
 /// Lets the broker wait for an iroh peer to close before dropping the relay.
 struct IrohClose(Connection);
 
@@ -115,7 +131,7 @@ pub async fn pair_in_room<T>(
     room_id: &str,
     password: &str,
     mine: &T,
-) -> Result<T>
+) -> Result<RoomPairing<T>>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
@@ -151,6 +167,9 @@ where
     let sealed: Vec<u8> = read_framed(&mut recv).await?;
     let peer: T = open_json(key.key(), &sealed)?;
 
+    // Derive a strong data-plane token from K (both peers get the same one).
+    let token = hex(&blake3::derive_key(DATA_TOKEN_CONTEXT, key.key()));
+
     // Graceful close: finish + wait for the broker to ack our FIN (so it is
     // delivered through the relay), then drain our recv to EOF before dropping.
     // No more data is expected after the descriptor, so a tiny cap is fine.
@@ -159,5 +178,15 @@ where
     let _ = recv.read_to_end(1024).await;
     drop(connection);
 
-    Ok(peer)
+    Ok(RoomPairing { peer, token })
+}
+
+/// Lowercase hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }

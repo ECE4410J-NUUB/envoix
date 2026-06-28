@@ -65,6 +65,9 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     let b_got = tokio::time::timeout(join, b).await.expect("B timed out").unwrap().expect("B pairs");
 
     // Each recovered the OTHER peer's iroh descriptor, sealed under the shared key.
-    assert_eq!(a_got, desc_b);
-    assert_eq!(b_got, desc_a);
+    assert_eq!(a_got.peer, desc_b);
+    assert_eq!(b_got.peer, desc_a);
+    // Both sides derived the same data-plane token from the shared key.
+    assert_eq!(a_got.token, b_got.token);
+    assert!(a_got.token.len() >= 12 && a_got.token.is_ascii());
 }
