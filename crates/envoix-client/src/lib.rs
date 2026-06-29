@@ -1,14 +1,13 @@
 //! Public application-facing facade for envoix clients.
 
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 pub use envoix_auth::{PairingConfig, SPAKE2_EXPERIMENTAL_WARNING};
 use envoix_error::CoreError;
 pub use envoix_protocol::PeerDescriptor;
 pub use envoix_session::{
-    EventSink, IdentityConfig, NoopEventSink, TransferCancelToken, TransferDirection,
+    BindAddrs, EventSink, IdentityConfig, NoopEventSink, TransferCancelToken, TransferDirection,
     TransferEvent, TransferSummary,
 };
 use envoix_session::{
@@ -160,8 +159,8 @@ pub struct SendFileRequest {
 /// Request to receive one file into a local directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiveFileRequest {
-    /// Local socket address to listen on.
-    pub listen_addr: SocketAddr,
+    /// Local socket addresses to listen on.
+    pub listen_addrs: BindAddrs,
     /// Directory where the received file and resume state are stored.
     pub output_dir: PathBuf,
 }
@@ -191,11 +190,11 @@ pub struct ReceiveRequest {
     pub output_dir: PathBuf,
     /// Connection strategy policy for this operation.
     pub connection_policy: ConnectionPolicy,
-    /// Local socket address to bind the QUIC listener on.
+    /// Local socket addresses to bind the QUIC listener on.
     ///
-    /// Use `"0.0.0.0:0"` for any IPv4 interface (auto port) or
-    /// `"[::]:0"` for any IPv6 interface (auto port).
-    pub listen_addr: SocketAddr,
+    /// Use `BindAddrs::dual_stack(0)` for any IPv4 and IPv6 interface
+    /// with OS-assigned ports.
+    pub listen_addrs: BindAddrs,
 }
 
 /// Advisory snapshot of the local network environment.
@@ -380,7 +379,7 @@ impl EnvoixClient {
     {
         self.validate_config()?;
         receive_file_with_bound_peer_with_cancel(
-            request.listen_addr,
+            request.listen_addrs,
             request.output_dir,
             self.session_config(),
             events,
@@ -435,7 +434,7 @@ impl EnvoixClient {
             direction: TransferDirection::Receive,
         });
         let endpoint =
-            bind_iroh_endpoint_enable_mdns(request.listen_addr, &self.config.identity).await?;
+            bind_iroh_endpoint_enable_mdns(request.listen_addrs, &self.config.identity).await?;
         let peer = endpoint.peer_descriptor()?;
         client_events.on_event(ClientEvent::DirectAddressAvailable { peer: peer.clone() });
         on_bound(peer);

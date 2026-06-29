@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::io::{self, Write};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -8,10 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, IdentityConfig,
-    PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING,
-    SendFileRequest, SendRequest, TransferCancelToken, TransferDirection, TransferEvent,
-    TransferSummary,
+    BindAddrs, ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink,
+    IdentityConfig, PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest,
+    SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest, TransferCancelToken,
+    TransferDirection, TransferEvent, TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
@@ -93,13 +92,14 @@ enum Command {
         #[arg(long, required_unless_present = "enable_mdns")]
         token: Option<String>,
         /// Address family to bind for receiving.
-        #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
+        #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
         ip_version: IpVersion,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum IpVersion {
+    Dual,
     Ipv4,
     Ipv6,
 }
@@ -228,7 +228,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             token,
             ip_version,
         } => {
-            let listen_addr = receive_addr_for(ip_version);
+            let listen_addrs = receive_addrs_for(ip_version);
             let identity = identity_config(identity);
             let summary = if enable_mdns {
                 match token {
@@ -242,7 +242,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addr,
+                                    listen_addrs,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
@@ -272,7 +272,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addr,
+                                    listen_addrs,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
@@ -304,7 +304,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 run_interruptible(
                     client.receive_file_with_bound_peer_with_cancel(
                         ReceiveFileRequest {
-                            listen_addr: receive_addr_for(ip_version),
+                            listen_addrs,
                             output_dir: output,
                         },
                         Box::new(ConsoleEventSink::new()),
@@ -352,12 +352,20 @@ where
     }
 }
 
-fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
-    let addr = match ip_version {
-        IpVersion::Ipv4 => IPV4_RECEIVE_ADDR,
-        IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
-    };
-    addr.parse().expect("default receive address is valid")
+fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
+    match ip_version {
+        IpVersion::Dual => BindAddrs::dual_stack(0),
+        IpVersion::Ipv4 => BindAddrs::single(
+            IPV4_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv4 address is valid"),
+        ),
+        IpVersion::Ipv6 => BindAddrs::single(
+            IPV6_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv6 address is valid"),
+        ),
+    }
 }
 
 /// Resolved fields extracted from a validated QR invite.
@@ -798,7 +806,30 @@ mod tests {
             } if output == std::path::Path::new("received")
                 && !enable_mdns
                 && token == "abcdefghijkl"
-                && ip_version == IpVersion::Ipv4
+                && ip_version == IpVersion::Dual
+        ));
+    }
+
+    #[test]
+    fn parses_receive_ipv4() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "received",
+            "--token",
+            "abcdefghijkl",
+            "--ip-version",
+            "ipv4",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                ip_version: IpVersion::Ipv4,
+                ..
+            }
         ));
     }
 
