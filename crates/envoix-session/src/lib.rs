@@ -5,7 +5,6 @@ mod endpoint;
 mod identity;
 mod room;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 
 use connection::IrohFrameConnection;
+pub use endpoint::BindAddrs;
 pub use endpoint::BoundEndpoint;
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
@@ -51,21 +51,21 @@ pub struct SessionConfig {
 
 /// Bind an iroh endpoint (listen addr) that can accept one incoming connection.
 pub async fn bind_iroh_endpoint(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_accept_endpoint(listen_addr, identity).await?,
+        local_endpoint: build_accept_endpoint(listen_addrs.into(), identity).await?,
     })
 }
 
 /// Bind an iroh endpoint (listen addr) and advertise it through iroh mDNS address lookup.
 pub async fn bind_iroh_endpoint_enable_mdns(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_advertising_accept_endpoint(listen_addr, identity).await?,
+        local_endpoint: build_advertising_accept_endpoint(listen_addrs.into(), identity).await?,
     })
 }
 
@@ -217,7 +217,7 @@ pub async fn send_file_enable_mdns_with_cancel(
 
 /// Receives one file and reports the concrete peer descriptor before accepting.
 pub async fn receive_file_with_bound_peer<F>(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
@@ -228,7 +228,7 @@ where
 {
     let cancel = TransferCancelToken::new();
     receive_file_with_bound_peer_with_cancel(
-        listen_addr,
+        listen_addrs,
         output_dir,
         config,
         events,
@@ -240,7 +240,7 @@ where
 
 /// Receives one file and stops while waiting or transferring if cancelled.
 pub async fn receive_file_with_bound_peer_with_cancel<F>(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
@@ -250,7 +250,7 @@ pub async fn receive_file_with_bound_peer_with_cancel<F>(
 where
     F: FnOnce(PeerDescriptor) + Send,
 {
-    let bound_endpoint = bind_iroh_endpoint(listen_addr, &config.identity).await?;
+    let bound_endpoint = bind_iroh_endpoint(listen_addrs, &config.identity).await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
     receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
