@@ -1,0 +1,25 @@
+{
+  "name": "envoix-ui-ux-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc -b && vite build",
+    "typecheck": "vue-tsc -b",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.22.0",
+    "qrcode.vue": "^3.4.1",
+    "vue": "^3.4.31",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "typescript": "^5.4.5",
+    "vite": "^8.1.0",
+    "vue-tsc": "^2.0.26"
+  }
+}
