@@ -73,6 +73,9 @@ pub async fn receive_file_via_room(
     let pairing = pair_in_room(&rdz, broker, room_id, password, &my_addr)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
+    // The rendezvous endpoint is only needed for the broker handshake; close it
+    // so it does not linger (and log) while the data transfer runs.
+    rdz.close().await;
 
     // Accept with retries: a stray or wrong-token dial must not kill the
     // transfer before the legitimate sender connects.
@@ -105,6 +108,9 @@ pub async fn send_file_via_room(
     let pairing = pair_in_room(&rdz, broker, room_id, password, &placeholder)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
+    // The rendezvous endpoint is only needed for the broker handshake; close it
+    // so it does not linger (and log) while the data transfer runs.
+    rdz.close().await;
 
     send_file_to_endpoint_addr(
         pairing.peer,
