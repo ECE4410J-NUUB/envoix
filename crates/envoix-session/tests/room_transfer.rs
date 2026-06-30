@@ -10,7 +10,7 @@ use envoix_session::{
     DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, PairingConfig, SessionConfig,
     receive_file_via_room, send_file_via_room,
 };
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tempfile::tempdir;
 
 async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
@@ -31,15 +31,20 @@ fn config() -> SessionConfig {
             token: "unused-placeholder".into(),
         },
         identity: IdentityConfig::Ephemeral,
+        relay: None,
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn file_transfers_through_the_rendezvous() {
     // Rendezvous broker.
-    let server = build_endpoint("127.0.0.1:0".parse().unwrap(), SecretKey::generate())
-        .await
-        .unwrap();
+    let server = build_endpoint(
+        "127.0.0.1:0".parse().unwrap(),
+        SecretKey::generate(),
+        RelayMode::Disabled,
+    )
+    .await
+    .unwrap();
     let broker = ready_addr(&server).await;
     tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new())));
 

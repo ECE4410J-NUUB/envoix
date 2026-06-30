@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use envoix_error::CoreError;
 use envoix_protocol::PeerDescriptor;
 use iroh::endpoint::{BindOpts, RelayMode, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 
 use crate::connection::IrohFrameConnection;
@@ -128,24 +128,42 @@ pub(crate) fn peer_addr_from_descriptor(
     ))
 }
 
+/// Convert an optional relay URL into an iroh [`RelayMode`]: `None` -> disabled
+/// (LAN/direct, unchanged behavior); `Some(url)` -> a single custom relay so an
+/// endpoint behind NAT stays reachable over WAN.
+pub(crate) fn relay_mode(relay: &Option<String>) -> Result<RelayMode, SessionError> {
+    match relay {
+        None => Ok(RelayMode::Disabled),
+        Some(url) => {
+            let url: RelayUrl = url
+                .parse()
+                .map_err(|error| CoreError::InvalidInput(format!("invalid relay url: {error}")))?;
+            Ok(RelayMode::Custom(RelayMap::from(url)))
+        }
+    }
+}
+
 pub(crate) async fn build_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
+    relay: &Option<String>,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, false).await
+    build_endpoint(Some(listen_addrs), identity, true, false, relay).await
 }
 
 pub(crate) async fn build_advertising_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
+    relay: &Option<String>,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, true).await
+    build_endpoint(Some(listen_addrs), identity, true, true, relay).await
 }
 
 pub(crate) async fn build_dial_endpoint(
     identity: &IdentityConfig,
+    relay: &Option<String>,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(None, identity, false, false).await
+    build_endpoint(None, identity, false, false, relay).await
 }
 
 async fn build_endpoint(
@@ -153,11 +171,12 @@ async fn build_endpoint(
     identity: &IdentityConfig,
     accept_incoming: bool,
     advertise_self: bool,
+    relay: &Option<String>,
 ) -> Result<Endpoint, SessionError> {
     let secret_key = load_secret_key(identity).await?;
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(relay_mode(relay)?)
         .clear_address_lookup();
     if accept_incoming {
         builder = builder.alpns(vec![ALPN.to_vec()]);

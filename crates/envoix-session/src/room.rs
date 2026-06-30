@@ -17,14 +17,16 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError, TransferSummary,
-    bind_iroh_endpoint, receive_with_auth_retries, send_file_manual,
+    bind_iroh_endpoint_with_relay, receive_with_auth_retries, send_file_manual,
 };
 
-/// An ephemeral iroh endpoint used only to reach the rendezvous broker.
-async fn rendezvous_endpoint() -> Result<Endpoint, SessionError> {
+/// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
+/// through `relay` (a relay URL) when set so it can reach a NATed broker.
+async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, SessionError> {
     build_endpoint(
         "0.0.0.0:0".parse().expect("valid addr"),
         SecretKey::generate(),
+        crate::endpoint::relay_mode(relay)?,
     )
     .await
     .map_err(|error| CoreError::Transport(error.to_string()))
@@ -61,10 +63,10 @@ pub async fn receive_file_via_room(
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
-    let bound = bind_iroh_endpoint(listen_addr, &config.identity).await?;
+    let bound = bind_iroh_endpoint_with_relay(listen_addr, &config.identity, &config.relay).await?;
     let my_descriptor = ready_descriptor(&bound).await?;
 
-    let rdz = rendezvous_endpoint().await?;
+    let rdz = rendezvous_endpoint(&config.relay).await?;
     let pairing = pair_in_room(&rdz, broker, room_id, password, &my_descriptor)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
@@ -92,7 +94,7 @@ pub async fn send_file_via_room(
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
-    let rdz = rendezvous_endpoint().await?;
+    let rdz = rendezvous_endpoint(&config.relay).await?;
     // The receiver ignores the sender's payload (the sender only dials), so send
     // a placeholder instead of waiting for this endpoint to learn an address.
     let placeholder = PeerDescriptor::new(

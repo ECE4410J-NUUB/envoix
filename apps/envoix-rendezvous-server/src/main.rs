@@ -10,7 +10,7 @@ use clap::Parser;
 use iroh::SecretKey;
 
 use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_iroh::{build_endpoint, serve_endpoint};
+use envoix_rendezvous_iroh::{build_endpoint, relay_mode_from_url, serve_endpoint};
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +25,10 @@ struct Cli {
     /// permissions if missing), so the endpoint id stays stable across restarts.
     #[arg(long, default_value = "rendezvous-secret.key")]
     secret_key: PathBuf,
+    /// Relay URL to register with for WAN reachability (e.g.
+    /// https://relay.example.com:8444). Omit for no relay (LAN/direct only).
+    #[arg(long)]
+    relay: Option<String>,
 }
 
 #[tokio::main]
@@ -36,7 +40,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let secret_key = load_or_create_secret_key(&cli.secret_key)
         .with_context(|| format!("secret key {}", cli.secret_key.display()))?;
-    let endpoint = build_endpoint(cli.bind, secret_key).await?;
+    let relay = relay_mode_from_url(cli.relay.as_deref())?;
+    let endpoint = build_endpoint(cli.bind, secret_key, relay).await?;
     tracing::info!(endpoint_id = %endpoint.id(), "rendezvous server listening");
     println!("rendezvous endpoint id: {}", endpoint.id());
 

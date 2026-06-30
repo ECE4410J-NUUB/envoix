@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, Incoming, RecvStream, RelayMode, SendStream, presets};
-use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr};
 
 use envoix_rendezvous::{
     CloseWaiter, Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed,
@@ -57,13 +57,17 @@ impl CloseWaiter for IrohClose {
 /// ALPN for the rendezvous protocol (distinct from the data-plane `envoix/1`).
 pub const RENDEZVOUS_ALPN: &[u8] = b"envoix-rendezvous/1";
 
-/// Bind an iroh endpoint that speaks the rendezvous ALPN. Relay is disabled for
-/// now (LAN/direct, matching the current client build); flip to a relay mode
-/// for WAN reachability.
-pub async fn build_endpoint(bind: SocketAddr, secret_key: SecretKey) -> Result<Endpoint> {
+/// Bind an iroh endpoint that speaks the rendezvous ALPN. Pass
+/// [`RelayMode::Disabled`] for LAN/direct, or a custom relay mode (see
+/// [`relay_mode_from_url`]) for WAN reachability through a relay.
+pub async fn build_endpoint(
+    bind: SocketAddr,
+    secret_key: SecretKey,
+    relay: RelayMode,
+) -> Result<Endpoint> {
     Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(relay)
         .clear_address_lookup()
         .alpns(vec![RENDEZVOUS_ALPN.to_vec()])
         .clear_ip_transports()
@@ -72,6 +76,19 @@ pub async fn build_endpoint(bind: SocketAddr, secret_key: SecretKey) -> Result<E
         .bind()
         .await
         .context("failed to bind iroh endpoint")
+}
+
+/// Build a [`RelayMode`] from an optional relay URL: `None` disables relays
+/// (LAN/direct only); `Some(url)` routes through that single custom relay so
+/// peers behind NAT can reach the broker and each other.
+pub fn relay_mode_from_url(url: Option<&str>) -> Result<RelayMode> {
+    match url {
+        None => Ok(RelayMode::Disabled),
+        Some(url) => {
+            let url: RelayUrl = url.parse().context("invalid relay url")?;
+            Ok(RelayMode::Custom(RelayMap::from(url)))
+        }
+    }
 }
 
 /// The endpoint's connectable address (id + direct socket addresses).

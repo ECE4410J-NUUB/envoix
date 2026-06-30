@@ -469,6 +469,7 @@ impl EnvoixClient {
             chunk_size: self.config.chunk_size,
             pairing: self.config.pairing.clone(),
             identity: self.config.identity.clone(),
+            relay: None,
         }
     }
 }

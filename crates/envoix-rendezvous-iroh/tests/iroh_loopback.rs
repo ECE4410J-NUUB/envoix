@@ -8,13 +8,17 @@ use std::time::Duration;
 use envoix_protocol::PeerDescriptor;
 use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, pair_in_room, serve_endpoint};
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
 /// Loopback bind, fresh identity.
 async fn endpoint() -> Endpoint {
-    build_endpoint("127.0.0.1:0".parse().unwrap(), SecretKey::generate())
-        .await
-        .expect("bind endpoint")
+    build_endpoint(
+        "127.0.0.1:0".parse().unwrap(),
+        SecretKey::generate(),
+        RelayMode::Disabled,
+    )
+    .await
+    .expect("bind endpoint")
 }
 
 /// Wait until the endpoint has a direct address, then return its connectable addr.

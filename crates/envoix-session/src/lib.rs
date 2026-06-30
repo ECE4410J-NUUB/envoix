@@ -47,6 +47,9 @@ pub struct SessionConfig {
     pub pairing: PairingConfig,
     /// iroh endpoint identity policy.
     pub identity: IdentityConfig,
+    /// Optional relay URL for WAN/NAT reachability. `None` keeps endpoints
+    /// LAN/direct only (unchanged behavior); `Some(url)` routes through a relay.
+    pub relay: Option<String>,
 }
 
 /// Bind an iroh endpoint (listen addr) that can accept one incoming connection.
@@ -54,8 +57,18 @@ pub async fn bind_iroh_endpoint(
     listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
+    bind_iroh_endpoint_with_relay(listen_addrs, identity, &None).await
+}
+
+/// Like [`bind_iroh_endpoint`], but routes through `relay` (a relay URL) when
+/// set, so the bound endpoint stays reachable from behind NAT.
+pub(crate) async fn bind_iroh_endpoint_with_relay(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_accept_endpoint(listen_addrs.into(), identity).await?,
+        local_endpoint: build_accept_endpoint(listen_addrs.into(), identity, relay).await?,
     })
 }
 
@@ -65,7 +78,8 @@ pub async fn bind_iroh_endpoint_enable_mdns(
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_advertising_accept_endpoint(listen_addrs.into(), identity).await?,
+        local_endpoint: build_advertising_accept_endpoint(listen_addrs.into(), identity, &None)
+            .await?,
     })
 }
 
@@ -90,7 +104,7 @@ pub async fn send_file_manual_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint = build_dial_endpoint(&config.identity).await?;
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mut connection = dial(local_endpoint.clone(), &peer).await?;
     let engine = TransferEngine::new(config.chunk_size);
 
@@ -126,7 +140,7 @@ pub async fn send_file_enable_mdns_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint = build_dial_endpoint(&config.identity).await?;
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mdns = MdnsAddressLookup::builder()
         .advertise(false)
         .build(local_endpoint.id())
@@ -250,7 +264,8 @@ pub async fn receive_file_with_bound_peer_with_cancel<F>(
 where
     F: FnOnce(PeerDescriptor) + Send,
 {
-    let bound_endpoint = bind_iroh_endpoint(listen_addrs, &config.identity).await?;
+    let bound_endpoint =
+        bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
     receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
