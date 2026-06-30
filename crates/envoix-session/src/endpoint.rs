@@ -1,10 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use envoix_error::CoreError;
 use envoix_protocol::PeerDescriptor;
 use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
+use noq_proto::congestion::Bbr3Config;
 
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
@@ -207,10 +209,20 @@ pub(crate) async fn build_dial_endpoint(
 fn data_transport_config() -> QuicTransportConfig {
     // 16 MiB fills ~57 MB/s at 280 ms RTT, with headroom for lower-latency links.
     const WINDOW: u32 = 16 * 1024 * 1024;
-    QuicTransportConfig::builder()
+    let mut builder = QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(WINDOW))
-        .send_window(WINDOW as u64)
-        .build()
+        .send_window(WINDOW as u64);
+    // Default to BBRv3. The loss-based default (CUBIC) treats every packet loss
+    // as congestion and backs off, which erodes throughput on lossy long-fat
+    // links (e.g. trans-Pacific, ~0.3% loss at 280 ms RTT): measured ~2.5x
+    // slower than BBRv3 there, while the two match on clean paths. BBRv3 instead
+    // paces at the measured bandwidth and rides through non-congestion loss. Set
+    // ENVOIX_CC=cubic to fall back to CUBIC.
+    let use_cubic = std::env::var("ENVOIX_CC").is_ok_and(|v| v.eq_ignore_ascii_case("cubic"));
+    if !use_cubic {
+        builder = builder.congestion_controller_factory(Arc::new(Bbr3Config::default()));
+    }
+    builder.build()
 }
 
 async fn build_endpoint(
