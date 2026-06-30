@@ -334,9 +334,17 @@ impl TransferEngine {
             }))
             .await
             .map_err(peer_closed_error)?;
+        // The whole file plus the Complete frame (which carries the file hash the
+        // receiver verifies before finalizing) have already been sent. The
+        // CompleteAck is only a delivery confirmation, and the receiver closes the
+        // connection right after sending it - so a connection close or idle timeout
+        // while we wait for the ack is a benign close race, not a transfer failure.
+        // A genuine problem surfaces earlier, during the chunk phase, or here as an
+        // Error frame. Still honor an explicit cancellation.
         match recv_frame_or_cancel(connection, cancel).await {
             Ok(frame) => expect_complete_ack(frame, &transfer_id)?,
-            Err(error) => return Err(peer_closed_error(error)),
+            Err(error) if cancel.is_cancelled() => return Err(error),
+            Err(_) => {}
         }
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
@@ -1278,6 +1286,45 @@ mod tests {
                 .unwrap(),
             b"resume over two connections"
         );
+    }
+
+    #[tokio::test]
+    async fn sender_succeeds_when_complete_ack_lost_to_close_race() {
+        // The receiver finalizes and closes the connection in the window before its
+        // CompleteAck reaches the sender. The sender has already sent the whole file
+        // plus the Complete frame, so it must report success rather than a spurious
+        // connection error.
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("race.txt");
+        let payload = b"complete ack lost to a close race";
+        tokio::fs::write(&source_path, payload).await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
+            // Drain chunks, then drop the connection on Complete WITHOUT acking.
+            loop {
+                match receiver_connection.recv_frame().await.unwrap() {
+                    Frame::Chunk(_) => {}
+                    Frame::Complete(complete) => {
+                        assert_eq!(complete.transfer_id, transfer_id);
+                        break;
+                    }
+                    other => panic!("unexpected frame while draining: {other:?}"),
+                }
+            }
+            // receiver_connection is dropped here, so the sender's wait for the
+            // CompleteAck sees the connection close.
+        });
+
+        let summary = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .expect("post-Complete close race must not fail an otherwise-complete send");
+        assert_eq!(summary.bytes_transferred, payload.len() as u64);
+        receiver.await.unwrap();
     }
 
     #[tokio::test]
