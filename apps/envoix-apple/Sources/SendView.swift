@@ -1,11 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SendView: View {
-    @StateObject private var viewModel = TransferViewModel()
+    @ObservedObject var viewModel: TransferViewModel
     @State private var file: URL?
     @AppStorage("envoix.token") private var token: String = ""
     @State private var invite: String = ""
     @State private var mode: PairingMode = .token
+    @State private var dropTargeted = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -19,14 +21,36 @@ struct SendView: View {
             .labelsHidden()
             .disabled(viewModel.isBusy)
 
-            HStack {
-                Text(file?.lastPathComponent ?? "No file chosen")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(file == nil ? .secondary : .primary)
-                Spacer()
-                Button("Choose File…") { file = chooseURL(directory: false) }
-                    .disabled(viewModel.isBusy)
+            VStack(spacing: 8) {
+                HStack {
+                    Image(systemName: file == nil ? "doc" : "doc.fill")
+                        .foregroundStyle(.secondary)
+                    Text(file?.lastPathComponent ?? "Drop a file here, or choose one")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(file == nil ? .secondary : .primary)
+                    Spacer()
+                }
+                HStack {
+                    Button("Choose File…") { file = chooseURL(directory: false) }
+                    Button("Paste Path") { if let url = pastedFileURL() { file = url } }
+                    Spacer()
+                }
+                .disabled(viewModel.isBusy)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(dropTargeted ? Color.accentColor : Color.secondary.opacity(0.3),
+                                  style: StrokeStyle(lineWidth: dropTargeted ? 2 : 1, dash: [6]))
+            )
+            .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+                guard !viewModel.isBusy, let provider = providers.first else { return false }
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { DispatchQueue.main.async { file = url } }
+                }
+                return true
             }
 
             if mode == .token {
@@ -46,7 +70,7 @@ struct SendView: View {
             Spacer()
 
             Button(action: primaryAction) {
-                Text(viewModel.isBusy ? "Cancel" : "Send")
+                Text(primaryLabel)
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)
@@ -54,6 +78,14 @@ struct SendView: View {
             .disabled(!canSend && !viewModel.isBusy)
         }
         .padding()
+    }
+
+    private var primaryLabel: String {
+        if viewModel.isBusy { return "Cancel" }
+        switch viewModel.phase {
+        case .completed, .failed: return "Send Again"
+        default: return "Send"
+        }
     }
 
     private var canSend: Bool {

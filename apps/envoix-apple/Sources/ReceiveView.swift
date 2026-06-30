@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ReceiveView: View {
-    @StateObject private var viewModel = TransferViewModel()
+    @ObservedObject var viewModel: TransferViewModel
     // Remembered across launches. Empty means "use the Downloads default".
     @AppStorage("envoix.outputDir") private var outputDirPath: String = ""
     @AppStorage("envoix.token") private var token: String = ""
@@ -41,7 +41,11 @@ struct ReceiveView: View {
             if mode == .token {
                 TokenField(token: $token, disabled: viewModel.isBusy)
             } else if !viewModel.invite.isEmpty {
-                addressSection
+                inviteSection
+            }
+
+            if !viewModel.peerAddress.isEmpty {
+                addressReveal
             }
 
             TransferStatusView(viewModel: viewModel)
@@ -49,7 +53,7 @@ struct ReceiveView: View {
             Spacer()
 
             Button(action: primaryAction) {
-                Text(viewModel.isBusy ? "Cancel" : "Start Receiving")
+                Text(primaryLabel)
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)
@@ -59,33 +63,51 @@ struct ReceiveView: View {
         .padding()
     }
 
-    /// The invite/QR is hidden by default; revealed only on explicit request.
-    @ViewBuilder private var addressSection: some View {
+    private var primaryLabel: String {
+        if viewModel.isBusy { return "Cancel" }
+        switch viewModel.phase {
+        case .completed, .failed: return "Receive Again"
+        default: return "Start Receiving"
+        }
+    }
+
+    /// The invite (QR + string) is the pairing artifact meant to be shared, so
+    /// it is shown directly.
+    @ViewBuilder private var inviteSection: some View {
         VStack(spacing: 8) {
+            if let image = QRCode.image(from: viewModel.invite) {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 180, height: 180)
+            }
+            HStack {
+                Text(viewModel.invite)
+                    .font(.caption.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Copy") { copyToPasteboard(viewModel.invite) }
+                Button("Regenerate") { startReceive() }
+            }
+        }
+    }
+
+    /// The raw network address carries the real IP, so it stays hidden until the
+    /// user explicitly reveals it.
+    @ViewBuilder private var addressReveal: some View {
+        VStack(spacing: 4) {
             Button(revealAddress ? "Hide Address" : "Show Address") {
                 revealAddress.toggle()
             }
             .controlSize(.small)
 
             if revealAddress {
-                if let image = QRCode.image(from: viewModel.invite) {
-                    Image(nsImage: image)
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 180, height: 180)
-                }
-                HStack {
-                    Text(viewModel.invite)
-                        .font(.caption.monospaced())
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button("Copy") { copyToPasteboard(viewModel.invite) }
-                    Button("Regenerate") { startReceive() }
-                }
-            } else {
-                Text("Address hidden — click Show to reveal")
-                    .font(.caption)
+                Text(viewModel.peerAddress)
+                    .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
     }

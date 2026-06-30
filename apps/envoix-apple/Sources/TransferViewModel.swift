@@ -1,5 +1,31 @@
 import Foundation
+import Combine
 import EnvoixCore
+
+/// App-wide shared state: the two long-lived transfer view models (one per tab).
+///
+/// Both the main window and the menu-bar popover observe the same instances, so
+/// status stays in sync everywhere. Re-emitting the children's `objectWillChange`
+/// lets a view that observes only `AppModel` still update on transfer progress.
+final class AppModel: ObservableObject {
+    static let shared = AppModel()
+
+    let receive = TransferViewModel()
+    let send = TransferViewModel()
+
+    private var cancellables = Set<AnyCancellable>()
+
+    private init() {
+        for vm in [receive, send] {
+            vm.objectWillChange
+                .sink { [weak self] in self?.objectWillChange.send() }
+                .store(in: &cancellables)
+        }
+    }
+
+    /// True while either side has a transfer in flight.
+    var isActive: Bool { receive.isBusy || send.isBusy }
+}
 
 /// Drives one send or receive operation and exposes its state to SwiftUI.
 ///
@@ -20,11 +46,22 @@ final class TransferViewModel: ObservableObject {
     @Published var transferred: UInt64 = 0
     @Published var total: UInt64 = 0
     @Published var statusText: String = ""
+    @Published var peerAddress: String = ""   // raw IP-bearing address, hidden by default
+    @Published var bytesPerSec: Double = 0    // rolling average, 0 until measurable
+    @Published var completedFileURL: URL?     // receiver only: where the file landed
 
     private var session: EnvoixSession?
+    private var destinationDir: String?       // receiver only
+    private var rate = RateTracker()
 
     var progressFraction: Double {
         total > 0 ? Double(transferred) / Double(total) : 0
+    }
+
+    /// Seconds left at the current average rate, or nil if not yet estimable.
+    var etaSeconds: Double? {
+        guard bytesPerSec > 0, total > transferred else { return nil }
+        return Double(total - transferred) / bytesPerSec
     }
 
     var isBusy: Bool {
@@ -38,21 +75,25 @@ final class TransferViewModel: ObservableObject {
 
     /// Receive on the local network using a shared token (mDNS auto-discovery).
     func startReceivingWithToken(outputDir: String, token: String) {
+        destinationDir = outputDir
         start(phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
     }
 
     /// Receive by publishing an invite the sender pastes/scans.
     func startReceivingWithInvite(outputDir: String) {
+        destinationDir = outputDir
         start(phase: .waiting) { try $0.receive(outputDir: outputDir, observer: $1) }
     }
 
     /// Send on the local network using a shared token (mDNS auto-discovery).
     func startSendingWithToken(filePath: String, token: String) {
+        destinationDir = nil
         start(phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
     }
 
     /// Send to the peer encoded in an invite string.
     func startSendingWithInvite(filePath: String, invite: String) {
+        destinationDir = nil
         start(phase: .transferring) { try $0.sendInvite(invite: invite, filePath: filePath, observer: $1) }
     }
 
@@ -69,7 +110,7 @@ final class TransferViewModel: ObservableObject {
         do {
             try operation(session, Observer(self))
         } catch {
-            self.phase = .failed(error.localizedDescription)
+            self.phase = .failed(friendlyError(error.localizedDescription))
         }
     }
 
@@ -81,22 +122,39 @@ final class TransferViewModel: ObservableObject {
         fileName = name
         self.total = total
         transferred = 0
+        rate.reset()
+        bytesPerSec = 0
         phase = .transferring
     }
 
     func handleProgress(_ transferred: UInt64, _ total: UInt64) {
         self.transferred = transferred
         self.total = total
+        bytesPerSec = rate.record(transferred)
     }
 
     func handleCompleted(_ bytes: UInt64) {
         transferred = total
+        bytesPerSec = 0
+        if let dir = destinationDir, !fileName.isEmpty {
+            completedFileURL = URL(fileURLWithPath: dir).appendingPathComponent(fileName)
+        }
         phase = .completed(bytes: bytes)
     }
 
-    func handleFailed(_ reason: String) { phase = .failed(reason) }
+    func handleFailed(_ reason: String) { phase = .failed(friendlyError(reason)) }
 
-    func handleStatus(_ message: String) { statusText = message }
+    /// The core echoes the bound peer as `"address: <descriptor>"`, which
+    /// carries the real IP. Keep that out of the general status line and stash
+    /// it separately so the UI can gate it behind an explicit reveal.
+    func handleStatus(_ message: String) {
+        let prefix = "address: "
+        if message.hasPrefix(prefix) {
+            peerAddress = String(message.dropFirst(prefix.count))
+        } else {
+            statusText = message
+        }
+    }
 
     private func reset() {
         invite = ""
@@ -104,8 +162,51 @@ final class TransferViewModel: ObservableObject {
         transferred = 0
         total = 0
         statusText = ""
+        peerAddress = ""
+        bytesPerSec = 0
+        completedFileURL = nil
+        rate.reset()
         phase = .idle
     }
+}
+
+/// Rolling-window throughput estimate: average speed over roughly the last few
+/// seconds, which absorbs short bursts/stalls without lagging the whole transfer.
+private struct RateTracker {
+    private struct Sample { let time: TimeInterval; let bytes: UInt64 }
+    private var samples: [Sample] = []
+    private let window: TimeInterval = 3
+
+    mutating func reset() { samples.removeAll() }
+
+    /// Records a cumulative byte count, returns the current bytes/sec estimate.
+    mutating func record(_ bytes: UInt64) -> Double {
+        let now = ProcessInfo.processInfo.systemUptime
+        samples.append(Sample(time: now, bytes: bytes))
+        samples.removeAll { now - $0.time > window }
+        guard let first = samples.first, samples.count > 1 else { return 0 }
+        let dt = now - first.time
+        guard dt > 0 else { return 0 }
+        return Double(bytes - first.bytes) / dt
+    }
+}
+
+/// Maps common raw failure strings to friendlier English; passes others through.
+func friendlyError(_ reason: String) -> String {
+    let lower = reason.lowercased()
+    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("deadline") {
+        return "Couldn't reach the other device. Make sure both are on the same Wi-Fi network and the token matches."
+    }
+    if lower.contains("no peer") || lower.contains("not found") || lower.contains("no route") {
+        return "No device found. Check that the other side is running and the token or invite is correct."
+    }
+    if lower.contains("expired") {
+        return "This invite has expired. Ask the receiver to generate a new one."
+    }
+    if lower.contains("permission") || lower.contains("denied") {
+        return "Access was denied. Check the destination folder permissions and local-network access."
+    }
+    return reason
 }
 
 /// Bridges core `TransferObserver` callbacks (delivered on Rust runtime threads)

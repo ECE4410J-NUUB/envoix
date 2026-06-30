@@ -1,14 +1,16 @@
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var model: AppModel
+
     var body: some View {
         TabView {
-            ReceiveView()
+            ReceiveView(viewModel: model.receive)
                 .tabItem { Label("Receive", systemImage: "tray.and.arrow.down") }
-            SendView()
+            SendView(viewModel: model.send)
                 .tabItem { Label("Send", systemImage: "paperplane") }
         }
         .padding()
-        .frame(width: 440, height: 520)
+        .frame(minWidth: 460, minHeight: 540)
     }
 }

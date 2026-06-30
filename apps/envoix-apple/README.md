@@ -54,12 +54,24 @@ The receive folder defaults to `~/Downloads` until you pick another (remembered
 across launches). The first transfer may trigger a macOS "allow local network
 access" prompt.
 
+Quality-of-life:
+
+- **Token mode** has a *Generate* button (and *Copy*) so you don't have to
+  invent a token; it is shared between the Send and Receive tabs.
+- **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
+  as well as the file panel.
+- During a transfer the status line shows live throughput and an ETA based on a
+  short rolling average; on completion the receiver gets *Reveal in Finder* and
+  a copyable absolute path.
+- A **menu-bar item** shows transfer status and an *Open Envoix* action; closing
+  the main window keeps the app running there. The window is resizable and
+  supports full screen.
+
 ## Roadmap (not yet implemented)
 
 Planned follow-ups, captured here so they are not lost:
 
 - Multi-file / folder transfer (near-term: app-side zip; later: core manifest).
-- Menu-bar (tray) icon for quick access.
 - Global hotkey to send a chosen file fast.
 - Saved peers: fixed token per known machine, so reconnecting needs no re-entry.
 - Launch-at-login option.
