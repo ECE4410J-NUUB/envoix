@@ -182,6 +182,23 @@ pub async fn pair_in_room<T>(
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
+    let session = join_room(endpoint, broker, room_id).await?;
+    drive_pairing(session, password, mine).await
+}
+
+/// Drive the end-to-end pairing over an already-joined [`BrokerSession`]: run
+/// SPAKE2 with `password`, then swap payloads sealed under the derived key.
+/// Split from [`pair_in_room`] so a caller can time-box just this phase - with a
+/// live partner it completes in milliseconds, so a stall means the broker
+/// matched us with a stale/dead peer and the caller should re-join.
+pub async fn drive_pairing<T>(
+    session: BrokerSession,
+    password: &str,
+    mine: &T,
+) -> Result<RoomPairing<T>>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
     use envoix_pairing::{
         Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
     };
@@ -191,7 +208,7 @@ where
         mut send,
         mut recv,
         role,
-    } = join_room(endpoint, broker, room_id).await?;
+    } = session;
 
     let key = match role {
         Role::Initiator => {

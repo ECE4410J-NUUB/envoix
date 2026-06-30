@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use envoix_error::CoreError;
-use envoix_rendezvous_iroh::{build_endpoint, pair_in_room, split_code};
+use envoix_rendezvous_iroh::{RoomPairing, build_endpoint, drive_pairing, join_room, split_code};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
@@ -45,6 +45,39 @@ async fn ready_endpoint_addr(bound: &BoundEndpoint) -> EndpointAddr {
     bound.endpoint_addr()
 }
 
+/// Pair in a room, re-joining if the broker matched us with a stale dead peer.
+/// `join_room` blocks until the broker matches us, so it never cuts an honest
+/// wait short. Once matched, the SPAKE2 exchange with a live partner takes
+/// milliseconds, so if it stalls past `EXCHANGE_TIMEOUT` the partner is a dead
+/// peer left by an earlier run (iroh has not yet noticed its connection is gone).
+/// We drop it and re-join - that failed match already consumed the dead peer, so
+/// the next join reaches a live partner (or parks to wait for one).
+async fn pair_in_room_retrying<T>(
+    rdz: &Endpoint,
+    broker: &EndpointAddr,
+    room_id: &str,
+    password: &str,
+    mine: &T,
+) -> Result<RoomPairing<T>, SessionError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    const ATTEMPTS: usize = 4;
+    const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
+    let mut last: Option<SessionError> = None;
+    for _ in 0..ATTEMPTS {
+        let session = join_room(rdz, broker.clone(), room_id)
+            .await
+            .map_err(|error| CoreError::Transport(error.to_string()))?;
+        match tokio::time::timeout(EXCHANGE_TIMEOUT, drive_pairing(session, password, mine)).await {
+            Ok(Ok(pairing)) => return Ok(pairing),
+            Ok(Err(error)) => last = Some(CoreError::Transport(error.to_string())),
+            Err(_) => last = Some(CoreError::Transport("rendezvous pairing stalled".into())),
+        }
+    }
+    Err(last.expect("at least one attempt failed"))
+}
+
 /// Override the pairing config with the token derived from the room pairing.
 fn with_room_token(config: SessionConfig, token: String) -> SessionConfig {
     SessionConfig {
@@ -70,9 +103,7 @@ pub async fn receive_file_via_room(
     let my_addr = ready_endpoint_addr(&bound).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
-    let pairing = pair_in_room(&rdz, broker, room_id, password, &my_addr)
-        .await
-        .map_err(|error| CoreError::Transport(error.to_string()))?;
+    let pairing = pair_in_room_retrying(&rdz, &broker, room_id, password, &my_addr).await?;
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
@@ -105,9 +136,7 @@ pub async fn send_file_via_room(
     // valid endpoint address works as a placeholder.
     let placeholder = rdz.addr();
 
-    let pairing = pair_in_room(&rdz, broker, room_id, password, &placeholder)
-        .await
-        .map_err(|error| CoreError::Transport(error.to_string()))?;
+    let pairing = pair_in_room_retrying(&rdz, &broker, room_id, password, &placeholder).await?;
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
