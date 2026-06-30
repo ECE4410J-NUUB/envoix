@@ -69,6 +69,7 @@ impl RoomRegistry {
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
             return Err(RendezvousError::Rejected("room id length out of range"));
         }
+        tracing::debug!(room = %room_id, "join");
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
@@ -95,6 +96,7 @@ impl RoomRegistry {
                             id,
                         },
                     );
+                    tracing::debug!(room = %room_id, id, "parked (waiting for partner)");
                     Decision::Parked(ready_rx, id)
                 }
             }
@@ -103,6 +105,7 @@ impl RoomRegistry {
         match decision {
             // We are the second peer; release the first's task and run the relay.
             Decision::Matched(first, conn) => {
+                tracing::debug!(room = %room_id, "matched two peers");
                 let _ = first.ready.send(());
                 run_pair(first.conn, conn).await
             }
@@ -117,11 +120,15 @@ impl RoomRegistry {
                         if waiting.get(&room_id).is_some_and(|w| w.id == id) {
                             waiting.remove(&room_id);
                         }
+                        tracing::debug!(room = %room_id, id, "expired (no partner within ttl)");
                         Err(RendezvousError::Expired)
                     }
                 }
             }
-            Decision::Rejected(reason) => Err(RendezvousError::Rejected(reason)),
+            Decision::Rejected(reason) => {
+                tracing::debug!(room = %room_id, reason, "rejected");
+                Err(RendezvousError::Rejected(reason))
+            }
         }
     }
 }
