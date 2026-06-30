@@ -269,6 +269,7 @@ input:focus {
 .file-drop {
   display: grid;
   place-items: center;
+  align-content: center;
   gap: 10px;
   min-height: 150px;
   border: 1px dashed color-mix(in srgb, var(--accent) 52%, var(--line));
@@ -340,6 +341,29 @@ input:focus {
   color: var(--muted);
   background: transparent;
   font-size: 0.78rem;
+}
+
+.tab-icon-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.badge {
+  position: absolute;
+  top: -5px;
+  right: -9px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  padding: 0 4px;
+  color: #fff;
+  background: var(--accent);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 .bottom-tabs button.active {

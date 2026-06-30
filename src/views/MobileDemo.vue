@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { Camera, Clipboard, Download, FileUp, Send, Settings, Shuffle, Zap } from '@lucide/vue';
+import { Camera, Clipboard, Download, FileUp, FolderOpen, Send, Settings, Shuffle, Zap } from '@lucide/vue';
 
 import CopyButton from '@/components/CopyButton.vue';
 import DemoQr from '@/components/DemoQr.vue';
@@ -11,6 +11,7 @@ type TabName = 'transfer' | 'receive' | 'send' | 'settings';
 const activeTab = ref<TabName>('transfer');
 const receiveToken = ref('');
 const sendToken = ref('');
+const savePath = ref('Downloads/Envoix');
 const inviteInput = ref('');
 const serverUrl = ref('https://rendezvous.envoix.local');
 const relayUrl = ref('turn://relay.envoix.local');
@@ -22,9 +23,9 @@ const selectedImage = ref('');
 const selectedFile = ref('');
 
 const tabs = [
-  { id: 'transfer' as const, label: 'Transfer', icon: Shuffle },
-  { id: 'receive' as const, label: 'Receive', icon: Download },
   { id: 'send' as const, label: 'Send', icon: Send },
+  { id: 'receive' as const, label: 'Receive', icon: Download },
+  { id: 'transfer' as const, label: 'Transfer', icon: Shuffle },
   { id: 'settings' as const, label: 'Settings', icon: Settings },
 ];
 
@@ -158,6 +159,16 @@ function onFilePick(event: Event) {
             <span>{{ demoLink }}</span>
             <CopyButton :copied="copied" @copy="copyInvite" />
           </div>
+          <label class="field-row">
+            Save location
+            <span class="input-with-action">
+              <input v-model="savePath" placeholder="Downloads/Envoix" />
+              <button type="button" @click="flash('Save location selected')">
+                <FolderOpen :size="16" aria-hidden="true" />
+                Select
+              </button>
+            </span>
+          </label>
           <div class="form-block">
             <label for="receive-token">Short token pairing</label>
             <input id="receive-token" v-model="receiveToken" autocomplete="off" placeholder="shared-token-123" />
@@ -226,7 +237,10 @@ function onFilePick(event: Event) {
             :class="{ active: activeTab === tab.id }"
             @click="activeTab = tab.id"
           >
-            <component :is="tab.icon" :size="20" aria-hidden="true" />
+            <div class="tab-icon-wrap">
+              <component :is="tab.icon" :size="20" aria-hidden="true" />
+              <span v-if="tab.id === 'transfer' && connections.length" class="badge">{{ connections.length }}</span>
+            </div>
             <span>{{ tab.label }}</span>
           </button>
         </nav>
