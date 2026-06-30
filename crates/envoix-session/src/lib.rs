@@ -22,8 +22,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 
 use connection::IrohFrameConnection;
-pub use endpoint::BindAddrs;
-pub use endpoint::BoundEndpoint;
+pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
     peer_addr_from_descriptor,

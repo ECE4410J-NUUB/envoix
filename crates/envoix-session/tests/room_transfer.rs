@@ -57,7 +57,7 @@ async fn file_transfers_through_the_rendezvous() {
     std::fs::create_dir(&out).unwrap();
 
     let code = "1234-amber-comet";
-    let listen = "127.0.0.1:0".parse().unwrap();
+    let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let (broker_r, broker_s) = (broker.clone(), broker.clone());
     let out_dir = out.clone();

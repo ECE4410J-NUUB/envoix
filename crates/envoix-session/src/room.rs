@@ -6,7 +6,6 @@
 //! `receive_one_authenticated` path, authenticated with a token derived from the
 //! pairing key (so the data-plane SPAKE2 still runs and is channel-bound).
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,8 +14,9 @@ use envoix_rendezvous_iroh::{build_endpoint, pair_in_room, split_code};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError, TransferSummary,
-    bind_iroh_endpoint_with_relay, receive_with_auth_retries, send_file_to_endpoint_addr,
+    BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
+    TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
+    send_file_to_endpoint_addr,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
@@ -59,13 +59,14 @@ fn with_room_token(config: SessionConfig, token: String) -> SessionConfig {
 pub async fn receive_file_via_room(
     broker: EndpointAddr,
     code: &str,
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
-    let bound = bind_iroh_endpoint_with_relay(listen_addr, &config.identity, &config.relay).await?;
+    let bound =
+        bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
     let my_addr = ready_endpoint_addr(&bound).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;

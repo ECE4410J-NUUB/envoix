@@ -134,6 +134,30 @@ pub(crate) fn peer_addr_from_descriptor(
     ))
 }
 
+/// Parse a rendezvous broker address `<endpoint-id>@<ip:port>` into an
+/// [`EndpointAddr`]. When `relay` (a relay URL) is given it is added as a
+/// fallback transport, so the broker stays reachable even if direct UDP to it
+/// is blocked.
+pub fn parse_broker_addr(addr: &str, relay: Option<&str>) -> Result<EndpointAddr, SessionError> {
+    let (id, socket) = addr.split_once('@').ok_or_else(|| {
+        CoreError::InvalidInput("rendezvous address must be <endpoint-id>@<ip:port>".into())
+    })?;
+    let id = id
+        .parse::<EndpointId>()
+        .map_err(|error| CoreError::InvalidInput(format!("invalid endpoint id: {error}")))?;
+    let socket = socket
+        .parse::<SocketAddr>()
+        .map_err(|error| CoreError::InvalidInput(format!("invalid broker address: {error}")))?;
+    let mut addrs = vec![TransportAddr::Ip(socket)];
+    if let Some(relay) = relay {
+        let relay = relay
+            .parse::<RelayUrl>()
+            .map_err(|error| CoreError::InvalidInput(format!("invalid relay url: {error}")))?;
+        addrs.push(TransportAddr::Relay(relay));
+    }
+    Ok(EndpointAddr::from_parts(id, addrs))
+}
+
 /// Convert an optional relay URL into an iroh [`RelayMode`]: `None` -> disabled
 /// (LAN/direct, unchanged behavior); `Some(url)` -> a single custom relay so an
 /// endpoint behind NAT stays reachable over WAN.
@@ -210,6 +234,7 @@ async fn build_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::SecretKey;
 
     #[test]
     fn dual_stack_bind_addrs_include_ipv4_and_ipv6_unspecified() {
@@ -237,5 +262,32 @@ mod tests {
                 .iter()
                 .any(|bind_addr| bind_addr.addr.is_ipv6() && !bind_addr.required)
         );
+    }
+
+    #[test]
+    fn broker_addr_parses_id_and_socket() {
+        let id = SecretKey::generate().public();
+        let addr = parse_broker_addr(&format!("{id}@127.0.0.1:8445"), None).unwrap();
+        let socket: SocketAddr = "127.0.0.1:8445".parse().unwrap();
+        assert_eq!(
+            addr,
+            EndpointAddr::from_parts(id, [TransportAddr::Ip(socket)])
+        );
+    }
+
+    #[test]
+    fn broker_addr_appends_relay() {
+        let id = SecretKey::generate().public();
+        let addr = parse_broker_addr(
+            &format!("{id}@127.0.0.1:8445"),
+            Some("https://relay.example:8444"),
+        )
+        .unwrap();
+        assert_eq!(addr.relay_urls().count(), 1);
+    }
+
+    #[test]
+    fn broker_addr_requires_at_sign() {
+        assert!(parse_broker_addr("127.0.0.1:8445", None).is_err());
     }
 }

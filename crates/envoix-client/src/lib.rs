@@ -197,6 +197,36 @@ pub struct ReceiveRequest {
     pub listen_addrs: BindAddrs,
 }
 
+/// Request to send one file by pairing in a rendezvous room with a short code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoomSendRequest {
+    /// Rendezvous broker address, `<endpoint-id>@<ip:port>`.
+    pub broker: String,
+    /// Optional relay URL for WAN/NAT reachability of the data plane and broker.
+    pub relay: Option<String>,
+    /// Short pairing code shared with the receiver.
+    pub code: String,
+    /// Local file path to send.
+    pub file_path: PathBuf,
+    /// Whether receiver-side resume state may be used.
+    pub resume: bool,
+}
+
+/// Request to receive one file by pairing in a rendezvous room with a short code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoomReceiveRequest {
+    /// Rendezvous broker address, `<endpoint-id>@<ip:port>`.
+    pub broker: String,
+    /// Optional relay URL for WAN/NAT reachability of the data plane and broker.
+    pub relay: Option<String>,
+    /// Short pairing code shared with the sender.
+    pub code: String,
+    /// Directory where the received file and resume state are stored.
+    pub output_dir: PathBuf,
+    /// Local socket addresses to bind the data-plane listener on.
+    pub listen_addrs: BindAddrs,
+}
+
 /// Advisory snapshot of the local network environment.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkEnvironment {
@@ -458,6 +488,48 @@ impl EnvoixClient {
         Err(CoreError::Discovery(
             "network environment detection is not implemented".into(),
         ))
+    }
+
+    /// Sends one file by pairing in a rendezvous room using a short code. The
+    /// pairing is derived from the SPAKE2 exchange, so no token is required.
+    pub async fn send_file_via_room(
+        &self,
+        request: RoomSendRequest,
+        events: Box<dyn EventSink>,
+    ) -> Result<TransferSummary, PublicError> {
+        let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
+        let mut config = self.session_config();
+        config.relay = request.relay;
+        envoix_session::send_file_via_room(
+            broker,
+            &request.code,
+            request.file_path,
+            request.resume,
+            config,
+            events,
+        )
+        .await
+    }
+
+    /// Receives one file by pairing in a rendezvous room using a short code. The
+    /// pairing is derived from the SPAKE2 exchange, so no token is required.
+    pub async fn receive_file_via_room(
+        &self,
+        request: RoomReceiveRequest,
+        events: Box<dyn EventSink>,
+    ) -> Result<TransferSummary, PublicError> {
+        let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
+        let mut config = self.session_config();
+        config.relay = request.relay;
+        envoix_session::receive_file_via_room(
+            broker,
+            &request.code,
+            request.listen_addrs,
+            request.output_dir,
+            config,
+            events,
+        )
+        .await
     }
 
     fn validate_config(&self) -> Result<(), PublicError> {
