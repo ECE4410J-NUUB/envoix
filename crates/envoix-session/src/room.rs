@@ -11,13 +11,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use envoix_error::CoreError;
-use envoix_protocol::PeerDescriptor;
 use envoix_rendezvous_iroh::{build_endpoint, pair_in_room, split_code};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError, TransferSummary,
-    bind_iroh_endpoint_with_relay, receive_with_auth_retries, send_file_manual,
+    bind_iroh_endpoint_with_relay, receive_with_auth_retries, send_file_to_endpoint_addr,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
@@ -32,15 +31,18 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
-/// Wait until `bound` has a direct address, then return its descriptor.
-async fn ready_descriptor(bound: &BoundEndpoint) -> Result<PeerDescriptor, SessionError> {
+/// Wait until `bound` has learned at least one address - a direct addr, or its
+/// relay home when a relay is configured - then return its full endpoint addr.
+/// The addr carries the relay home, so a NATed peer can be dialed via the relay.
+async fn ready_endpoint_addr(bound: &BoundEndpoint) -> EndpointAddr {
     for _ in 0..100 {
-        if !bound.direct_addrs().is_empty() {
-            break;
+        let addr = bound.endpoint_addr();
+        if !addr.is_empty() {
+            return addr;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    bound.peer_descriptor()
+    bound.endpoint_addr()
 }
 
 /// Override the pairing config with the token derived from the room pairing.
@@ -64,10 +66,10 @@ pub async fn receive_file_via_room(
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
     let bound = bind_iroh_endpoint_with_relay(listen_addr, &config.identity, &config.relay).await?;
-    let my_descriptor = ready_descriptor(&bound).await?;
+    let my_addr = ready_endpoint_addr(&bound).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
-    let pairing = pair_in_room(&rdz, broker, room_id, password, &my_descriptor)
+    let pairing = pair_in_room(&rdz, broker, room_id, password, &my_addr)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
@@ -95,18 +97,15 @@ pub async fn send_file_via_room(
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
     let rdz = rendezvous_endpoint(&config.relay).await?;
-    // The receiver ignores the sender's payload (the sender only dials), so send
-    // a placeholder instead of waiting for this endpoint to learn an address.
-    let placeholder = PeerDescriptor::new(
-        rdz.id().to_string(),
-        vec!["0.0.0.0:0".parse::<SocketAddr>().expect("valid addr")],
-    )?;
+    // The receiver ignores the sender's payload (the sender only dials), so any
+    // valid endpoint address works as a placeholder.
+    let placeholder = rdz.addr();
 
     let pairing = pair_in_room(&rdz, broker, room_id, password, &placeholder)
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
 
-    send_file_manual(
+    send_file_to_endpoint_addr(
         pairing.peer,
         file_path,
         resume,

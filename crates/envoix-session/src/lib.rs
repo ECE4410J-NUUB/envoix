@@ -121,6 +121,38 @@ pub async fn send_file_manual_with_cancel(
     result
 }
 
+/// Sends one file to a peer addressed by its full iroh `EndpointAddr` (which may
+/// carry a relay home), dialing through the configured relay when set.
+pub async fn send_file_to_endpoint_addr(
+    peer_addr: EndpointAddr,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+) -> Result<TransferSummary, SessionError> {
+    let cancel = TransferCancelToken::new();
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
+    let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            local_endpoint.close().await;
+            return Err(error);
+        }
+    };
+    let engine = TransferEngine::new(config.chunk_size);
+    if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
+        let _ = connection.close().await;
+        local_endpoint.close().await;
+        return Err(error);
+    }
+    let result = engine
+        .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
+        .await;
+    let _ = connection.close().await;
+    local_endpoint.close().await;
+    result
+}
+
 /// Sends one file to the first mDNS-discovered iroh endpoint that authenticates.
 pub async fn send_file_enable_mdns(
     file_path: PathBuf,

@@ -92,6 +92,12 @@ impl BoundEndpoint {
         PeerDescriptor::new(self.endpoint_id(), self.direct_addrs())
     }
 
+    /// Returns this endpoint's full iroh address (id + direct addrs, plus its
+    /// relay home when a relay is configured), for advertising to a peer to dial.
+    pub fn endpoint_addr(&self) -> EndpointAddr {
+        self.local_endpoint.addr()
+    }
+
     pub(crate) async fn accept(&self) -> Result<IrohFrameConnection, SessionError> {
         let incoming = self
             .local_endpoint
