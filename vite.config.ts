@@ -4,6 +4,7 @@ import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  base: '/static/shared/envoix-demo/',
   plugins: [vue()],
   resolve: {
     alias: {

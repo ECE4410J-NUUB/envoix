@@ -1,11 +1,11 @@
-import { createRouter, createWebHistory } from 'vue-router';
+import { createRouter, createWebHashHistory } from 'vue-router';
 
 import CliDemo from './views/CliDemo.vue';
 import GuiDemo from './views/GuiDemo.vue';
 import MobileDemo from './views/MobileDemo.vue';
 
 export const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/demo/mobile' },
     { path: '/demo/mobile', name: 'mobile', component: MobileDemo },

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { Camera, Clipboard, Download, Send, Settings, Shuffle, Zap } from '@lucide/vue';
+import { Camera, Clipboard, Download, FileUp, Send, Settings, Shuffle, Zap } from '@lucide/vue';
 
 import CopyButton from '@/components/CopyButton.vue';
 import DemoQr from '@/components/DemoQr.vue';
@@ -19,6 +19,7 @@ const concurrentTransfers = ref(true);
 const toast = ref('');
 const copied = ref(false);
 const selectedImage = ref('');
+const selectedFile = ref('');
 
 const tabs = [
   { id: 'transfer' as const, label: 'Transfer', icon: Shuffle },
@@ -107,6 +108,12 @@ function onCameraPick(event: Event) {
   selectedImage.value = input.files?.[0]?.name ?? '';
   flash(selectedImage.value ? `Selected ${selectedImage.value}` : 'Camera import ready');
 }
+
+function onFilePick(event: Event) {
+  const input = event.target as HTMLInputElement;
+  selectedFile.value = input.files?.[0]?.name ?? '';
+  flash(selectedFile.value ? `Selected ${selectedFile.value}` : 'File selection ready');
+}
 </script>
 
 <template>
@@ -166,6 +173,11 @@ function onCameraPick(event: Event) {
             <Camera :size="22" aria-hidden="true" />
             <span>{{ selectedImage || 'Scan or import QR' }}</span>
             <input type="file" accept="image/*" capture="environment" @change="onCameraPick" />
+          </label>
+          <label class="file-drop small">
+            <FileUp :size="22" aria-hidden="true" />
+            <span>{{ selectedFile || 'Select file' }}</span>
+            <input type="file" @change="onFilePick" />
           </label>
           <div class="input-with-action">
             <input v-model="inviteInput" placeholder="Paste invite link" />
