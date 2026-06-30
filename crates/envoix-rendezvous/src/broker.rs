@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -28,12 +29,16 @@ const MAX_WAITING_ROOMS: usize = 4096;
 struct Waiter {
     conn: PeerConn,
     ready: oneshot::Sender<()>,
+    id: u64,
 }
 
 /// Matches peers into rooms. Cheap to share behind an `Arc` across connections.
 pub struct RoomRegistry {
     waiting: Mutex<HashMap<String, Waiter>>,
     ttl: Duration,
+    /// Monotonic id stamped on each parked waiter, so a timed-out waiter only
+    /// removes its own map entry, never a newer waiter that reused the room id.
+    next_id: AtomicU64,
 }
 
 impl RoomRegistry {
@@ -42,6 +47,7 @@ impl RoomRegistry {
         Self {
             waiting: Mutex::new(HashMap::new()),
             ttl: DEFAULT_ROOM_TTL,
+            next_id: AtomicU64::new(0),
         }
     }
 
@@ -50,6 +56,7 @@ impl RoomRegistry {
         Self {
             waiting: Mutex::new(HashMap::new()),
             ttl,
+            next_id: AtomicU64::new(0),
         }
     }
 
@@ -67,7 +74,7 @@ impl RoomRegistry {
         // two peers arriving at once can't both park and miss each other.
         enum Decision {
             Matched(Waiter, PeerConn),
-            Parked(oneshot::Receiver<()>),
+            Parked(oneshot::Receiver<()>, u64),
             Rejected(&'static str),
         }
         let decision = {
@@ -78,15 +85,17 @@ impl RoomRegistry {
                     Decision::Rejected("too many waiting rooms")
                 }
                 None => {
+                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                     let (ready_tx, ready_rx) = oneshot::channel();
                     waiting.insert(
                         room_id.clone(),
                         Waiter {
                             conn,
                             ready: ready_tx,
+                            id,
                         },
                     );
-                    Decision::Parked(ready_rx)
+                    Decision::Parked(ready_rx, id)
                 }
             }
         };
@@ -98,16 +107,20 @@ impl RoomRegistry {
                 run_pair(first.conn, conn).await
             }
             // We are the first peer; wait for a partner, or expire.
-            Decision::Parked(ready_rx) => match tokio::time::timeout(self.ttl, ready_rx).await {
-                Ok(_) => Ok(()),
-                Err(_) => {
-                    self.waiting
-                        .lock()
-                        .expect("registry mutex")
-                        .remove(&room_id);
-                    Err(RendezvousError::Expired)
+            Decision::Parked(ready_rx, id) => {
+                match tokio::time::timeout(self.ttl, ready_rx).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => {
+                        // Only drop our own waiter: a concurrent match + re-park can
+                        // have replaced us with a newer waiter under the same room id.
+                        let mut waiting = self.waiting.lock().expect("registry mutex");
+                        if waiting.get(&room_id).is_some_and(|w| w.id == id) {
+                            waiting.remove(&room_id);
+                        }
+                        Err(RendezvousError::Expired)
+                    }
                 }
-            },
+            }
             Decision::Rejected(reason) => Err(RendezvousError::Rejected(reason)),
         }
     }
