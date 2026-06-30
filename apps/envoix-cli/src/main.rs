@@ -134,15 +134,16 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to
-/// `warn` for the workspace and `error` for everything else so that library
-/// warnings (e.g. resume-state corruption notices) reach the terminal
-/// without flooding it.  Output goes to stderr to keep stdout clean for
-/// future machine-consumable formats.
+/// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to `info`
+/// for the `envoix` target (so the per-transfer "data path: direct/relay" line
+/// is shown without a flag) and `warn` for everything else, so library warnings
+/// reach the terminal and iroh internals stay quiet without flooding it.
+/// Output goes to stderr to keep stdout clean for future machine-consumable
+/// formats.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("envoix=warn,warn"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("envoix=info,warn"));
     fmt()
         .with_env_filter(filter)
         .with_writer(io::stderr)
