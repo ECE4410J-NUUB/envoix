@@ -3,3 +3,12 @@
 # large payloads
 *.mp4
 *.mkv
+
+.DS_Store
+
+# Apple app: generated project + build output
+/apps/envoix-apple/*.xcodeproj
+/apps/envoix-apple/build/
+
+# cargo-swift generated Swift package (binary xcframework)
+/crates/envoix-ffi/EnvoixCore/

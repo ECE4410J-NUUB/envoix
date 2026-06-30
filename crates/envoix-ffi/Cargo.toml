@@ -1,0 +1,19 @@
+[package]
+name = "envoix-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "envoix_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+envoix-client.workspace = true
+envoix-qr.workspace = true
+tokio.workspace = true
+uniffi.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
