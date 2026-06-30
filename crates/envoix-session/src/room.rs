@@ -31,13 +31,21 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
-/// Wait until `bound` has learned at least one address - a direct addr, or its
-/// relay home when a relay is configured - then return its full endpoint addr.
-/// The addr carries the relay home, so a NATed peer can be dialed via the relay.
-async fn ready_endpoint_addr(bound: &BoundEndpoint) -> EndpointAddr {
+/// Wait until `bound` has learned an address to advertise, then return its full
+/// endpoint addr. When a relay is configured we wait for the relay home to
+/// register (not just any direct addr): direct addrs are learned instantly from
+/// local sockets, but the relay home takes a round-trip, so returning on the
+/// first direct addr would exchange a descriptor with no relay home - leaving a
+/// peer that cannot reach us directly (true CGNAT) unable to dial us at all.
+async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> EndpointAddr {
     for _ in 0..100 {
         let addr = bound.endpoint_addr();
-        if !addr.is_empty() {
+        let ready = if want_relay {
+            addr.relay_urls().next().is_some()
+        } else {
+            !addr.is_empty()
+        };
+        if ready {
             return addr;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -100,7 +108,7 @@ pub async fn receive_file_via_room(
     let (room_id, password) = split_code(code);
     let bound =
         bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
-    let my_addr = ready_endpoint_addr(&bound).await;
+    let my_addr = ready_endpoint_addr(&bound, config.relay.is_some()).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
     let pairing = pair_in_room_retrying(&rdz, &broker, room_id, password, &my_addr).await?;
