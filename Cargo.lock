@@ -1005,6 +1005,7 @@ dependencies = [
  "envoix-rendezvous",
  "envoix-rendezvous-iroh",
  "iroh",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
