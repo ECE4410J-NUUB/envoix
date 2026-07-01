@@ -113,12 +113,12 @@ impl BoundEndpoint {
             .accept_bi()
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
-        Ok(IrohFrameConnection {
-            _local_endpoint: self.local_endpoint.clone(),
+        Ok(IrohFrameConnection::new(
+            self.local_endpoint.clone(),
             connection,
             send,
             recv,
-        })
+        ))
     }
 }
 

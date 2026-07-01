@@ -499,12 +499,12 @@ async fn dial_peer_addr(
         .open_bi()
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))?;
-    Ok(IrohFrameConnection {
-        _local_endpoint: local_endpoint,
+    Ok(IrohFrameConnection::new(
+        local_endpoint,
         connection,
         send,
         recv,
-    })
+    ))
 }
 
 async fn send_file_to_peer_addr(

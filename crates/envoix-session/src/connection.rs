@@ -7,43 +7,76 @@ use envoix_protocol::{
 };
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
 use iroh::{Endpoint, TransportAddr};
+use tokio::task::JoinHandle;
 
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cap on how long the side that sent the final frame waits for the peer to
 /// close before closing itself, so a peer that never closes cannot hang us.
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the background logger samples the selected data path.
+const PATH_LOG_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct IrohFrameConnection {
     pub(crate) _local_endpoint: Endpoint,
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
     pub(crate) recv: RecvStream,
+    /// Logs the data path (direct/relay) as soon as one is selected and again on
+    /// every change, so the path is visible *during* the transfer rather than
+    /// only at the end. Aborted when the connection is dropped.
+    path_logger: JoinHandle<()>,
+}
+
+/// Description of the currently selected data path, or `None` if none is selected
+/// yet (still establishing) or the connection is closing.
+fn selected_path_desc(connection: &Connection) -> Option<String> {
+    for path in connection.paths().iter() {
+        if path.is_selected() {
+            return Some(match path.remote_addr() {
+                TransportAddr::Ip(addr) => format!("direct ({addr})"),
+                TransportAddr::Relay(url) => format!("relay ({url})"),
+                other => format!("{other:?}"),
+            });
+        }
+    }
+    None
+}
+
+/// Spawn a task that logs the selected data path on first selection and on every
+/// change (e.g. a relay->direct upgrade after holepunching). Under the "envoix"
+/// target so the CLI's default filter shows it at info without a flag.
+fn spawn_path_logger(connection: Connection) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last = String::new();
+        loop {
+            if let Some(path) = selected_path_desc(&connection)
+                && path != last
+            {
+                tracing::info!(target: "envoix", "data path: {path}");
+                last = path;
+            }
+            tokio::time::sleep(PATH_LOG_INTERVAL).await;
+        }
+    })
 }
 
 impl IrohFrameConnection {
-    /// Human description of the data path in use: a direct IP connection to the
-    /// peer, or via a relay. Read at close (after the transfer) so it reflects
-    /// the settled path - iroh starts on the relay and upgrades to a direct,
-    /// hole-punched path when one is found, so reading earlier can mislead.
-    fn data_path(&self) -> String {
-        let paths = self.connection.paths();
-        for path in paths.iter() {
-            if path.is_selected() {
-                return match path.remote_addr() {
-                    TransportAddr::Ip(addr) => format!("direct ({addr})"),
-                    TransportAddr::Relay(url) => format!("relay ({url})"),
-                    other => format!("{other:?}"),
-                };
-            }
+    /// Wrap an established iroh connection + bidirectional stream, starting the
+    /// background data-path logger for its lifetime.
+    pub(crate) fn new(
+        local_endpoint: Endpoint,
+        connection: Connection,
+        send: SendStream,
+        recv: RecvStream,
+    ) -> Self {
+        let path_logger = spawn_path_logger(connection.clone());
+        Self {
+            _local_endpoint: local_endpoint,
+            connection,
+            send,
+            recv,
+            path_logger,
         }
-        "unknown".into()
-    }
-
-    /// Surface which path the transfer actually used (direct vs relay) without
-    /// requiring socket-level traces. Logged under the "envoix" target so the
-    /// CLI's default filter shows it at info while keeping iroh internals quiet.
-    fn log_data_path(&self) {
-        tracing::info!(target: "envoix", "data path: {}", self.data_path());
     }
 
     /// Close as the side that sent the *final* frame: finish our stream, then
@@ -58,7 +91,6 @@ impl IrohFrameConnection {
     /// long enough for the ack to be delivered. Bounded so a peer that never
     /// closes cannot hang us; if it elapses we close ourselves.
     pub(crate) async fn await_peer_close(&mut self) {
-        self.log_data_path();
         let _ = self.send.finish();
         if tokio::time::timeout(PEER_CLOSE_TIMEOUT, self.connection.closed())
             .await
@@ -104,11 +136,18 @@ impl FrameConnection for IrohFrameConnection {
     }
 
     async fn close(&mut self) -> Result<(), ProtocolError> {
-        self.log_data_path();
         if self.send.finish().is_ok() {
             let _ = tokio::time::timeout(STREAM_CLOSE_TIMEOUT, self.send.stopped()).await;
         }
         self.connection.close(VarInt::from_u32(0), b"done");
         Ok(())
+    }
+}
+
+impl Drop for IrohFrameConnection {
+    fn drop(&mut self) {
+        // Stop the background path logger when the connection goes away (clean
+        // close or abrupt drop on interrupt).
+        self.path_logger.abort();
     }
 }
