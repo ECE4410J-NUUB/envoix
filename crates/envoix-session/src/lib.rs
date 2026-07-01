@@ -384,19 +384,36 @@ pub async fn receive_with_auth_retries_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection =
-        match accept_authenticated_with_retries(&bound_endpoint, &config, &cancel).await {
-            Ok(connection) => connection,
-            Err(error) => {
-                bound_endpoint.local_endpoint.close().await;
-                return Err(error);
-            }
-        };
     let engine = TransferEngine::new(config.chunk_size);
-    let result = engine
-        .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
-        .await;
-    close_after_receive(&mut connection, &result).await;
+
+    let result = loop {
+        let mut connection =
+            match accept_authenticated_with_retries(&bound_endpoint, &config, &cancel).await {
+                Ok(connection) => connection,
+                Err(error) => break Err(error),
+            };
+        let attempt = engine
+            .receive_file_with_cancel(
+                &mut connection,
+                output_dir.clone(),
+                events.as_ref(),
+                &cancel,
+            )
+            .await;
+        close_after_receive(&mut connection, &attempt).await;
+
+        match attempt {
+            Ok(summary) => break Ok(summary),
+            Err(error) if cancel.is_cancelled() => break Err(error),
+            Err(error) => {
+                events.on_event(TransferEvent::Failed {
+                    direction: TransferDirection::Receive,
+                    reason: error.to_string(),
+                });
+            }
+        }
+    };
+
     bound_endpoint.local_endpoint.close().await;
     result
 }
