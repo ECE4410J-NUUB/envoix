@@ -335,17 +335,15 @@ impl TransferEngine {
             .await
             .map_err(peer_closed_error)?;
         // The whole file plus the Complete frame (which carries the file hash the
-        // receiver verifies before finalizing) have already been sent. The
-        // CompleteAck is only a delivery confirmation, and the receiver closes the
-        // connection right after sending it - so a connection close or idle timeout
-        // while we wait for the ack is a benign close race, not a transfer failure.
-        // A genuine problem surfaces earlier, during the chunk phase, or here as an
-        // Error frame. Still honor an explicit cancellation.
-        match recv_frame_or_cancel(connection, cancel).await {
-            Ok(frame) => expect_complete_ack(frame, &transfer_id)?,
-            Err(error) if cancel.is_cancelled() => return Err(error),
-            Err(_) => {}
-        }
+        // receiver verifies before finalizing) have been sent. Require the
+        // receiver's CompleteAck: it is the receiver's proof that it finalized.
+        // The receiver holds the connection open until we close it (it does not
+        // close first), so the ack is delivered reliably rather than racing a
+        // close. A genuine failure surfaces as an Error frame here (or earlier,
+        // during the chunk phase); only a true network death in this final round
+        // trip fails an otherwise-complete send, which resume recovers on retry.
+        let ack = recv_frame_or_cancel(connection, cancel).await?;
+        expect_complete_ack(ack, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
             bytes_transferred: offset,
@@ -1338,17 +1336,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sender_succeeds_when_complete_ack_lost_to_close_race() {
-        // The receiver finalizes and closes the connection in the window before its
-        // CompleteAck reaches the sender. The sender has already sent the whole file
-        // plus the Complete frame, so it must report success rather than a spurious
-        // connection error.
+    async fn sender_fails_when_receiver_drops_before_ack() {
+        // The CompleteAck is the receiver's proof that it finalized, so the sender
+        // requires it. If the receiver reads Complete but drops without acking
+        // (a crash / network death before finalizing), the sender must report
+        // failure - never a false success. In the healthy path this cannot happen:
+        // the receiver holds the connection open until the sender closes, so the
+        // ack is delivered; the rare true-network-death case is recovered by resume
+        // on a retry.
         let root = unique_test_dir();
         let source_dir = root.join("source");
         tokio::fs::create_dir_all(&source_dir).await.unwrap();
         let source_path = source_dir.join("race.txt");
-        let payload = b"complete ack lost to a close race";
-        tokio::fs::write(&source_path, payload).await.unwrap();
+        tokio::fs::write(&source_path, b"receiver vanishes before acking")
+            .await
+            .unwrap();
 
         let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
         let receiver = tokio::spawn(async move {
@@ -1364,15 +1366,16 @@ mod tests {
                     other => panic!("unexpected frame while draining: {other:?}"),
                 }
             }
-            // receiver_connection is dropped here, so the sender's wait for the
-            // CompleteAck sees the connection close.
+            // receiver_connection is dropped here without a CompleteAck.
         });
 
-        let summary = TransferEngine::new(4)
+        let result = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
-            .await
-            .expect("post-Complete close race must not fail an otherwise-complete send");
-        assert_eq!(summary.bytes_transferred, payload.len() as u64);
+            .await;
+        assert!(
+            result.is_err(),
+            "sender must fail when the receiver never sends CompleteAck"
+        );
         receiver.await.unwrap();
     }
 
