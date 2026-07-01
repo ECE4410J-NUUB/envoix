@@ -14,9 +14,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::{
-    ClientConfig, ClientEvent, ClientEventSink, ConnectionPolicy, EnvoixClient, EventSink,
-    PairingConfig, PeerDescriptor, PublicError, ReceiveRequest, SendFileRequest, SendRequest,
-    TransferCancelToken, TransferEvent, TransferSummary,
+    BindAddrs, ClientConfig, ClientEvent, ClientEventSink, ConnectionPolicy, EnvoixClient,
+    EventSink, PairingConfig, PeerDescriptor, PublicError, ReceiveRequest, SendFileRequest,
+    SendRequest, TransferCancelToken, TransferEvent, TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
 use tokio::runtime::Runtime;
@@ -119,7 +119,7 @@ impl EnvoixSession {
                     ReceiveRequest {
                         output_dir: output_dir.into(),
                         connection_policy: ConnectionPolicy::EnableMdns,
-                        listen_addr,
+                        listen_addrs: BindAddrs::single(listen_addr),
                     },
                     client_sink,
                     transfer_sink,
@@ -189,7 +189,7 @@ impl EnvoixSession {
                     ReceiveRequest {
                         output_dir: output_dir.into(),
                         connection_policy: ConnectionPolicy::EnableMdns,
-                        listen_addr,
+                        listen_addrs: BindAddrs::single(listen_addr),
                     },
                     client_sink,
                     transfer_sink,

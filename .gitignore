@@ -3,6 +3,8 @@
 # large payloads
 *.mp4
 *.mkv
+dist/
+node_modules/
 
 .DS_Store
 

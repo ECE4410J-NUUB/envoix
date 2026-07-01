@@ -1,0 +1,22 @@
+[package]
+name = "envoix-rendezvous-iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iroh transport for the room rendezvous: server accept loop and client pairing (join room + SPAKE2 + sealed descriptor exchange)."
+
+[dependencies]
+envoix-pairing.workspace = true
+envoix-rendezvous.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+iroh.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# The loopback test exchanges real iroh PeerDescriptors through the broker.
+envoix-protocol.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

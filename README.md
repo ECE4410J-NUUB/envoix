@@ -34,27 +34,35 @@ cargo run -p envoix-cli -- receive --auto --output ./received --token "shared-to
 cargo run -p envoix-cli -- send --enable-mdns --token "shared-token-123" ./hello.txt
 ```
 
-The receiver's QUIC listener binds to `0.0.0.0:0` and advertises its port over
-mDNS. The sender browses for `_envoix._udp.local.` services, resolves discovered
-records into QUIC candidates, and dials them in a deterministic order. SPAKE2
-pairing still gates the transfer — a sender with the wrong token fails before
-any file data is exchanged.
+The receiver's iroh endpoint binds both IPv4 and IPv6 sockets by default and
+advertises its direct addresses over mDNS. The sender discovers compatible iroh
+endpoints, resolves their direct candidates, and dials them. SPAKE2 pairing
+still gates the transfer — a sender with the wrong token fails before any file
+data is exchanged.
 
 ### Manual flow
 
-Supply the shared token and address explicitly. The receiver prints its
-OS-assigned port after binding.
+Supply the shared token explicitly. After binding, the receiver prints a
+`peer:` line — its iroh peer descriptor, `<endpoint-id>@<addr>[,<addr>...]` —
+plus the token to share. Copy the whole `peer:` value into the sender's
+`--peer`.
 
 ```bash
 # Terminal 1 — receiver
 cargo run -p envoix-cli -- receive --output ./received --token "shared-token-123"
-# prints: listening on 0.0.0.0:<port>
+# prints, for example:
+#   peer: 6sd3kp...u2a@192.168.1.5:54321,[2001:db8::5]:54322
+#   token: shared-token-123
 
-# Terminal 2 — sender (use the receiver's reachable IP and printed port)
-cargo run -p envoix-cli -- send --peer "192.168.1.5:<port>" --token "shared-token-123" ./hello.txt
+# Terminal 2 — sender (paste the receiver's full peer: value verbatim)
+cargo run -p envoix-cli -- send \
+  --peer "6sd3kp...u2a@192.168.1.5:54321,[2001:db8::5]:54322" \
+  --token "shared-token-123" ./hello.txt
 ```
 
-Use `--ip-version ipv6` on `receive` to bind an IPv6 socket instead.
+By default, `receive` binds both IPv4 and IPv6 sockets, so the descriptor can
+list more than one address — pass the entire value. Use `--ip-version ipv4` or
+`--ip-version ipv6` to restrict the receiver to one address family.
 
 The receiver writes the file into the output directory using the original file
 name. If a transfer is interrupted, restart both sides with the same source file
