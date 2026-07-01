@@ -3,8 +3,8 @@
 mod connection;
 mod endpoint;
 mod identity;
+mod room;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,12 +22,13 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 
 use connection::IrohFrameConnection;
-pub use endpoint::BoundEndpoint;
+pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
+pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -45,25 +46,39 @@ pub struct SessionConfig {
     pub pairing: PairingConfig,
     /// iroh endpoint identity policy.
     pub identity: IdentityConfig,
+    /// Optional relay URL for WAN/NAT reachability. `None` keeps endpoints
+    /// LAN/direct only (unchanged behavior); `Some(url)` routes through a relay.
+    pub relay: Option<String>,
 }
 
 /// Bind an iroh endpoint (listen addr) that can accept one incoming connection.
 pub async fn bind_iroh_endpoint(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
+    bind_iroh_endpoint_with_relay(listen_addrs, identity, &None).await
+}
+
+/// Like [`bind_iroh_endpoint`], but routes through `relay` (a relay URL) when
+/// set, so the bound endpoint stays reachable from behind NAT.
+pub(crate) async fn bind_iroh_endpoint_with_relay(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_accept_endpoint(listen_addr, identity).await?,
+        local_endpoint: build_accept_endpoint(listen_addrs.into(), identity, relay).await?,
     })
 }
 
 /// Bind an iroh endpoint (listen addr) and advertise it through iroh mDNS address lookup.
 pub async fn bind_iroh_endpoint_enable_mdns(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_advertising_accept_endpoint(listen_addr, identity).await?,
+        local_endpoint: build_advertising_accept_endpoint(listen_addrs.into(), identity, &None)
+            .await?,
     })
 }
 
@@ -88,10 +103,42 @@ pub async fn send_file_manual_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint = build_dial_endpoint(&config.identity).await?;
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mut connection = dial(local_endpoint.clone(), &peer).await?;
     let engine = TransferEngine::new(config.chunk_size);
 
+    if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
+        let _ = connection.close().await;
+        local_endpoint.close().await;
+        return Err(error);
+    }
+    let result = engine
+        .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
+        .await;
+    let _ = connection.close().await;
+    local_endpoint.close().await;
+    result
+}
+
+/// Sends one file to a peer addressed by its full iroh `EndpointAddr` (which may
+/// carry a relay home), dialing through the configured relay when set.
+pub async fn send_file_to_endpoint_addr(
+    peer_addr: EndpointAddr,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+) -> Result<TransferSummary, SessionError> {
+    let cancel = TransferCancelToken::new();
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
+    let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            local_endpoint.close().await;
+            return Err(error);
+        }
+    };
+    let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
@@ -124,7 +171,7 @@ pub async fn send_file_enable_mdns_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint = build_dial_endpoint(&config.identity).await?;
+    let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mdns = MdnsAddressLookup::builder()
         .advertise(false)
         .build(local_endpoint.id())
@@ -215,7 +262,7 @@ pub async fn send_file_enable_mdns_with_cancel(
 
 /// Receives one file and reports the concrete peer descriptor before accepting.
 pub async fn receive_file_with_bound_peer<F>(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
@@ -226,7 +273,7 @@ where
 {
     let cancel = TransferCancelToken::new();
     receive_file_with_bound_peer_with_cancel(
-        listen_addr,
+        listen_addrs,
         output_dir,
         config,
         events,
@@ -238,7 +285,7 @@ where
 
 /// Receives one file and stops while waiting or transferring if cancelled.
 pub async fn receive_file_with_bound_peer_with_cancel<F>(
-    listen_addr: SocketAddr,
+    listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
@@ -248,7 +295,8 @@ pub async fn receive_file_with_bound_peer_with_cancel<F>(
 where
     F: FnOnce(PeerDescriptor) + Send,
 {
-    let bound_endpoint = bind_iroh_endpoint(listen_addr, &config.identity).await?;
+    let bound_endpoint =
+        bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
     receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await

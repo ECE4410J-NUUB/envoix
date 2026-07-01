@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::io::{self, Write};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -8,10 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::{
-    ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink, IdentityConfig,
-    PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest, SPAKE2_EXPERIMENTAL_WARNING,
-    SendFileRequest, SendRequest, TransferCancelToken, TransferDirection, TransferEvent,
-    TransferSummary,
+    BindAddrs, ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink,
+    IdentityConfig, PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest,
+    RoomReceiveRequest, RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    TransferCancelToken, TransferDirection, TransferEvent, TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
@@ -62,12 +61,21 @@ enum Command {
         /// Start a new transfer and ignore compatible receiver-side resume state.
         #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
         resume: bool,
-        /// Shared ASCII pairing token (>=12 bytes). Required unless --invite is set.
-        #[arg(long, required_unless_present = "invite", conflicts_with = "invite")]
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --invite or --room is set.
+        #[arg(long, required_unless_present_any = ["invite", "room"], conflicts_with = "invite")]
         token: Option<String>,
         /// Invite string printed by `envoix receive --enable-mdns`; sets peer and token automatically.
         #[arg(long, conflicts_with_all = ["peer", "enable_mdns", "token"])]
         invite: Option<String>,
+        /// Pairing code for a rendezvous-room transfer, e.g. 123456-amber-comet.
+        #[arg(long, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "enable_mdns", "token"])]
+        room: Option<String>,
+        /// Rendezvous broker address, <endpoint-id>@<ip:port> (used with --room).
+        #[arg(long, requires = "room")]
+        rendezvous: Option<String>,
+        /// Relay URL for WAN/NAT reachability, e.g. https://relay.example.com:8444.
+        #[arg(long, requires = "room")]
+        relay: Option<String>,
         /// File to send.
         file: PathBuf,
     },
@@ -89,17 +97,27 @@ enum Command {
         /// Use a fresh iroh identity for this run.
         #[arg(long)]
         ephemeral_identity: bool,
-        /// Shared ASCII pairing token (>=12 bytes). Required unless --enable-mdns is set.
-        #[arg(long, required_unless_present = "enable_mdns")]
+        /// Shared ASCII pairing token (>=12 bytes). Required unless --enable-mdns or --room is set.
+        #[arg(long, required_unless_present_any = ["enable_mdns", "room"])]
         token: Option<String>,
+        /// Pairing code for a rendezvous-room transfer, e.g. 123456-amber-comet.
+        #[arg(long, requires = "rendezvous", conflicts_with_all = ["token", "enable_mdns"])]
+        room: Option<String>,
+        /// Rendezvous broker address, <endpoint-id>@<ip:port> (used with --room).
+        #[arg(long, requires = "room")]
+        rendezvous: Option<String>,
+        /// Relay URL for WAN/NAT reachability, e.g. https://relay.example.com:8444.
+        #[arg(long, requires = "room")]
+        relay: Option<String>,
         /// Address family to bind for receiving.
-        #[arg(long, value_enum, default_value_t = IpVersion::Ipv4)]
+        #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
         ip_version: IpVersion,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum IpVersion {
+    Dual,
     Ipv4,
     Ipv6,
 }
@@ -144,8 +162,27 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             token,
             invite,
             file,
+            room,
+            rendezvous,
+            relay,
         } => {
-            let summary = if let Some(invite_str) = invite {
+            let summary = if let Some(code) = room {
+                let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
+                let client = client_for_room(config.as_deref(), identity_config(identity))?;
+                eprintln!("pairing in room via {rendezvous}...");
+                client
+                    .send_file_via_room(
+                        RoomSendRequest {
+                            broker: rendezvous,
+                            relay,
+                            code,
+                            file_path: file,
+                            resume,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                    )
+                    .await?
+            } else if let Some(invite_str) = invite {
                 let resolved = resolve_invite(&invite_str)?;
                 eprintln!(
                     "connecting to {} (invite expires in {})",
@@ -227,10 +264,29 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             ephemeral_identity: _,
             token,
             ip_version,
+            room,
+            rendezvous,
+            relay,
         } => {
-            let listen_addr = receive_addr_for(ip_version);
+            let listen_addrs = receive_addrs_for(ip_version);
             let identity = identity_config(identity);
-            let summary = if enable_mdns {
+            let summary = if let Some(code) = room {
+                let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
+                let client = client_for_room(config.as_deref(), identity)?;
+                eprintln!("waiting for sender via rendezvous {rendezvous}...");
+                client
+                    .receive_file_via_room(
+                        RoomReceiveRequest {
+                            broker: rendezvous,
+                            relay,
+                            code,
+                            output_dir: output,
+                            listen_addrs,
+                        },
+                        Box::new(ConsoleEventSink::new()),
+                    )
+                    .await?
+            } else if enable_mdns {
                 match token {
                     Some(t) => {
                         let token_for_print = t.clone();
@@ -242,7 +298,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addr,
+                                    listen_addrs,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
@@ -272,7 +328,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                                 ReceiveRequest {
                                     output_dir: output,
                                     connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addr,
+                                    listen_addrs,
                                 },
                                 Box::new(ConsoleClientEventSink),
                                 Box::new(ConsoleEventSink::new()),
@@ -304,7 +360,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 run_interruptible(
                     client.receive_file_with_bound_peer_with_cancel(
                         ReceiveFileRequest {
-                            listen_addr: receive_addr_for(ip_version),
+                            listen_addrs,
                             output_dir: output,
                         },
                         Box::new(ConsoleEventSink::new()),
@@ -352,12 +408,20 @@ where
     }
 }
 
-fn receive_addr_for(ip_version: IpVersion) -> SocketAddr {
-    let addr = match ip_version {
-        IpVersion::Ipv4 => IPV4_RECEIVE_ADDR,
-        IpVersion::Ipv6 => IPV6_RECEIVE_ADDR,
-    };
-    addr.parse().expect("default receive address is valid")
+fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
+    match ip_version {
+        IpVersion::Dual => BindAddrs::dual_stack(0),
+        IpVersion::Ipv4 => BindAddrs::single(
+            IPV4_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv4 address is valid"),
+        ),
+        IpVersion::Ipv6 => BindAddrs::single(
+            IPV6_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv6 address is valid"),
+        ),
+    }
 }
 
 /// Resolved fields extracted from a validated QR invite.
@@ -409,6 +473,20 @@ fn client_for_token(
 fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
+}
+
+/// Builds a client for a rendezvous-room transfer. The pairing is derived from
+/// the SPAKE2 exchange in the room, so the config's pairing token is an inert
+/// placeholder that is never used to authenticate the transfer.
+fn client_for_room(
+    config_path: Option<&std::path::Path>,
+    identity: IdentityConfig,
+) -> Result<EnvoixClient, envoix_client::PublicError> {
+    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
+    let pairing = PairingConfig::spake2_shared_token("envoix-room-unused-placeholder")?;
+    let mut config = ClientConfig::from_runtime_sources(pairing, config_path)?;
+    config.identity = identity;
+    Ok(EnvoixClient::new(config))
 }
 
 #[derive(Debug, Default)]
@@ -798,7 +876,30 @@ mod tests {
             } if output == std::path::Path::new("received")
                 && !enable_mdns
                 && token == "abcdefghijkl"
-                && ip_version == IpVersion::Ipv4
+                && ip_version == IpVersion::Dual
+        ));
+    }
+
+    #[test]
+    fn parses_receive_ipv4() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "received",
+            "--token",
+            "abcdefghijkl",
+            "--ip-version",
+            "ipv4",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive {
+                ip_version: IpVersion::Ipv4,
+                ..
+            }
         ));
     }
 
@@ -852,6 +953,74 @@ mod tests {
                 token: Some(ref t),
                 ..
             } if t == "abcdefghijkl"
+        ));
+    }
+
+    #[test]
+    fn parses_send_room_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--room",
+            "123456-amber-comet",
+            "--rendezvous",
+            "id@1.2.3.4:8445",
+            "hello.txt",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Send { room: Some(ref r), rendezvous: Some(ref rv), .. }
+                if r == "123456-amber-comet" && rv == "id@1.2.3.4:8445"
+        ));
+    }
+
+    #[test]
+    fn send_room_requires_rendezvous() {
+        let result = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--room",
+            "123456-amber-comet",
+            "hello.txt",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn send_room_conflicts_with_token() {
+        let result = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--room",
+            "123456-amber-comet",
+            "--rendezvous",
+            "id@1.2.3.4:8445",
+            "--token",
+            "abcdefghijkl",
+            "hello.txt",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_receive_room_command() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "received",
+            "--room",
+            "123456-amber-comet",
+            "--rendezvous",
+            "id@1.2.3.4:8445",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Receive { room: Some(ref r), .. } if r == "123456-amber-comet"
         ));
     }
 

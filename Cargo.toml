@@ -1,10 +1,14 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "apps/envoix-rendezvous-server",
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-error",
+    "crates/envoix-pairing",
     "crates/envoix-protocol",
+    "crates/envoix-rendezvous",
+    "crates/envoix-rendezvous-iroh",
     "crates/envoix-qr",
     "crates/envoix-session",
     "crates/envoix-storage",
@@ -22,7 +26,10 @@ license = "MIT"
 envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
 envoix-error = { path = "crates/envoix-error" }
+envoix-pairing = { path = "crates/envoix-pairing" }
 envoix-protocol = { path = "crates/envoix-protocol" }
+envoix-rendezvous = { path = "crates/envoix-rendezvous" }
+envoix-rendezvous-iroh = { path = "crates/envoix-rendezvous-iroh" }
 envoix-qr = { path = "crates/envoix-qr" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-storage = { path = "crates/envoix-storage" }
@@ -33,6 +40,7 @@ anyhow = "1"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 blake3 = "1"
+chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 hmac = "0.12"

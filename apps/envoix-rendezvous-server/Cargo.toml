@@ -1,0 +1,19 @@
+[package]
+name = "envoix-rendezvous-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iroh-node rendezvous server: matches peers by room id and relays their end-to-end pairing handshake."
+
+[dependencies]
+envoix-rendezvous.workspace = true
+envoix-rendezvous-iroh.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+iroh.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
