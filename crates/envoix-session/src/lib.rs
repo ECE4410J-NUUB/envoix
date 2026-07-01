@@ -28,7 +28,10 @@ use endpoint::{
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
-pub use room::{receive_file_via_room, send_file_via_room};
+pub use room::{
+    receive_file_via_room, receive_file_via_room_with_cancel, send_file_via_room,
+    send_file_via_room_with_cancel,
+};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -129,7 +132,26 @@ pub async fn send_file_to_endpoint_addr(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
+    send_file_to_endpoint_addr_with_cancel(
+        peer_addr,
+        file_path,
+        resume,
+        config,
+        events,
+        TransferCancelToken::new(),
+    )
+    .await
+}
+
+/// Like [`send_file_to_endpoint_addr`], stopping the data transfer on cancellation.
+pub async fn send_file_to_endpoint_addr_with_cancel(
+    peer_addr: EndpointAddr,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
     let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
@@ -338,7 +360,7 @@ pub async fn receive_one_authenticated_with_cancel(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    let _ = connection.close().await;
+    close_after_receive(&mut connection, &result).await;
     bound_endpoint.local_endpoint.close().await;
     result
 }
@@ -374,9 +396,25 @@ pub async fn receive_with_auth_retries_with_cancel(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    let _ = connection.close().await;
+    close_after_receive(&mut connection, &result).await;
     bound_endpoint.local_endpoint.close().await;
     result
+}
+
+/// Close the data connection after a receive. On success the receiver sent the
+/// last frame (`CompleteAck`), so it waits for the sender to close - closing
+/// first would race that close against the sender reading the ack. On failure
+/// it closes actively, since there is no ack in flight to protect.
+async fn close_after_receive(
+    connection: &mut IrohFrameConnection,
+    result: &Result<TransferSummary, SessionError>,
+) {
+    match result {
+        Ok(_) => connection.await_peer_close().await,
+        Err(_) => {
+            let _ = connection.close().await;
+        }
+    }
 }
 
 async fn accept_authenticated_with_retries(

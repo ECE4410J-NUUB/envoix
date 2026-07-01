@@ -102,6 +102,10 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
 /// Cap on connections served at once, so a flood cannot exhaust the broker.
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
+/// Cap on a fresh connection's handshake + pairing-stream open before Join, so a
+/// half-open idle connection cannot hold a connection slot indefinitely.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Accept pairing connections forever, serving each through `registry`, up to
 /// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
 pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> Result<()> {
@@ -123,8 +127,15 @@ pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> 
 }
 
 async fn serve_incoming(incoming: Incoming, registry: &RoomRegistry) -> Result<()> {
-    let connection = incoming.await?;
-    let (send, recv) = connection.accept_bi().await?;
+    // Bound the pre-Join setup so a connection that half-opens and then goes idle
+    // cannot pin a connection slot; the registry separately bounds the first
+    // control-frame read.
+    let connection = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
+        .await
+        .context("rendezvous connection handshake timed out")??;
+    let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+        .await
+        .context("rendezvous pairing stream not opened in time")??;
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
     let conn = PeerConn::new(send, recv, IrohClose(connection));

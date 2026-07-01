@@ -15,8 +15,8 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
-    TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
-    send_file_to_endpoint_addr,
+    TransferCancelToken, TransferSummary, bind_iroh_endpoint_with_relay,
+    receive_with_auth_retries_with_cancel, send_file_to_endpoint_addr_with_cancel,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
@@ -50,7 +50,18 @@ async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> Endpoin
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    bound.endpoint_addr()
+    // Fell through the wait. If a relay was configured but its home never
+    // registered (relay unreachable), we advertise a direct-only descriptor.
+    // Warn rather than error: the peer may still reach us directly - but if it
+    // needs the relay, the data-plane dial will fail later, so make it visible.
+    let addr = bound.endpoint_addr();
+    if want_relay && addr.relay_urls().next().is_none() {
+        tracing::warn!(
+            "relay configured but its home did not register in time; advertising a \
+             direct-only address - a peer that cannot reach us directly may fail to connect"
+        );
+    }
+    addr
 }
 
 /// Pair in a room, re-joining if the broker matched us with a stale dead peer.
@@ -105,6 +116,28 @@ pub async fn receive_file_via_room(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
+    receive_file_via_room_with_cancel(
+        broker,
+        code,
+        listen_addrs,
+        output_dir,
+        config,
+        events,
+        TransferCancelToken::new(),
+    )
+    .await
+}
+
+/// Like [`receive_file_via_room`], stopping on cancellation.
+pub async fn receive_file_via_room_with_cancel(
+    broker: EndpointAddr,
+    code: &str,
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
     let bound =
         bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
@@ -118,11 +151,12 @@ pub async fn receive_file_via_room(
 
     // Accept with retries: a stray or wrong-token dial must not kill the
     // transfer before the legitimate sender connects.
-    receive_with_auth_retries(
+    receive_with_auth_retries_with_cancel(
         bound,
         output_dir,
         with_room_token(config, pairing.token),
         events,
+        cancel,
     )
     .await
 }
@@ -138,6 +172,28 @@ pub async fn send_file_via_room(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
+    send_file_via_room_with_cancel(
+        broker,
+        code,
+        file_path,
+        resume,
+        config,
+        events,
+        TransferCancelToken::new(),
+    )
+    .await
+}
+
+/// Like [`send_file_via_room`], stopping on cancellation.
+pub async fn send_file_via_room_with_cancel(
+    broker: EndpointAddr,
+    code: &str,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
     let rdz = rendezvous_endpoint(&config.relay).await?;
     // The receiver ignores the sender's payload (the sender only dials), so any
@@ -149,12 +205,13 @@ pub async fn send_file_via_room(
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
 
-    send_file_to_endpoint_addr(
+    send_file_to_endpoint_addr_with_cancel(
         pairing.peer,
         file_path,
         resume,
         with_room_token(config, pairing.token),
         events,
+        cancel,
     )
     .await
 }

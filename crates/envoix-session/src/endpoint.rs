@@ -1,10 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use envoix_error::CoreError;
 use envoix_protocol::PeerDescriptor;
-use iroh::endpoint::{BindOpts, RelayMode, presets};
+use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
+use noq_proto::congestion::Bbr3Config;
 
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
@@ -196,6 +198,33 @@ pub(crate) async fn build_dial_endpoint(
     build_endpoint(None, identity, false, false, relay).await
 }
 
+/// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
+///
+/// quinn's default per-stream receive window is sized for a 100 ms / 100 Mbit
+/// link (1.25 MB). A single stream can have at most `window / RTT` bytes in
+/// flight, so at 280 ms RTT that default caps one transfer at ~4.5 MB/s no
+/// matter how fast the link is. We raise the per-stream flow-control window
+/// (and the matching send window) so one transfer can fill a long fat pipe;
+/// iroh's holepunching/multipath defaults (from the builder) are left untouched.
+fn data_transport_config() -> QuicTransportConfig {
+    // 16 MiB fills ~57 MB/s at 280 ms RTT, with headroom for lower-latency links.
+    const WINDOW: u32 = 16 * 1024 * 1024;
+    let mut builder = QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(WINDOW))
+        .send_window(WINDOW as u64);
+    // Default to BBRv3. The loss-based default (CUBIC) treats every packet loss
+    // as congestion and backs off, which erodes throughput on lossy long-fat
+    // links (e.g. trans-Pacific, ~0.3% loss at 280 ms RTT): measured ~2.5x
+    // slower than BBRv3 there, while the two match on clean paths. BBRv3 instead
+    // paces at the measured bandwidth and rides through non-congestion loss. Set
+    // ENVOIX_CC=cubic to fall back to CUBIC.
+    let use_cubic = std::env::var("ENVOIX_CC").is_ok_and(|v| v.eq_ignore_ascii_case("cubic"));
+    if !use_cubic {
+        builder = builder.congestion_controller_factory(Arc::new(Bbr3Config::default()));
+    }
+    builder.build()
+}
+
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
@@ -207,6 +236,7 @@ async fn build_endpoint(
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .relay_mode(relay_mode(relay)?)
+        .transport_config(data_transport_config())
         .clear_address_lookup();
     if accept_incoming {
         builder = builder.alpns(vec![ALPN.to_vec()]);

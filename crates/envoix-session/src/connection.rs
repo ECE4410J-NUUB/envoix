@@ -5,16 +5,68 @@ use envoix_protocol::{
     Frame, FrameConnection, ProtocolError, flush_frame_writer, read_frame, write_chunk_frame,
     write_frame,
 };
-use iroh::Endpoint;
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
+use iroh::{Endpoint, TransportAddr};
 
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap on how long the side that sent the final frame waits for the peer to
+/// close before closing itself, so a peer that never closes cannot hang us.
+const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct IrohFrameConnection {
     pub(crate) _local_endpoint: Endpoint,
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
     pub(crate) recv: RecvStream,
+}
+
+impl IrohFrameConnection {
+    /// Human description of the data path in use: a direct IP connection to the
+    /// peer, or via a relay. Read at close (after the transfer) so it reflects
+    /// the settled path - iroh starts on the relay and upgrades to a direct,
+    /// hole-punched path when one is found, so reading earlier can mislead.
+    fn data_path(&self) -> String {
+        let paths = self.connection.paths();
+        for path in paths.iter() {
+            if path.is_selected() {
+                return match path.remote_addr() {
+                    TransportAddr::Ip(addr) => format!("direct ({addr})"),
+                    TransportAddr::Relay(url) => format!("relay ({url})"),
+                    other => format!("{other:?}"),
+                };
+            }
+        }
+        "unknown".into()
+    }
+
+    /// Surface which path the transfer actually used (direct vs relay) without
+    /// requiring socket-level traces. Logged under the "envoix" target so the
+    /// CLI's default filter shows it at info while keeping iroh internals quiet.
+    fn log_data_path(&self) {
+        tracing::info!(target: "envoix", "data path: {}", self.data_path());
+    }
+
+    /// Close as the side that sent the *final* frame: finish our stream, then
+    /// wait (bounded) for the peer to close the connection instead of closing
+    /// first.
+    ///
+    /// The last frame of a transfer is the receiver's `CompleteAck`. Closing
+    /// right after sending it races our `CONNECTION_CLOSE` against the peer
+    /// reading that frame - QUIC may drop still-unread stream data on close, so
+    /// the ack is lost and an otherwise-complete transfer looks failed. Letting
+    /// the peer (which reads the ack) initiate the close keeps the stream open
+    /// long enough for the ack to be delivered. Bounded so a peer that never
+    /// closes cannot hang us; if it elapses we close ourselves.
+    pub(crate) async fn await_peer_close(&mut self) {
+        self.log_data_path();
+        let _ = self.send.finish();
+        if tokio::time::timeout(PEER_CLOSE_TIMEOUT, self.connection.closed())
+            .await
+            .is_err()
+        {
+            self.connection.close(VarInt::from_u32(0), b"done");
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -52,6 +104,7 @@ impl FrameConnection for IrohFrameConnection {
     }
 
     async fn close(&mut self) -> Result<(), ProtocolError> {
+        self.log_data_path();
         if self.send.finish().is_ok() {
             let _ = tokio::time::timeout(STREAM_CLOSE_TIMEOUT, self.send.stopped()).await;
         }

@@ -334,10 +334,16 @@ impl TransferEngine {
             }))
             .await
             .map_err(peer_closed_error)?;
-        match recv_frame_or_cancel(connection, cancel).await {
-            Ok(frame) => expect_complete_ack(frame, &transfer_id)?,
-            Err(error) => return Err(peer_closed_error(error)),
-        }
+        // The whole file plus the Complete frame (which carries the file hash the
+        // receiver verifies before finalizing) have been sent. Require the
+        // receiver's CompleteAck: it is the receiver's proof that it finalized.
+        // The receiver holds the connection open until we close it (it does not
+        // close first), so the ack is delivered reliably rather than racing a
+        // close. A genuine failure surfaces as an Error frame here (or earlier,
+        // during the chunk phase); only a true network death in this final round
+        // trip fails an otherwise-complete send, which resume recovers on retry.
+        let ack = recv_frame_or_cancel(connection, cancel).await?;
+        expect_complete_ack(ack, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
             bytes_transferred: offset,
@@ -474,36 +480,27 @@ impl TransferEngine {
                     });
                 }
                 Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
-                    if expected_offset != header.file_size {
-                        return Err(CoreError::Transfer(format!(
-                            "transfer complete but expected offset {expected_offset} does not match file size {}",
-                            header.file_size
-                        )));
-                    }
-                    file.flush().await?;
-                    let actual_hash = hasher.finalize().to_hex().to_string();
-                    write_resume_state_for_offset(
-                        &output_dir,
+                    // Verify + atomically finalize. On ANY failure the transfer did
+                    // not succeed, so signal the sender explicitly with an Error
+                    // frame before returning: otherwise the sender's close-race
+                    // tolerance would take a real failure (size/hash mismatch,
+                    // finalize/rename error) for the benign ack-lost-on-close race.
+                    if let Err(error) = finalize_received_file(
                         &header,
+                        &output_dir,
+                        &temp_path,
+                        &final_path,
+                        file,
+                        hasher,
+                        &complete,
                         expected_offset,
                         expected_index,
-                        Some(actual_hash.clone()),
                     )
-                    .await?;
-                    drop(file);
-                    if actual_hash != complete.file_hash {
-                        return Err(CoreError::Transfer(format!(
-                            "completed file hash {actual_hash} does not match expected {}",
-                            complete.file_hash
-                        )));
+                    .await
+                    {
+                        notify_error(connection, &error).await;
+                        return Err(error);
                     }
-                    LocalFileStorage::finalize_temp_file(&temp_path, &final_path).await?;
-                    LocalFileStorage::delete_resume_state(
-                        &output_dir,
-                        &header.file_name,
-                        &header.transfer_id,
-                    )
-                    .await?;
                     send_complete_ack(connection, &header.transfer_id).await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
@@ -613,6 +610,64 @@ async fn check_cancelled(
     }
 
     Ok(())
+}
+
+/// Verify and atomically finalize a fully-received file: check the byte count and
+/// blake3 hash, move the temp file into place, and clear resume state. Any error
+/// here means the transfer did NOT succeed (size/hash mismatch, or a finalize /
+/// rename / cleanup failure), which the caller signals back to the sender.
+// Single call site; the arguments are the receive loop's finalization state and
+// grouping them into a struct would only add indirection.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_received_file(
+    header: &FileHeader,
+    output_dir: &Path,
+    temp_path: &Path,
+    final_path: &Path,
+    mut file: fs::File,
+    hasher: blake3::Hasher,
+    complete: &Complete,
+    expected_offset: u64,
+    expected_index: u64,
+) -> Result<(), TransferError> {
+    if expected_offset != header.file_size {
+        return Err(CoreError::Transfer(format!(
+            "transfer complete but expected offset {expected_offset} does not match file size {}",
+            header.file_size
+        )));
+    }
+    file.flush().await?;
+    let actual_hash = hasher.finalize().to_hex().to_string();
+    write_resume_state_for_offset(
+        output_dir,
+        header,
+        expected_offset,
+        expected_index,
+        Some(actual_hash.clone()),
+    )
+    .await?;
+    drop(file);
+    if actual_hash != complete.file_hash {
+        return Err(CoreError::Transfer(format!(
+            "completed file hash {actual_hash} does not match expected {}",
+            complete.file_hash
+        )));
+    }
+    LocalFileStorage::finalize_temp_file(temp_path, final_path).await?;
+    LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id)
+        .await?;
+    Ok(())
+}
+
+/// Best-effort notify the peer of a terminal error, so the sender can tell a real
+/// failure from a benign disconnect (it arrives as a `Frame::Error`, not a bare
+/// connection close).
+async fn notify_error(connection: &mut dyn FrameConnection, error: &TransferError) {
+    let _ = connection
+        .send_frame(Frame::Error(ErrorFrame {
+            message: error.to_string(),
+        }))
+        .await;
 }
 
 async fn notify_interrupted(connection: &mut dyn FrameConnection) {
@@ -1278,6 +1333,95 @@ mod tests {
                 .unwrap(),
             b"resume over two connections"
         );
+    }
+
+    #[tokio::test]
+    async fn sender_fails_when_receiver_drops_before_ack() {
+        // The CompleteAck is the receiver's proof that it finalized, so the sender
+        // requires it. If the receiver reads Complete but drops without acking
+        // (a crash / network death before finalizing), the sender must report
+        // failure - never a false success. In the healthy path this cannot happen:
+        // the receiver holds the connection open until the sender closes, so the
+        // ack is delivered; the rare true-network-death case is recovered by resume
+        // on a retry.
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("race.txt");
+        tokio::fs::write(&source_path, b"receiver vanishes before acking")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
+            // Drain chunks, then drop the connection on Complete WITHOUT acking.
+            loop {
+                match receiver_connection.recv_frame().await.unwrap() {
+                    Frame::Chunk(_) => {}
+                    Frame::Complete(complete) => {
+                        assert_eq!(complete.transfer_id, transfer_id);
+                        break;
+                    }
+                    other => panic!("unexpected frame while draining: {other:?}"),
+                }
+            }
+            // receiver_connection is dropped here without a CompleteAck.
+        });
+
+        let result = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await;
+        assert!(
+            result.is_err(),
+            "sender must fail when the receiver never sends CompleteAck"
+        );
+        receiver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sender_fails_when_receiver_reports_error_after_complete() {
+        // A genuine post-Complete failure on the receiver (hash mismatch, finalize
+        // error, ...) is signaled with an Error frame; the sender must surface it
+        // as a failure - not swallow it like the benign ack-lost close race.
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("rejected.txt");
+        tokio::fs::write(&source_path, b"payload the receiver will reject")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
+            loop {
+                match receiver_connection.recv_frame().await.unwrap() {
+                    Frame::Chunk(_) => {}
+                    Frame::Complete(complete) => {
+                        assert_eq!(complete.transfer_id, transfer_id);
+                        break;
+                    }
+                    other => panic!("unexpected frame while draining: {other:?}"),
+                }
+            }
+            // Simulate a receiver-side finalize/verify failure after Complete.
+            receiver_connection
+                .send_frame(Frame::Error(ErrorFrame {
+                    message: "completed file hash mismatch".into(),
+                }))
+                .await
+                .unwrap();
+        });
+
+        let result = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await;
+        assert!(
+            result.is_err(),
+            "sender must fail when the receiver reports a post-Complete error"
+        );
+        receiver.await.unwrap();
     }
 
     #[tokio::test]
