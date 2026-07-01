@@ -50,7 +50,18 @@ async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> Endpoin
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    bound.endpoint_addr()
+    // Fell through the wait. If a relay was configured but its home never
+    // registered (relay unreachable), we advertise a direct-only descriptor.
+    // Warn rather than error: the peer may still reach us directly - but if it
+    // needs the relay, the data-plane dial will fail later, so make it visible.
+    let addr = bound.endpoint_addr();
+    if want_relay && addr.relay_urls().next().is_none() {
+        tracing::warn!(
+            "relay configured but its home did not register in time; advertising a \
+             direct-only address - a peer that cannot reach us directly may fail to connect"
+        );
+    }
+    addr
 }
 
 /// Pair in a room, re-joining if the broker matched us with a stale dead peer.
