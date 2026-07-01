@@ -80,25 +80,3 @@ enum Appearance: String, CaseIterable {
         return all[(all.firstIndex(of: self)! + 1) % all.count]
     }
 }
-
-/// Compact sidebar control that cycles System → Light → Dark.
-struct ThemeToggle: View {
-    @AppStorage("envoix.appearance") private var appearance: Appearance = .system
-
-    var body: some View {
-        Button {
-            appearance = appearance.next
-        } label: {
-            Label(appearance.rawValue.capitalized, systemImage: appearance.icon)
-                .font(.title3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .frame(minHeight: 38)
-        .foregroundStyle(Theme.muted)
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-        .help("Toggle appearance (System / Light / Dark)")
-    }
-}

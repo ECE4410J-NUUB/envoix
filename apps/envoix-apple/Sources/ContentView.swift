@@ -111,7 +111,7 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: Theme.cardRadius)
                 .strokeBorder(stage == .settings ? Theme.accent.opacity(0.45) : Theme.line.opacity(0.5), lineWidth: 0.8)
         )
-        .help("Settings")
+        .help(AppText.value("Settings", "设置", language: language))
     }
 
     private var desktopToolbar: some View {
@@ -206,7 +206,7 @@ struct ContentView: View {
         case .completed: return .success
         case .failed: return .error
         case .waiting, .transferring: return .warning
-        case .idle: return .neutral
+        case .idle, .canceled: return .neutral
         }
     }
 
@@ -222,7 +222,7 @@ struct ContentView: View {
         switch viewModel.phase {
         case .waiting, .transferring:
             return 1
-        case .idle, .completed, .failed:
+        case .idle, .completed, .canceled, .failed:
             return 0
         }
     }
@@ -234,6 +234,7 @@ struct ContentView: View {
 }
 
 private struct TransferStageView: View {
+    @Environment(\.appLanguage) private var language
     @ObservedObject var receive: TransferViewModel
     @ObservedObject var send: TransferViewModel
 
@@ -241,8 +242,8 @@ private struct TransferStageView: View {
         ScrollView {
             VStack(spacing: 12) {
                 overviewCard
-                transferCard(title: "Receiving", systemImage: "tray.and.arrow.down", viewModel: receive)
-                transferCard(title: "Sending", systemImage: "paperplane", viewModel: send)
+                transferCard(title: AppText.value("Receiving", "接收", language: language), systemImage: "tray.and.arrow.down", viewModel: receive)
+                transferCard(title: AppText.value("Sending", "发送", language: language), systemImage: "paperplane", viewModel: send)
             }
             .padding(.vertical, 12)
         }
@@ -314,13 +315,15 @@ private struct TransferStageView: View {
     private func summary(for viewModel: TransferViewModel) -> String {
         switch viewModel.phase {
         case .idle:
-            return "No active transfer"
+            return AppText.value("No active transfer", "没有活动传输", language: language)
         case .waiting:
-            return "Waiting for the other device"
+            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
         case .transferring:
-            return viewModel.fileName.isEmpty ? "Transferring" : viewModel.fileName
+            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
         case .completed(let bytes):
-            return "Completed \(byteString(bytes))"
+            return AppText.value("Completed \(byteString(bytes))", "已完成 \(byteString(bytes))", language: language)
+        case .canceled:
+            return AppText.value("Canceled", "已取消", language: language)
         case .failed(let reason):
             return reason
         }
@@ -328,11 +331,12 @@ private struct TransferStageView: View {
 
     private func modeText(for viewModel: TransferViewModel) -> String {
         switch viewModel.phase {
-        case .idle: return "Idle"
-        case .waiting: return "Wait"
+        case .idle: return AppText.value("Idle", "空闲", language: language)
+        case .waiting: return AppText.value("Wait", "等待", language: language)
         case .transferring: return "\(Int((viewModel.progressFraction * 100).rounded()))%"
-        case .completed: return "Done"
-        case .failed: return "Error"
+        case .completed: return AppText.value("Done", "完成", language: language)
+        case .canceled: return AppText.value("Canceled", "取消", language: language)
+        case .failed: return AppText.value("Error", "错误", language: language)
         }
     }
 
@@ -348,7 +352,7 @@ private struct TransferStageView: View {
         switch viewModel.phase {
         case .waiting, .transferring:
             return 1
-        case .idle, .completed, .failed:
+        case .idle, .completed, .canceled, .failed:
             return 0
         }
     }
@@ -372,31 +376,39 @@ private struct TransferStageView: View {
 
     private var overviewTitle: String {
         if pendingCount > 0 {
-            return "\(pendingCount) pending task\(pendingCount == 1 ? "" : "s")"
+            return AppText.value(
+                "\(pendingCount) pending task\(pendingCount == 1 ? "" : "s")",
+                "\(pendingCount) 个待处理任务",
+                language: language
+            )
         }
         if failedCount > 0 {
-            return "\(failedCount) item\(failedCount == 1 ? "" : "s") need attention"
+            return AppText.value(
+                "\(failedCount) item\(failedCount == 1 ? "" : "s") need attention",
+                "\(failedCount) 个项目需要处理",
+                language: language
+            )
         }
-        return "No pending transfers"
+        return AppText.value("No pending transfers", "没有待处理传输", language: language)
     }
 
     private var activitySummary: String {
         if pendingCount == 0 {
             if failedCount > 0 {
-                return "Review failed transfers below, or start a new operation when ready."
+                return AppText.value("Review failed transfers below, or start a new operation when ready.", "请查看下方失败的传输，或在准备好后开始新操作。", language: language)
             }
-            return "Completed transfers stay visible below until the next operation."
+            return AppText.value("Completed transfers stay visible below until the next operation.", "已完成的传输会保留在下方，直到下一次操作。", language: language)
         }
         if receive.isBusy && send.isBusy {
-            return "Receiving and sending are both in progress."
+            return AppText.value("Receiving and sending are both in progress.", "接收和发送都在进行中。", language: language)
         }
         if receive.isBusy {
-            return "A receive task is currently waiting or transferring."
+            return AppText.value("A receive task is currently waiting or transferring.", "当前有一个接收任务正在等待或传输。", language: language)
         }
         if send.isBusy {
-            return "A send task is currently transferring."
+            return AppText.value("A send task is currently transferring.", "当前有一个发送任务正在传输。", language: language)
         }
-        return "Review failed tasks below before starting another transfer."
+        return AppText.value("Review failed tasks below before starting another transfer.", "开始新的传输前，请先查看下方失败任务。", language: language)
     }
 }
 
@@ -444,34 +456,26 @@ private struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
-                settingField(AppText.value("Server URL", "服务器 URL", language: language), text: $serverURL)
-                settingField(AppText.value("Relay URL", "中继 URL", language: language), text: $relayURL)
+                settingField(
+                    AppText.value("Rendezvous broker", "配对服务器", language: language),
+                    text: $serverURL,
+                    placeholder: defaultRendezvousBroker,
+                    helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language)
+                )
+                settingField(
+                    AppText.value("Relay URL", "中继 URL", language: language),
+                    text: $relayURL,
+                    placeholder: defaultRelayURL,
+                    helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language)
+                )
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Speed limit", "速度限制", language: language))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                    HStack(spacing: 8) {
-                        TextField("0", value: $speedLimit, format: .number)
-                            .textFieldStyle(.plain)
-                            .font(.body.monospacedDigit())
-                            .foregroundStyle(Theme.text)
-                        Text("MB/s")
-                            .font(.title3)
-                            .foregroundStyle(Theme.muted)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: 44)
-                    .background(Theme.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.cardRadius)
-                            .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-                    Text("Default 40 MB/s keeps transfers fast while leaving room for video calls and normal browsing.")
-                        .font(.body)
-                        .foregroundStyle(Theme.muted)
-                }
+                Text(AppText.value(
+                    "Speed limiting is not exposed yet because current transfers do not enforce it.",
+                    "当前传输尚未强制执行限速，因此暂不展示速度限制设置。",
+                    language: language
+                ))
+                .font(.body)
+                .foregroundStyle(Theme.muted)
                 .card(padding: 14)
             }
             .padding(.vertical, 12)
@@ -492,11 +496,11 @@ private struct SettingsStageView: View {
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.accentStrong)
                         .frame(width: 24)
-                    Text(appearance.rawValue.capitalized)
+                    Text(appearanceTitle)
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.text)
                     Spacer()
-                    Text("System / Light / Dark")
+                    Text(AppText.value("System / Light / Dark", "跟随系统 / 浅色 / 深色", language: language))
                         .font(.body)
                         .foregroundStyle(Theme.muted)
                 }
@@ -508,12 +512,28 @@ private struct SettingsStageView: View {
         .card(padding: 14)
     }
 
-    private func settingField(_ title: String, text: Binding<String>) -> some View {
+    private var appearanceTitle: String {
+        switch appearance {
+        case .system:
+            return AppText.value("System", "跟随系统", language: language)
+        case .light:
+            return AppText.value("Light", "浅色", language: language)
+        case .dark:
+            return AppText.value("Dark", "深色", language: language)
+        }
+    }
+
+    private func settingField(
+        _ title: String,
+        text: Binding<String>,
+        placeholder: String = "",
+        helper: String? = nil
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
-            TextField(title, text: text)
+            TextField(placeholder.isEmpty ? title : placeholder, text: text)
                 .textFieldStyle(.plain)
                 .font(.body.monospaced())
                 .foregroundStyle(Theme.text)
@@ -525,6 +545,12 @@ private struct SettingsStageView: View {
                         .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+            if let helper {
+                Text(helper)
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .card(padding: 14)
     }

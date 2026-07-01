@@ -37,6 +37,7 @@ final class TransferViewModel: ObservableObject {
         case waiting          // receiver: endpoint up, invite shown, awaiting sender
         case transferring
         case completed(bytes: UInt64)
+        case canceled
         case failed(String)
     }
 
@@ -54,6 +55,8 @@ final class TransferViewModel: ObservableObject {
     private var destinationDir: String?       // receiver only
     private var rate = RateTracker()
     private var suppressNextFailure = false
+    private var displayLanguage = "en"
+    fileprivate var operationID = UUID()
 
     var progressFraction: Double {
         total > 0 ? Double(transferred) / Double(total) : 0
@@ -80,6 +83,12 @@ final class TransferViewModel: ObservableObject {
         start(settings: settings, phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
     }
 
+    /// Receive by pairing through a rendezvous room code.
+    func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings) {
+        destinationDir = outputDir
+        start(settings: settings, phase: .waiting) { try $0.receiveRoom(outputDir: outputDir, code: code, observer: $1) }
+    }
+
     /// Receive by publishing an invite the sender pastes/scans.
     func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings) {
         destinationDir = outputDir
@@ -92,6 +101,12 @@ final class TransferViewModel: ObservableObject {
         start(settings: settings, phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
     }
 
+    /// Send by pairing through a rendezvous room code.
+    func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings) {
+        destinationDir = nil
+        start(settings: settings, phase: .waiting) { try $0.sendRoom(filePath: filePath, code: code, observer: $1) }
+    }
+
     /// Send to the peer encoded in an invite string.
     func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings) {
         destinationDir = nil
@@ -100,9 +115,11 @@ final class TransferViewModel: ObservableObject {
 
     func cancel() {
         suppressNextFailure = true
+        operationID = UUID()
         session?.cancel()
         reset()
-        statusText = "Canceled"
+        phase = .canceled
+        statusText = AppText.value("Transfer canceled", "传输已取消", language: displayLanguage)
     }
 
     /// Spins up a fresh session and launches `operation`, surfacing setup errors.
@@ -113,13 +130,16 @@ final class TransferViewModel: ObservableObject {
     ) {
         suppressNextFailure = false
         reset()
+        displayLanguage = settings.language
+        operationID = UUID()
+        let operationID = operationID
         self.phase = phase
         do {
             let session = try EnvoixSession.newWithSettings(settings: settings)
             self.session = session
-            try operation(session, Observer(self))
+            try operation(session, Observer(self, operationID: operationID))
         } catch {
-            self.phase = .failed(friendlyError(error.localizedDescription))
+            self.phase = .failed(friendlyError(error.localizedDescription, language: displayLanguage))
         }
     }
 
@@ -155,10 +175,10 @@ final class TransferViewModel: ObservableObject {
         if suppressNextFailure {
             suppressNextFailure = false
             reset()
-            statusText = "Canceled"
+            statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
             return
         }
-        phase = .failed(friendlyError(reason))
+        phase = .failed(friendlyError(reason, language: displayLanguage))
     }
 
     /// The core echoes the bound peer as `"address: <descriptor>"`, which
@@ -208,20 +228,36 @@ private struct RateTracker {
     }
 }
 
-/// Maps common raw failure strings to friendlier English; passes others through.
-func friendlyError(_ reason: String) -> String {
+/// Maps common raw failure strings to friendlier UI text; passes others through.
+func friendlyError(_ reason: String, language: String = "en") -> String {
     let lower = reason.lowercased()
     if lower.contains("timed out") || lower.contains("timeout") || lower.contains("deadline") {
-        return "Couldn't reach the other device. Make sure both are on the same Wi-Fi network and the token matches."
+        return AppText.value(
+            "Couldn't reach the other device. Make sure both are on the same Wi-Fi network and the token matches.",
+            "无法连接另一台设备。请确认两台设备在同一 Wi-Fi，且口令匹配。",
+            language: language
+        )
     }
     if lower.contains("no peer") || lower.contains("not found") || lower.contains("no route") {
-        return "No device found. Check that the other side is running and the token or invite is correct."
+        return AppText.value(
+            "No device found. Check that the other side is running and the token or invite is correct.",
+            "未发现设备。请确认另一端正在运行，并且口令或邀请信息正确。",
+            language: language
+        )
     }
     if lower.contains("expired") {
-        return "This invite has expired. Ask the receiver to generate a new one."
+        return AppText.value(
+            "This invite has expired. Ask the receiver to generate a new one.",
+            "此邀请已过期。请让接收方重新生成。",
+            language: language
+        )
     }
     if lower.contains("permission") || lower.contains("denied") {
-        return "Access was denied. Check the destination folder permissions and local-network access."
+        return AppText.value(
+            "Access was denied. Check the destination folder permissions and local-network access.",
+            "访问被拒绝。请检查目标文件夹权限和本地网络访问权限。",
+            language: language
+        )
     }
     return reason
 }
@@ -230,9 +266,11 @@ func friendlyError(_ reason: String) -> String {
 /// onto the main thread before touching the view model.
 final class Observer: TransferObserver, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
+    private let operationID: UUID
 
-    init(_ viewModel: TransferViewModel) {
+    init(_ viewModel: TransferViewModel, operationID: UUID) {
         self.viewModel = viewModel
+        self.operationID = operationID
     }
 
     func onInviteReady(invite: String) { hop { $0.handleInvite(invite) } }
@@ -243,8 +281,8 @@ final class Observer: TransferObserver, @unchecked Sendable {
     func onStatus(message: String) { hop { $0.handleStatus(message) } }
 
     private func hop(_ body: @escaping (TransferViewModel) -> Void) {
-        DispatchQueue.main.async { [weak viewModel] in
-            if let viewModel { body(viewModel) }
+        DispatchQueue.main.async { [weak viewModel, operationID] in
+            if let viewModel, viewModel.operationID == operationID { body(viewModel) }
         }
     }
 }

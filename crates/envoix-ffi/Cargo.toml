@@ -11,9 +11,12 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [dependencies]
 envoix-client.workspace = true
 envoix-qr.workspace = true
+envoix-rendezvous-iroh.workspace = true
 tokio.workspace = true
 uniffi.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+envoix-rendezvous.workspace = true
+iroh.workspace = true
 tempfile.workspace = true

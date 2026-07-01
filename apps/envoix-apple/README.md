@@ -57,13 +57,15 @@ Canvas > Reload Canvas** before doing a full app rebuild.
 
 ## Using it
 
-Each tab has two pairing modes:
+Each tab has three pairing modes:
 
-- **Same network (token)**: both sides enter the same shared token (12+ chars);
-  the peer is discovered automatically over mDNS. No address/link exchange.
-  Requires both devices on the same LAN.
-- **Invite link**: the receiver publishes an `envoix:…` invite (QR + text,
-  hidden behind *Show Address*); the sender pastes it.
+- **Room Code**: the default path. The receiver generates a short code and
+  waits; the sender enters that code. The rendezvous broker only pairs devices,
+  and the file still moves over the encrypted transfer path.
+- **Link / QR**: the receiver publishes an `envoix:…` invite as QR + text; the
+  sender scans or pastes it.
+- **Shared Token**: both sides enter the same shared token (12+ chars); the peer
+  is discovered automatically over mDNS. This is best for same-LAN transfers.
 
 The receive folder defaults to `~/Downloads` until you pick another (remembered
 across launches). The first transfer may trigger a macOS "allow local network
@@ -71,8 +73,8 @@ access" prompt.
 
 Quality-of-life:
 
-- **Token mode** has a *Generate* button (and *Copy*) so you don't have to
-  invent a token; it is shared between the Send and Receive tabs.
+- **Room Code** starts ready on the receive side with *Generate* and *Copy*.
+  The send side only asks for the receiver's code.
 - **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
   as well as the file panel.
 - During a transfer the status line shows live throughput and an ETA based on a

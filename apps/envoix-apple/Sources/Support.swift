@@ -5,6 +5,8 @@ import EnvoixCore
 
 /// Minimum length of a shared pairing token, matching the core requirement.
 let minTokenLength = 12
+let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -21,8 +23,9 @@ func friendlyToken() -> String {
 
 /// How two peers find and authenticate each other.
 enum PairingMode: Hashable {
-    case token   // same LAN, shared token, mDNS auto-discovery
+    case room    // rendezvous room, short code, broker-assisted pairing
     case invite  // QR / invite link carrying the receiver's address
+    case token   // same LAN, shared token, mDNS auto-discovery
 }
 
 extension String {
@@ -38,7 +41,7 @@ enum RuntimeSettingsProvider {
         speedLimit: Int
     ) throws -> EnvoixRuntimeSettings {
         guard speedLimit >= 0 else {
-            throw RuntimeSettingsError("Speed limit must be between 0 and 1000 MB/s.")
+            throw RuntimeSettingsError("Speed limit cannot be negative.")
         }
 
         return EnvoixRuntimeSettings(
@@ -49,6 +52,10 @@ enum RuntimeSettingsProvider {
             speedLimitMbps: UInt64(speedLimit)
         )
     }
+}
+
+func newRoomCode() -> String {
+    (try? generateRoomCode()) ?? friendlyToken()
 }
 
 struct RuntimeSettingsError: LocalizedError {
@@ -67,15 +74,27 @@ enum AppText {
     }
 }
 
+private struct AppLanguageKey: EnvironmentKey {
+    static let defaultValue = "en"
+}
+
+extension EnvironmentValues {
+    var appLanguage: String {
+        get { self[AppLanguageKey.self] }
+        set { self[AppLanguageKey.self] = newValue }
+    }
+}
+
 /// A labeled field for entering the shared pairing token, with a one-tap
 /// generator (and copy) so users don't have to invent one.
 struct TokenField: View {
+    @Environment(\.appLanguage) private var language
     @Binding var token: String
     var disabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Shared token (same on both devices, \(minTokenLength)+ characters)")
+            Text(AppText.value("Shared token (same on both devices, \(minTokenLength)+ characters)", "共享口令（两台设备相同，至少 \(minTokenLength) 个字符）", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             HStack(spacing: 8) {
@@ -85,16 +104,16 @@ struct TokenField: View {
                     .foregroundStyle(Theme.text)
                 Button {
                     token = friendlyToken()
-                    ToastCenter.shared.show("Token generated")
+                    ToastCenter.shared.show(AppText.value("Token generated", "口令已生成", language: language))
                 } label: {
-                    Label("Generate", systemImage: "wand.and.stars")
+                    Label(AppText.value("Generate", "生成", language: language), systemImage: "wand.and.stars")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
                 Button {
-                    copyWithToast(token, "Token copied")
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
                 } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label(AppText.value("Copy Token", "复制口令", language: language), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -109,6 +128,65 @@ struct TokenField: View {
                     .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        }
+    }
+}
+
+struct RoomCodeField: View {
+    @Environment(\.appLanguage) private var language
+    @Binding var code: String
+    var disabled: Bool
+    var title = "Room code"
+    var placeholder = "135790-amber-comet"
+    var canGenerate: Bool = false
+    var generateLabel = "Generate"
+    var copyLabel = "Copy Code"
+    var helper: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            HStack(spacing: 8) {
+                TextField(placeholder, text: $code)
+                    .textFieldStyle(.plain)
+                    .font(.body.monospaced())
+                    .foregroundStyle(Theme.text)
+                    .disabled(disabled)
+                if canGenerate {
+                    Button {
+                        code = newRoomCode()
+                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                    } label: {
+                        Label(generateLabel, systemImage: "wand.and.stars")
+                            .frame(minHeight: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .disabled(disabled)
+                }
+                Button {
+                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                } label: {
+                    Label(copyLabel, systemImage: "doc.on.doc")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(code.trimmed.isEmpty)
+            }
+            .padding(.horizontal, 10)
+            .frame(minHeight: 44)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+
+            Text(helper)
+                .font(.body)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -186,6 +264,7 @@ func etaString(_ seconds: Double) -> String {
 
 /// Shared status / progress section used by both the send and receive views.
 struct TransferStatusView: View {
+    @Environment(\.appLanguage) private var language
     @ObservedObject var viewModel: TransferViewModel
 
     var body: some View {
@@ -229,7 +308,7 @@ struct TransferStatusView: View {
             }
 
             switch viewModel.phase {
-            case .idle, .waiting, .failed:
+            case .idle, .waiting, .canceled, .failed:
                 EmptyView()
             case .transferring:
                 ProgressBar(value: viewModel.progressFraction)
@@ -274,13 +353,15 @@ struct TransferStatusView: View {
     private var titleText: String {
         switch viewModel.phase {
         case .idle:
-            return "Status"
+            return AppText.value("Status", "状态", language: language)
         case .waiting:
-            return "Waiting for the other device"
+            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
         case .transferring:
-            return viewModel.fileName.isEmpty ? "Transferring" : viewModel.fileName
+            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
         case .completed:
-            return "Transfer completed"
+            return AppText.value("Transfer completed", "传输完成", language: language)
+        case .canceled:
+            return AppText.value("Transfer canceled", "传输已取消", language: language)
         case .failed(let reason):
             return friendlyFailure(reason).title
         }
@@ -291,11 +372,15 @@ struct TransferStatusView: View {
         case .idle:
             return viewModel.statusText.isEmpty ? nil : viewModel.statusText
         case .waiting:
-            return viewModel.statusText.isEmpty ? "Keep this window open until the peer connects." : viewModel.statusText
+            return viewModel.statusText.isEmpty
+                ? AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
+                : viewModel.statusText
         case .transferring:
-            return "Keep both devices awake until the transfer finishes."
+            return AppText.value("Keep both devices awake until the transfer finishes.", "请保持两台设备唤醒，直到传输完成。", language: language)
         case .completed:
-            return viewModel.statusText.isEmpty ? "The file is ready." : viewModel.statusText
+            return viewModel.statusText.isEmpty ? AppText.value("The file is ready.", "文件已准备好。", language: language) : viewModel.statusText
+        case .canceled:
+            return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
         case .failed(let reason):
             return friendlyFailure(reason).detail
         }
@@ -305,7 +390,7 @@ struct TransferStatusView: View {
         let text = viewModel.statusText.trimmed
         guard !text.isEmpty else { return nil }
         if case .failed = viewModel.phase {
-            return "Last step: \(text)"
+            return AppText.value("Last step: \(text)", "上一步：\(text)", language: language)
         }
         return nil
     }
@@ -316,6 +401,7 @@ struct TransferStatusView: View {
         case .waiting: return "antenna.radiowaves.left.and.right"
         case .transferring: return "arrow.up.arrow.down.circle"
         case .completed: return "checkmark.circle.fill"
+        case .canceled: return "xmark.circle"
         case .failed: return "exclamationmark.triangle.fill"
         }
     }
@@ -325,6 +411,7 @@ struct TransferStatusView: View {
         case .idle: return Theme.muted
         case .waiting, .transferring: return Theme.warning
         case .completed: return Theme.success
+        case .canceled: return Theme.muted
         case .failed: return Theme.danger
         }
     }
@@ -334,7 +421,7 @@ struct TransferStatusView: View {
         case .failed: return Theme.dangerSoft.opacity(0.55)
         case .waiting, .transferring: return Theme.warning.opacity(0.06)
         case .completed: return Theme.success.opacity(0.06)
-        case .idle: return Theme.surface
+        case .idle, .canceled: return Theme.surface
         }
     }
 
@@ -350,22 +437,27 @@ struct TransferStatusView: View {
         let lower = cleanReason.lowercased()
         if lower.contains("mdns") && lower.contains("peers discovered") {
             return (
-                "No device found on the local network",
-                "Make sure the other Mac is receiving with the same token and both devices are on the same network."
+                AppText.value("No device found on the local network", "未在局域网发现设备", language: language),
+                AppText.value("Make sure the other Mac is receiving with the same token and both devices are on the same network.", "请确认另一台 Mac 正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
             )
         }
         if cleanReason.isEmpty {
-            return ("Transfer failed", "Try again, or switch pairing method if discovery keeps failing.")
+            return (
+                AppText.value("Transfer failed", "传输失败", language: language),
+                AppText.value("Try again, or switch pairing method if discovery keeps failing.", "请重试；如果一直无法发现设备，请切换配对方式。", language: language)
+            )
         }
-        return ("Transfer failed", cleanReason)
+        return (AppText.value("Transfer failed", "传输失败", language: language), cleanReason)
     }
 
     /// Reveal + copyable absolute path for a received file (handy for pasting
     /// into an AI or another tool).
     @ViewBuilder private func completedFileControls(_ url: URL) -> some View {
         HStack {
-            Button("Reveal in Finder") { revealInFinder(url) }
-            Button("Copy Path") { copyWithToast(url.path, "Path copied") }
+            Button(AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)) { revealInFinder(url) }
+            Button(AppText.value("Copy Path", "复制路径", language: language)) {
+                copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
+            }
         }
         Text(url.path)
             .font(.body.monospaced())

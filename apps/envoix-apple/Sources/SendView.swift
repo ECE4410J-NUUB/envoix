@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 struct SendView: View {
+    @Environment(\.appLanguage) private var uiLanguage
     @EnvironmentObject private var model: AppModel
     @ObservedObject var viewModel: TransferViewModel
     @State private var file: URL?
@@ -13,11 +14,12 @@ struct SendView: View {
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
-    @State private var mode: PairingMode = .invite
+    @State private var roomCode = ""
+    @State private var mode: PairingMode = .room
     @State private var dropTargeted = false
     @State private var filePathInput = ""
 
-    init(viewModel: TransferViewModel, initialMode: PairingMode = .invite) {
+    init(viewModel: TransferViewModel, initialMode: PairingMode = .room) {
         self.viewModel = viewModel
         _mode = State(initialValue: initialMode)
     }
@@ -31,6 +33,15 @@ struct SendView: View {
 
                     if mode == .invite {
                         inviteSection
+                    } else if mode == .room {
+                        RoomCodeField(
+                            code: $roomCode,
+                            disabled: viewModel.isBusy,
+                            title: AppText.value("Receiver code", "接收码", language: uiLanguage),
+                            placeholder: AppText.value("Code shown on the receiving Mac", "接收端屏幕上的码", language: uiLanguage),
+                            helper: AppText.value("Enter the code shown on the receiving Mac, then send this file.", "输入接收端屏幕上的码，然后发送这个文件。", language: uiLanguage)
+                        )
+                        .card(padding: 14)
                     } else {
                         TokenField(token: $token, disabled: viewModel.isBusy)
                             .card(padding: 14)
@@ -42,7 +53,7 @@ struct SendView: View {
             }
 
             if concurrencyBlocked {
-                Text("Finish receiving before starting a send.")
+                Text(AppText.value("Finish receiving before starting a send.", "请先完成接收任务，再开始发送。", language: uiLanguage))
                     .font(.callout)
                     .foregroundStyle(Theme.muted)
                     .padding(.bottom, 8)
@@ -63,7 +74,7 @@ struct SendView: View {
     }
 
     private var modeSelector: some View {
-        PairingModeSelector(selection: $mode, disabled: viewModel.isBusy)
+        PairingModeSelector(selection: $mode, role: .send, disabled: viewModel.isBusy)
     }
 
     private var fileSection: some View {
@@ -76,13 +87,15 @@ struct SendView: View {
                         .font(.system(size: 48, weight: .semibold))
                         .foregroundStyle(Theme.accentStrong)
 
-                    Text(file?.lastPathComponent ?? "Drag here or click to choose")
+                    Text(file?.lastPathComponent ?? AppText.value("Drag here or click to choose", "拖到这里或点击选择", language: uiLanguage))
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(file == nil ? Theme.text : Theme.accentStrong)
                         .lineLimit(1)
                         .truncationMode(.middle)
 
-                    Text(file == nil ? "Drop a file into this area, or click anywhere here to select one." : "Ready to share. Click this area to replace the file.")
+                    Text(file == nil
+                         ? AppText.value("Drop a file into this area, or click anywhere here to select one.", "把文件拖到这里，或点击此区域选择文件。", language: uiLanguage)
+                         : AppText.value("Ready to share. Click this area to replace the file.", "已准备好分享。点击此区域可替换文件。", language: uiLanguage))
                         .font(.body)
                         .foregroundStyle(Theme.muted)
                         .multilineTextAlignment(.center)
@@ -122,7 +135,7 @@ struct SendView: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField("Paste an absolute file path here", text: $filePathInput)
+            TextField(AppText.value("Paste an absolute file path here", "在这里粘贴绝对文件路径", language: uiLanguage), text: $filePathInput)
                 .textFieldStyle(.plain)
                 .font(.callout.monospaced())
                 .foregroundStyle(Theme.text)
@@ -130,7 +143,7 @@ struct SendView: View {
                 .disabled(viewModel.isBusy)
 
             Button(action: applyPathInput) {
-                Label("Use Path", systemImage: "checkmark")
+                Label(AppText.value("Use Path", "使用路径", language: uiLanguage), systemImage: "checkmark")
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -138,12 +151,12 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(filePathInput.trimmed.isEmpty ? Theme.muted : Theme.accentStrong)
             .disabled(viewModel.isBusy || filePathInput.trimmed.isEmpty)
-            .help("Use pasted path")
+            .help(AppText.value("Use pasted path", "使用粘贴的路径", language: uiLanguage))
 
             Button {
-                if let file { copyWithToast(file.path, "File path copied") }
+                if let file { copyWithToast(file.path, AppText.value("File path copied", "文件路径已复制", language: uiLanguage)) }
             } label: {
-                Label("Copy Selected Path", systemImage: "doc.on.doc")
+                Label(AppText.value("Copy Selected Path", "复制已选路径", language: uiLanguage), systemImage: "doc.on.doc")
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
@@ -151,7 +164,7 @@ struct SendView: View {
             .buttonStyle(.plain)
             .foregroundStyle(file == nil ? Theme.muted : Theme.accentStrong)
             .disabled(file == nil)
-            .help("Copy selected path")
+            .help(AppText.value("Copy selected path", "复制已选择文件的路径", language: uiLanguage))
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 44)
@@ -166,10 +179,10 @@ struct SendView: View {
     private var inviteSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Receiver invite link")
+                Text(AppText.value("Receiver invite link", "接收端邀请链接", language: uiLanguage))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text("Paste the link generated on the receiving Mac.")
+                Text(AppText.value("Paste the link or QR result from the receiving Mac.", "粘贴接收端生成的链接或二维码内容。", language: uiLanguage))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
             }
@@ -182,9 +195,9 @@ struct SendView: View {
                     .disabled(viewModel.isBusy)
                 Button {
                     invite = NSPasteboard.general.string(forType: .string)?.trimmed ?? invite
-                    ToastCenter.shared.show("Invite pasted")
+                    ToastCenter.shared.show(AppText.value("Invite pasted", "邀请已粘贴", language: uiLanguage))
                 } label: {
-                    Label("Paste", systemImage: "doc.on.clipboard")
+                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -203,16 +216,18 @@ struct SendView: View {
     }
 
     private var primaryLabel: String {
-        if viewModel.isBusy { return "Cancel Transfer" }
+        if viewModel.isBusy { return AppText.value("Cancel Transfer", "取消传输", language: uiLanguage) }
         switch viewModel.phase {
-        case .completed, .failed: return "Send Again"
-        default: return "Send"
+        case .completed, .canceled, .failed: return AppText.value("Send Again", "再次发送", language: uiLanguage)
+        default: return AppText.value("Send", "发送", language: uiLanguage)
         }
     }
 
     private var canSend: Bool {
         guard file != nil else { return false }
         switch mode {
+        case .room:
+            return !roomCode.trimmed.isEmpty
         case .invite:
             return !invite.trimmed.isEmpty
         case .token:
@@ -236,12 +251,12 @@ struct SendView: View {
         let path = (raw as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
-            ToastCenter.shared.show("File path not found")
+            ToastCenter.shared.show(AppText.value("File path not found", "未找到文件路径", language: uiLanguage))
             return
         }
 
         selectFile(URL(fileURLWithPath: path))
-        ToastCenter.shared.show("File path selected")
+        ToastCenter.shared.show(AppText.value("File path selected", "已选择文件路径", language: uiLanguage))
     }
 
     private func primaryAction() {
@@ -259,6 +274,8 @@ struct SendView: View {
                 speedLimit: speedLimit
             )
             switch mode {
+            case .room:
+                viewModel.startSendingWithRoom(filePath: file.path, code: roomCode.trimmed, settings: settings)
             case .invite:
                 viewModel.startSendingWithInvite(filePath: file.path, invite: invite.trimmed, settings: settings)
             case .token:

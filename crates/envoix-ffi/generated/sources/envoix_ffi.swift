@@ -352,7 +352,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that SWIFT handles always have the lowest bit set
 fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
 fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
@@ -441,6 +441,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -486,12 +510,12 @@ fileprivate struct FfiConverterString: FfiConverter {
  * A send/receive session driving the envoix core off its own runtime.
  */
 public protocol EnvoixSessionProtocol: AnyObject, Sendable {
-    
+
     /**
      * Requests cancellation of the in-flight transfer, if any.
      */
-    func cancel() 
-    
+    func cancel()
+
     /**
      * Starts receiving one file into `output_dir`.
      *
@@ -499,8 +523,8 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * is delivered via [`TransferObserver::on_invite_ready`]; the outcome
      * arrives via `on_completed` / `on_failed`.
      */
-    func receive(outputDir: String, observer: TransferObserver) throws 
-    
+    func receive(outputDir: String, observer: TransferObserver) throws
+
     /**
      * Starts receiving one file into `output_dir`, pairing on the local
      * network with a shared `token` (no invite needed).
@@ -509,8 +533,13 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * the sender discovers it. Requires both peers on the same LAN. The token
      * must be at least 12 ASCII bytes.
      */
-    func receiveMdns(outputDir: String, token: String, observer: TransferObserver) throws 
-    
+    func receiveMdns(outputDir: String, token: String, observer: TransferObserver) throws
+
+    /**
+     * Starts receiving one file by pairing in a rendezvous room with `code`.
+     */
+    func receiveRoom(outputDir: String, code: String, observer: TransferObserver) throws
+
     /**
      * Starts sending `file_path` to the peer encoded in `invite`.
      *
@@ -518,8 +547,8 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * `on_failed`. The invite is validated (expiry, version) before any
      * connection is attempted.
      */
-    func sendInvite(invite: String, filePath: String, observer: TransferObserver) throws 
-    
+    func sendInvite(invite: String, filePath: String, observer: TransferObserver) throws
+
     /**
      * Starts sending `file_path`, discovering the receiver on the local
      * network via a shared `token` (no invite needed).
@@ -527,8 +556,13 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * Both peers enter the same token; requires both on the same LAN. The
      * token must be at least 12 ASCII bytes.
      */
-    func sendMdns(filePath: String, token: String, observer: TransferObserver) throws 
-    
+    func sendMdns(filePath: String, token: String, observer: TransferObserver) throws
+
+    /**
+     * Starts sending `file_path` by pairing in a rendezvous room with `code`.
+     */
+    func sendRoom(filePath: String, code: String, observer: TransferObserver) throws
+
 }
 /**
  * A send/receive session driving the envoix core off its own runtime.
@@ -593,9 +627,20 @@ public convenience init() {
         try! rustCall { uniffi_envoix_ffi_fn_free_envoixsession(handle, $0) }
     }
 
-    
 
-    
+    /**
+     * Creates a session with explicit runtime settings.
+     */
+public static func newWithSettings(settings: EnvoixRuntimeSettings) -> EnvoixSession  {
+    return try!  FfiConverterTypeEnvoixSession_lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_constructor_envoixsession_new_with_settings(
+        FfiConverterTypeEnvoixRuntimeSettings_lower(settings),$0
+    )
+})
+}
+
+
+
     /**
      * Requests cancellation of the in-flight transfer, if any.
      */
@@ -605,7 +650,7 @@ open func cancel()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Starts receiving one file into `output_dir`.
      *
@@ -621,7 +666,7 @@ open func receive(outputDir: String, observer: TransferObserver)throws   {try ru
     )
 }
 }
-    
+
     /**
      * Starts receiving one file into `output_dir`, pairing on the local
      * network with a shared `token` (no invite needed).
@@ -639,7 +684,20 @@ open func receiveMdns(outputDir: String, token: String, observer: TransferObserv
     )
 }
 }
-    
+
+    /**
+     * Starts receiving one file by pairing in a rendezvous room with `code`.
+     */
+open func receiveRoom(outputDir: String, code: String, observer: TransferObserver)throws   {try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_method_envoixsession_receive_room(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(outputDir),
+        FfiConverterString.lower(code),
+        FfiConverterTypeTransferObserver_lower(observer),$0
+    )
+}
+}
+
     /**
      * Starts sending `file_path` to the peer encoded in `invite`.
      *
@@ -656,7 +714,7 @@ open func sendInvite(invite: String, filePath: String, observer: TransferObserve
     )
 }
 }
-    
+
     /**
      * Starts sending `file_path`, discovering the receiver on the local
      * network via a shared `token` (no invite needed).
@@ -673,9 +731,22 @@ open func sendMdns(filePath: String, token: String, observer: TransferObserver)t
     )
 }
 }
-    
 
-    
+    /**
+     * Starts sending `file_path` by pairing in a rendezvous room with `code`.
+     */
+open func sendRoom(filePath: String, code: String, observer: TransferObserver)throws   {try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_method_envoixsession_send_room(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(filePath),
+        FfiConverterString.lower(code),
+        FfiConverterTypeTransferObserver_lower(observer),$0
+    )
+}
+}
+
+
+
 }
 
 
@@ -735,37 +806,37 @@ public func FfiConverterTypeEnvoixSession_lower(_ value: EnvoixSession) -> UInt6
  * [`on_failed`]: TransferObserver::on_failed
  */
 public protocol TransferObserver: AnyObject, Sendable {
-    
+
     /**
      * Receiver only: the `envoix:…` invite string to render as a QR / share.
      */
-    func onInviteReady(invite: String) 
-    
+    func onInviteReady(invite: String)
+
     /**
      * A transfer started; `total_bytes` is the full file size.
      */
-    func onStarted(fileName: String, totalBytes: UInt64) 
-    
+    func onStarted(fileName: String, totalBytes: UInt64)
+
     /**
      * Progress update: `transferred` of `total` plaintext bytes.
      */
-    func onProgress(transferred: UInt64, total: UInt64) 
-    
+    func onProgress(transferred: UInt64, total: UInt64)
+
     /**
      * Terminal success: the transfer finished and was verified.
      */
-    func onCompleted(bytes: UInt64) 
-    
+    func onCompleted(bytes: UInt64)
+
     /**
      * Terminal failure with a human-readable reason.
      */
-    func onFailed(reason: String) 
-    
+    func onFailed(reason: String)
+
     /**
      * Free-form lifecycle/status text for display or logging.
      */
-    func onStatus(message: String) 
-    
+    func onStatus(message: String)
+
 }
 /**
  * Observer implemented by the native UI to receive transfer updates.
@@ -827,9 +898,9 @@ open class TransferObserverImpl: TransferObserver, @unchecked Sendable {
         try! rustCall { uniffi_envoix_ffi_fn_free_transferobserver(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Receiver only: the `envoix:…` invite string to render as a QR / share.
      */
@@ -840,7 +911,7 @@ open func onInviteReady(invite: String)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * A transfer started; `total_bytes` is the full file size.
      */
@@ -852,7 +923,7 @@ open func onStarted(fileName: String, totalBytes: UInt64)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Progress update: `transferred` of `total` plaintext bytes.
      */
@@ -864,7 +935,7 @@ open func onProgress(transferred: UInt64, total: UInt64)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Terminal success: the transfer finished and was verified.
      */
@@ -875,7 +946,7 @@ open func onCompleted(bytes: UInt64)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Terminal failure with a human-readable reason.
      */
@@ -886,7 +957,7 @@ open func onFailed(reason: String)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Free-form lifecycle/status text for display or logging.
      */
@@ -897,9 +968,9 @@ open func onStatus(message: String)  {try! rustCall() {
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -942,7 +1013,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -968,7 +1039,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -994,7 +1065,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1018,7 +1089,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1042,7 +1113,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1066,7 +1137,7 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1148,12 +1219,111 @@ public func FfiConverterTypeTransferObserver_lower(_ value: TransferObserver) ->
 
 
 /**
+ * Runtime settings supplied by native UIs.
+ */
+public struct EnvoixRuntimeSettings: Equatable, Hashable {
+    /**
+     * Whether the UI permits send and receive tasks at the same time.
+     */
+    public var concurrentTransfers: Bool
+    /**
+     * UI language preference, kept for cross-platform settings parity.
+     */
+    public var language: String
+    /**
+     * Optional rendezvous broker URL/address. Empty uses the built-in default.
+     */
+    public var serverUrl: String
+    /**
+     * Optional relay URL. Empty uses the built-in default.
+     */
+    public var relayUrl: String
+    /**
+     * Reserved for future throttling; currently advisory only.
+     */
+    public var speedLimitMbps: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Whether the UI permits send and receive tasks at the same time.
+         */concurrentTransfers: Bool,
+        /**
+         * UI language preference, kept for cross-platform settings parity.
+         */language: String,
+        /**
+         * Optional rendezvous broker URL/address. Empty uses the built-in default.
+         */serverUrl: String,
+        /**
+         * Optional relay URL. Empty uses the built-in default.
+         */relayUrl: String,
+        /**
+         * Reserved for future throttling; currently advisory only.
+         */speedLimitMbps: UInt64) {
+        self.concurrentTransfers = concurrentTransfers
+        self.language = language
+        self.serverUrl = serverUrl
+        self.relayUrl = relayUrl
+        self.speedLimitMbps = speedLimitMbps
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EnvoixRuntimeSettings: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEnvoixRuntimeSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EnvoixRuntimeSettings {
+        return
+            try EnvoixRuntimeSettings(
+                concurrentTransfers: FfiConverterBool.read(from: &buf),
+                language: FfiConverterString.read(from: &buf),
+                serverUrl: FfiConverterString.read(from: &buf),
+                relayUrl: FfiConverterString.read(from: &buf),
+                speedLimitMbps: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EnvoixRuntimeSettings, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.concurrentTransfers, into: &buf)
+        FfiConverterString.write(value.language, into: &buf)
+        FfiConverterString.write(value.serverUrl, into: &buf)
+        FfiConverterString.write(value.relayUrl, into: &buf)
+        FfiConverterUInt64.write(value.speedLimitMbps, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnvoixRuntimeSettings_lift(_ buf: RustBuffer) throws -> EnvoixRuntimeSettings {
+    return try FfiConverterTypeEnvoixRuntimeSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnvoixRuntimeSettings_lower(_ value: EnvoixRuntimeSettings) -> RustBuffer {
+    return FfiConverterTypeEnvoixRuntimeSettings.lower(value)
+}
+
+
+/**
  * Error surfaced across the FFI boundary.
  */
 public enum EnvoixError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     /**
      * An operation failed; `message` is a human-readable reason.
      */
@@ -1163,15 +1333,15 @@ public enum EnvoixError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
          */message: String
     )
 
-    
 
-    
 
-    
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -1188,9 +1358,9 @@ public struct FfiConverterTypeEnvoixError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Operation(
             message: try FfiConverterString.read(from: &buf)
             )
@@ -1202,14 +1372,14 @@ public struct FfiConverterTypeEnvoixError: FfiConverterRustBuffer {
     public static func write(_ value: EnvoixError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
-        
+
+
+
         case let .Operation(message):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(message, into: &buf)
-            
+
         }
     }
 }
@@ -1228,6 +1398,15 @@ public func FfiConverterTypeEnvoixError_lift(_ buf: RustBuffer) throws -> Envoix
 public func FfiConverterTypeEnvoixError_lower(_ value: EnvoixError) -> RustBuffer {
     return FfiConverterTypeEnvoixError.lower(value)
 }
+/**
+ * Generates a short room code such as `135790-amber-comet`.
+ */
+public func generateRoomCode()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_generate_room_code($0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -1244,6 +1423,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_generate_room_code() != 4423) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 28259) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1253,10 +1435,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_method_envoixsession_receive_mdns() != 58566) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_receive_room() != 45632) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_send_invite() != 47501) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_send_mdns() != 22738) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_send_room() != 27127) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_transferobserver_on_invite_ready() != 30310) {
@@ -1278,6 +1466,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_constructor_envoixsession_new() != 45323) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_constructor_envoixsession_new_with_settings() != 59982) {
         return InitializationResult.apiChecksumMismatch
     }
 

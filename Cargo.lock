@@ -1018,6 +1018,9 @@ version = "0.1.0"
 dependencies = [
  "envoix-client",
  "envoix-qr",
+ "envoix-rendezvous",
+ "envoix-rendezvous-iroh",
+ "iroh",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

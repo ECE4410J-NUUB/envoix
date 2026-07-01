@@ -77,29 +77,47 @@ struct ModePill: View {
 
 // MARK: - Pairing selector
 
-/// Two-option selector for choosing the pairing transport without hiding the
-/// behavioral difference between QR/link and token.
+/// Selector for choosing the pairing transport without hiding each mode's
+/// behavioral difference.
 struct PairingModeSelector: View {
+    enum Role { case send, receive }
+
+    @Environment(\.appLanguage) private var language
     @Binding var selection: PairingMode
+    var role: Role = .send
     var disabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Pairing method")
+            Text(AppText.value("Pairing method", "配对方式", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
             HStack(spacing: 10) {
                 option(
+                    mode: .room,
+                    title: role == .receive
+                        ? AppText.value("Share Receive Code", "分享接收码", language: language)
+                        : AppText.value("Enter Receiver Code", "输入接收码", language: language),
+                    subtitle: role == .receive
+                        ? AppText.value("Recommended. Give this code to the sender.", "推荐。把这个码发给发送方。", language: language)
+                        : AppText.value("Recommended. Use the code shown on the receiver.", "推荐。输入接收端屏幕上的码。", language: language),
+                    systemImage: "number"
+                )
+                option(
                     mode: .invite,
-                    title: "Link / QR",
-                    subtitle: "Best when one Mac starts receiving first.",
+                    title: role == .receive
+                        ? AppText.value("Create Link / QR", "创建链接 / 二维码", language: language)
+                        : AppText.value("Use Link / QR", "使用链接 / 二维码", language: language),
+                    subtitle: role == .receive
+                        ? AppText.value("Create an invite and wait for the sender.", "创建邀请并等待发送方。", language: language)
+                        : AppText.value("Paste the receiver's invite link.", "粘贴接收端生成的邀请链接。", language: language),
                     systemImage: "qrcode"
                 )
                 option(
                     mode: .token,
-                    title: "Shared Token",
-                    subtitle: "Same token on both devices, same network.",
+                    title: AppText.value("Use Shared Token", "使用共享口令", language: language),
+                    subtitle: AppText.value("Both devices use the same saved token on the same network.", "两台设备在同一网络中使用同一个已保存口令。", language: language),
                     systemImage: "key"
                 )
             }
