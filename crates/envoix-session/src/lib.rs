@@ -28,7 +28,10 @@ use endpoint::{
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
-pub use room::{receive_file_via_room, send_file_via_room};
+pub use room::{
+    receive_file_via_room, receive_file_via_room_with_cancel, send_file_via_room,
+    send_file_via_room_with_cancel,
+};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -129,7 +132,26 @@ pub async fn send_file_to_endpoint_addr(
     config: SessionConfig,
     events: Box<dyn EventSink>,
 ) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
+    send_file_to_endpoint_addr_with_cancel(
+        peer_addr,
+        file_path,
+        resume,
+        config,
+        events,
+        TransferCancelToken::new(),
+    )
+    .await
+}
+
+/// Like [`send_file_to_endpoint_addr`], stopping the data transfer on cancellation.
+pub async fn send_file_to_endpoint_addr_with_cancel(
+    peer_addr: EndpointAddr,
+    file_path: PathBuf,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError> {
     let local_endpoint = build_dial_endpoint(&config.identity, &config.relay).await?;
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,

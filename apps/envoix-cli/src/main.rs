@@ -171,8 +171,9 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
                 let client = client_for_room(config.as_deref(), identity_config(identity))?;
                 eprintln!("pairing in room via {rendezvous}...");
-                client
-                    .send_file_via_room(
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.send_file_via_room_with_cancel(
                         RoomSendRequest {
                             broker: rendezvous,
                             relay,
@@ -181,8 +182,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             resume,
                         },
                         Box::new(ConsoleEventSink::new()),
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             } else if let Some(invite_str) = invite {
                 let resolved = resolve_invite(&invite_str)?;
                 eprintln!(
@@ -275,8 +279,9 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
                 let client = client_for_room(config.as_deref(), identity)?;
                 eprintln!("waiting for sender via rendezvous {rendezvous}...");
-                client
-                    .receive_file_via_room(
+                let cancel = TransferCancelToken::new();
+                run_interruptible(
+                    client.receive_file_via_room_with_cancel(
                         RoomReceiveRequest {
                             broker: rendezvous,
                             relay,
@@ -285,8 +290,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             listen_addrs,
                         },
                         Box::new(ConsoleEventSink::new()),
-                    )
-                    .await?
+                        cancel.clone(),
+                    ),
+                    cancel,
+                )
+                .await?
             } else if enable_mdns {
                 match token {
                     Some(t) => {

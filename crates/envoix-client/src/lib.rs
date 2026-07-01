@@ -497,16 +497,28 @@ impl EnvoixClient {
         request: RoomSendRequest,
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
+        self.send_file_via_room_with_cancel(request, events, TransferCancelToken::new())
+            .await
+    }
+
+    /// Like [`Client::send_file_via_room`], stopping on cancellation.
+    pub async fn send_file_via_room_with_cancel(
+        &self,
+        request: RoomSendRequest,
+        events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
         let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
         let mut config = self.session_config();
         config.relay = request.relay;
-        envoix_session::send_file_via_room(
+        envoix_session::send_file_via_room_with_cancel(
             broker,
             &request.code,
             request.file_path,
             request.resume,
             config,
             events,
+            cancel,
         )
         .await
     }
@@ -518,16 +530,28 @@ impl EnvoixClient {
         request: RoomReceiveRequest,
         events: Box<dyn EventSink>,
     ) -> Result<TransferSummary, PublicError> {
+        self.receive_file_via_room_with_cancel(request, events, TransferCancelToken::new())
+            .await
+    }
+
+    /// Like [`Client::receive_file_via_room`], stopping on cancellation.
+    pub async fn receive_file_via_room_with_cancel(
+        &self,
+        request: RoomReceiveRequest,
+        events: Box<dyn EventSink>,
+        cancel: TransferCancelToken,
+    ) -> Result<TransferSummary, PublicError> {
         let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
         let mut config = self.session_config();
         config.relay = request.relay;
-        envoix_session::receive_file_via_room(
+        envoix_session::receive_file_via_room_with_cancel(
             broker,
             &request.code,
             request.listen_addrs,
             request.output_dir,
             config,
             events,
+            cancel,
         )
         .await
     }
