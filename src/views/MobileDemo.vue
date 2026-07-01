@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { Camera, Clipboard, Download, FileUp, FolderOpen, Pause, Play, Send, Settings, Shuffle, Zap } from '@lucide/vue';
+import { Camera, Clipboard, Download, FileUp, FolderOpen, Pause, Play, Send, Settings, Shuffle, X, Zap } from '@lucide/vue';
 
 import CopyButton from '@/components/CopyButton.vue';
 import DemoQr from '@/components/DemoQr.vue';
@@ -83,6 +83,8 @@ const connections = ref<Connection[]>([
   },
 ]);
 
+const confirmingPeer = ref<string | null>(null);
+
 function togglePause(peer: string) {
   const conn = connections.value.find((c) => c.peer === peer);
   if (conn) {
@@ -90,9 +92,22 @@ function togglePause(peer: string) {
   }
 }
 
+function requestCancel(peer: string) {
+  confirmingPeer.value = peer;
+}
+
+function confirmCancel(peer: string) {
+  connections.value = connections.value.filter((c) => c.peer !== peer);
+  confirmingPeer.value = null;
+}
+
+function dismissCancel() {
+  confirmingPeer.value = null;
+}
+
 const statusText = computed(() => {
   if (activeTab.value === 'transfer') {
-    return '4 active connections';
+    return `${connections.value.length} active connection${connections.value.length === 1 ? '' : 's'}`;
   }
   if (activeTab.value === 'receive') {
     return receiveToken.value ? 'Ready to connect with short token' : 'Waiting for sender';
@@ -156,14 +171,26 @@ function onFilePick(event: Event) {
         </header>
 
         <section v-if="activeTab === 'transfer'" class="mobile-content transfer-content">
-          <article v-for="connection in connections" :key="connection.peer" class="connection-card">
+          <article
+            v-for="connection in connections"
+            :key="connection.peer"
+            class="connection-card"
+          >
             <div class="connection-head">
-              <div>
+              <div class="connection-info">
                 <strong>{{ connection.direction }}</strong>
                 <span>{{ connection.peer }}</span>
               </div>
               <span class="mode-pill">{{ connection.mode }}</span>
             </div>
+            <button
+              class="cancel-btn"
+              type="button"
+              @click="requestCancel(connection.peer)"
+              :aria-label="`Cancel ${connection.direction}`"
+            >
+              <X :size="14" />
+            </button>
             <div class="progress-row">
               <div class="progress-track" :aria-label="`${connection.progress}% complete`">
                 <span :style="{ width: `${connection.progress}%` }"></span>
@@ -182,6 +209,15 @@ function onFilePick(event: Event) {
               <span>{{ connection.speed }}</span>
               <span>{{ connection.paused ? 'Paused' : connection.eta + ' ETA' }}</span>
               <span>{{ connection.totalSize }}</span>
+            </div>
+            <div v-if="confirmingPeer === connection.peer" class="cancel-overlay" @click.self="dismissCancel">
+              <div class="cancel-dialog">
+                <p>Confirm transfer cancellation?</p>
+                <div class="cancel-actions">
+                  <button class="secondary-action" type="button" @click="dismissCancel">No</button>
+                  <button class="primary-action" type="button" @click="confirmCancel(connection.peer)">Yes</button>
+                </div>
+              </div>
             </div>
           </article>
         </section>
