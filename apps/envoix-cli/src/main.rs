@@ -80,6 +80,10 @@ enum Command {
         /// testing relay vs direct; requires --relay.
         #[arg(long, requires = "relay")]
         relay_only: bool,
+        /// Force a direct data path: no relay fallback for the transfer (the
+        /// relay is still used to reach the broker). Direct-or-fail.
+        #[arg(long, requires = "room", conflicts_with = "relay_only")]
+        direct_only: bool,
         /// File to send.
         file: PathBuf,
     },
@@ -117,6 +121,10 @@ enum Command {
         /// testing relay vs direct; requires --relay.
         #[arg(long, requires = "relay")]
         relay_only: bool,
+        /// Force a direct data path: no relay fallback for the transfer (the
+        /// relay is still used to reach the broker). Direct-or-fail.
+        #[arg(long, requires = "room", conflicts_with = "relay_only")]
+        direct_only: bool,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
         ip_version: IpVersion,
@@ -175,6 +183,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             rendezvous,
             relay,
             relay_only,
+            direct_only,
         } => {
             let summary = if let Some(code) = room {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
@@ -187,6 +196,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             broker: rendezvous,
                             relay,
                             relay_only,
+                            direct_only,
                             code,
                             file_path: file,
                             resume,
@@ -283,6 +293,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             rendezvous,
             relay,
             relay_only,
+            direct_only,
         } => {
             let listen_addrs = receive_addrs_for(ip_version);
             let identity = identity_config(identity);
@@ -297,6 +308,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                             broker: rendezvous,
                             relay,
                             relay_only,
+                            direct_only,
                             code,
                             output_dir: output,
                             listen_addrs,

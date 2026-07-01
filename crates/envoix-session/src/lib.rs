@@ -56,6 +56,25 @@ pub struct SessionConfig {
     /// is impossible and the transfer must go through the relay (for A/B testing
     /// relay vs direct). Requires `relay` to be set.
     pub relay_only: bool,
+    /// Force a direct/holepunched data path by disabling the relay for the data
+    /// endpoint only: the relay is still used to reach the rendezvous broker, but
+    /// the transfer itself gets no relay fallback (direct-or-fail). For A/B
+    /// testing and confirming a direct path really works.
+    pub direct_only: bool,
+}
+
+impl SessionConfig {
+    /// The relay the *data* endpoint should use. `None` when `direct_only` (no
+    /// relay fallback for the transfer), otherwise the configured relay. The
+    /// rendezvous endpoint keeps using [`SessionConfig::relay`] regardless, so
+    /// direct-only still reaches a NATed broker through the relay.
+    fn data_relay(&self) -> Option<String> {
+        if self.direct_only {
+            None
+        } else {
+            self.relay.clone()
+        }
+    }
 }
 
 /// Bind an iroh endpoint (listen addr) that can accept one incoming connection.
@@ -119,7 +138,7 @@ pub async fn send_file_manual_with_cancel(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.relay, config.relay_only).await?;
+        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let mut connection = dial(local_endpoint.clone(), &peer).await?;
     let engine = TransferEngine::new(config.chunk_size);
 
@@ -166,7 +185,7 @@ pub async fn send_file_to_endpoint_addr_with_cancel(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.relay, config.relay_only).await?;
+        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
         Err(error) => {
@@ -208,7 +227,7 @@ pub async fn send_file_enable_mdns_with_cancel(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.relay, config.relay_only).await?;
+        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let mdns = MdnsAddressLookup::builder()
         .advertise(false)
         .build(local_endpoint.id())
@@ -335,7 +354,7 @@ where
     let bound_endpoint = bind_iroh_endpoint_with_relay(
         listen_addrs,
         &config.identity,
-        &config.relay,
+        &config.data_relay(),
         config.relay_only,
     )
     .await?;

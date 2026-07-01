@@ -33,6 +33,7 @@ fn config() -> SessionConfig {
         identity: IdentityConfig::Ephemeral,
         relay: None,
         relay_only: false,
+        direct_only: false,
     }
 }
 

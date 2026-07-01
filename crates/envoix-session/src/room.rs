@@ -169,11 +169,13 @@ pub async fn receive_file_via_room_with_cancel(
     let bound = bind_iroh_endpoint_with_relay(
         listen_addrs,
         &config.identity,
-        &config.relay,
+        &config.data_relay(),
         config.relay_only,
     )
     .await?;
-    let my_addr = ready_endpoint_addr(&bound, config.relay.is_some()).await;
+    // With direct-only the data endpoint has no relay home, so wait for a direct
+    // addr rather than a relay home; otherwise wait for the relay home as usual.
+    let my_addr = ready_endpoint_addr(&bound, config.data_relay().is_some()).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
     let pairing = match pair_or_cancel(&rdz, &broker, room_id, password, &my_addr, &cancel).await {
