@@ -656,7 +656,8 @@ async fn finalize_received_file(
         )));
     }
     LocalFileStorage::finalize_temp_file(temp_path, final_path).await?;
-    LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id).await?;
+    LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id)
+        .await?;
     Ok(())
 }
 
