@@ -10,6 +10,7 @@ struct EnvoixApp: App {
                 .environmentObject(model)
         }
         .windowResizability(.contentMinSize)
+        .defaultSize(width: 980, height: 720)
 
         // Menu-bar presence: keeps the app alive after the window is closed and
         // gives a quick status popover. `.window` style shows SwiftUI content.

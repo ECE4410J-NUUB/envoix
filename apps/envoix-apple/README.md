@@ -40,6 +40,21 @@ iOS later.
    open build/Build/Products/Debug/Envoix.app
    ```
 
+## UI iteration workflow
+
+For layout and visual work, use Xcode previews instead of repeatedly launching
+the whole app:
+
+1. Open `apps/envoix-apple/Envoix.xcodeproj`.
+2. Open `Sources/PreviewFixtures.swift`.
+3. Use the canvas previews for app shell, send progress, receive invite,
+   completed receive, and failure states.
+
+Only regenerate `EnvoixCore` when the Rust FFI surface changes. Pure SwiftUI
+edits under `apps/envoix-apple/Sources` should refresh through the preview
+canvas or Xcode's incremental build. If the canvas stalls, use **Editor >
+Canvas > Reload Canvas** before doing a full app rebuild.
+
 ## Using it
 
 Each tab has two pairing modes:

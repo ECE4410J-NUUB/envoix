@@ -53,6 +53,7 @@ final class TransferViewModel: ObservableObject {
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
     private var rate = RateTracker()
+    private var suppressNextFailure = false
 
     var progressFraction: Double {
         total > 0 ? Double(transferred) / Double(total) : 0
@@ -74,40 +75,48 @@ final class TransferViewModel: ObservableObject {
     // MARK: User actions
 
     /// Receive on the local network using a shared token (mDNS auto-discovery).
-    func startReceivingWithToken(outputDir: String, token: String) {
+    func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings) {
         destinationDir = outputDir
-        start(phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
+        start(settings: settings, phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
     }
 
     /// Receive by publishing an invite the sender pastes/scans.
-    func startReceivingWithInvite(outputDir: String) {
+    func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings) {
         destinationDir = outputDir
-        start(phase: .waiting) { try $0.receive(outputDir: outputDir, observer: $1) }
+        start(settings: settings, phase: .waiting) { try $0.receive(outputDir: outputDir, observer: $1) }
     }
 
     /// Send on the local network using a shared token (mDNS auto-discovery).
-    func startSendingWithToken(filePath: String, token: String) {
+    func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings) {
         destinationDir = nil
-        start(phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
+        start(settings: settings, phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
     }
 
     /// Send to the peer encoded in an invite string.
-    func startSendingWithInvite(filePath: String, invite: String) {
+    func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings) {
         destinationDir = nil
-        start(phase: .transferring) { try $0.sendInvite(invite: invite, filePath: filePath, observer: $1) }
+        start(settings: settings, phase: .transferring) { try $0.sendInvite(invite: invite, filePath: filePath, observer: $1) }
     }
 
     func cancel() {
+        suppressNextFailure = true
         session?.cancel()
+        reset()
+        statusText = "Canceled"
     }
 
     /// Spins up a fresh session and launches `operation`, surfacing setup errors.
-    private func start(phase: Phase, operation: (EnvoixSession, Observer) throws -> Void) {
+    private func start(
+        settings: EnvoixRuntimeSettings,
+        phase: Phase,
+        operation: (EnvoixSession, Observer) throws -> Void
+    ) {
+        suppressNextFailure = false
         reset()
-        let session = EnvoixSession()
-        self.session = session
         self.phase = phase
         do {
+            let session = try EnvoixSession.newWithSettings(settings: settings)
+            self.session = session
             try operation(session, Observer(self))
         } catch {
             self.phase = .failed(friendlyError(error.localizedDescription))
@@ -142,7 +151,15 @@ final class TransferViewModel: ObservableObject {
         phase = .completed(bytes: bytes)
     }
 
-    func handleFailed(_ reason: String) { phase = .failed(friendlyError(reason)) }
+    func handleFailed(_ reason: String) {
+        if suppressNextFailure {
+            suppressNextFailure = false
+            reset()
+            statusText = "Canceled"
+            return
+        }
+        phase = .failed(friendlyError(reason))
+    }
 
     /// The core echoes the bound peer as `"address: <descriptor>"`, which
     /// carries the real IP. Keep that out of the general status line and stash
