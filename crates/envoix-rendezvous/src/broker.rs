@@ -16,6 +16,10 @@ use crate::protocol::{Join, Paired, Role};
 const DEFAULT_ROOM_TTL: Duration = Duration::from_secs(300);
 /// Hard cap on a single relay session, so a stalled peer can't pin resources.
 const RELAY_TTL: Duration = Duration::from_secs(120);
+/// Cap on the wait for a peer's first control frame (its Join). A peer that
+/// connects and opens a stream but never sends Join is not in any room, so the
+/// room TTL cannot reclaim it - without this it would pin a connection slot.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Grace period to wait for peers to close after relaying, so buffered data is
 /// delivered before the transports are dropped.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
@@ -65,7 +69,9 @@ impl RoomRegistry {
     /// relay between them. The first peer's task returns once the second takes
     /// over the relay; the second peer's task drives it.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
-        let Join { room_id } = conn.read_control().await?;
+        let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
+            .await
+            .map_err(|_| RendezvousError::Rejected("no join received within timeout"))??;
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
             return Err(RendezvousError::Rejected("room id length out of range"));
         }
