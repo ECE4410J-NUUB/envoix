@@ -179,23 +179,26 @@ pub(crate) async fn build_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
     relay: &Option<String>,
+    relay_only: bool,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, false, relay).await
+    build_endpoint(Some(listen_addrs), identity, true, false, relay, relay_only).await
 }
 
 pub(crate) async fn build_advertising_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
     relay: &Option<String>,
+    relay_only: bool,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, true, relay).await
+    build_endpoint(Some(listen_addrs), identity, true, true, relay, relay_only).await
 }
 
 pub(crate) async fn build_dial_endpoint(
     identity: &IdentityConfig,
     relay: &Option<String>,
+    relay_only: bool,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(None, identity, false, false, relay).await
+    build_endpoint(None, identity, false, false, relay, relay_only).await
 }
 
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
@@ -231,6 +234,7 @@ async fn build_endpoint(
     accept_incoming: bool,
     advertise_self: bool,
     relay: &Option<String>,
+    relay_only: bool,
 ) -> Result<Endpoint, SessionError> {
     let secret_key = load_secret_key(identity).await?;
     let mut builder = Endpoint::builder(presets::N0)
@@ -244,7 +248,12 @@ async fn build_endpoint(
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));
     }
-    if let Some(addrs) = local_listen_addrs {
+    if relay_only {
+        // Bind no IP transport, so this endpoint can only reach peers through the
+        // relay - forces the relay data path (for A/B testing relay vs direct).
+        // Requires a relay to be configured, else the endpoint can reach no one.
+        builder = builder.clear_ip_transports();
+    } else if let Some(addrs) = local_listen_addrs {
         builder = builder.clear_ip_transports();
         for bind_addr in addrs.iter() {
             builder = builder

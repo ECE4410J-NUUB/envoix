@@ -204,6 +204,9 @@ pub struct RoomSendRequest {
     pub broker: String,
     /// Optional relay URL for WAN/NAT reachability of the data plane and broker.
     pub relay: Option<String>,
+    /// Force the data path through the relay (bind no IP transport). Requires
+    /// `relay`. For A/B testing relay vs direct.
+    pub relay_only: bool,
     /// Short pairing code shared with the receiver.
     pub code: String,
     /// Local file path to send.
@@ -219,6 +222,9 @@ pub struct RoomReceiveRequest {
     pub broker: String,
     /// Optional relay URL for WAN/NAT reachability of the data plane and broker.
     pub relay: Option<String>,
+    /// Force the data path through the relay (bind no IP transport). Requires
+    /// `relay`. For A/B testing relay vs direct.
+    pub relay_only: bool,
     /// Short pairing code shared with the sender.
     pub code: String,
     /// Directory where the received file and resume state are stored.
@@ -511,6 +517,7 @@ impl EnvoixClient {
         let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
         let mut config = self.session_config();
         config.relay = request.relay;
+        config.relay_only = request.relay_only;
         envoix_session::send_file_via_room_with_cancel(
             broker,
             &request.code,
@@ -544,6 +551,7 @@ impl EnvoixClient {
         let broker = envoix_session::parse_broker_addr(&request.broker, request.relay.as_deref())?;
         let mut config = self.session_config();
         config.relay = request.relay;
+        config.relay_only = request.relay_only;
         envoix_session::receive_file_via_room_with_cancel(
             broker,
             &request.code,
@@ -566,6 +574,7 @@ impl EnvoixClient {
             pairing: self.config.pairing.clone(),
             identity: self.config.identity.clone(),
             relay: None,
+            relay_only: false,
         }
     }
 }

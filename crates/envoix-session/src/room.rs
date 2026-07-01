@@ -139,8 +139,13 @@ pub async fn receive_file_via_room_with_cancel(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
-    let bound =
-        bind_iroh_endpoint_with_relay(listen_addrs, &config.identity, &config.relay).await?;
+    let bound = bind_iroh_endpoint_with_relay(
+        listen_addrs,
+        &config.identity,
+        &config.relay,
+        config.relay_only,
+    )
+    .await?;
     let my_addr = ready_endpoint_addr(&bound, config.relay.is_some()).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;

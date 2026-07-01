@@ -76,6 +76,10 @@ enum Command {
         /// Relay URL for WAN/NAT reachability, e.g. https://relay.example.com:8444.
         #[arg(long, requires = "room")]
         relay: Option<String>,
+        /// Force the data path through the relay (no direct/holepunch). For A/B
+        /// testing relay vs direct; requires --relay.
+        #[arg(long, requires = "relay")]
+        relay_only: bool,
         /// File to send.
         file: PathBuf,
     },
@@ -109,6 +113,10 @@ enum Command {
         /// Relay URL for WAN/NAT reachability, e.g. https://relay.example.com:8444.
         #[arg(long, requires = "room")]
         relay: Option<String>,
+        /// Force the data path through the relay (no direct/holepunch). For A/B
+        /// testing relay vs direct; requires --relay.
+        #[arg(long, requires = "relay")]
+        relay_only: bool,
         /// Address family to bind for receiving.
         #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
         ip_version: IpVersion,
@@ -166,6 +174,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             room,
             rendezvous,
             relay,
+            relay_only,
         } => {
             let summary = if let Some(code) = room {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
@@ -177,6 +186,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         RoomSendRequest {
                             broker: rendezvous,
                             relay,
+                            relay_only,
                             code,
                             file_path: file,
                             resume,
@@ -272,6 +282,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             room,
             rendezvous,
             relay,
+            relay_only,
         } => {
             let listen_addrs = receive_addrs_for(ip_version);
             let identity = identity_config(identity);
@@ -285,6 +296,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                         RoomReceiveRequest {
                             broker: rendezvous,
                             relay,
+                            relay_only,
                             code,
                             output_dir: output,
                             listen_addrs,
