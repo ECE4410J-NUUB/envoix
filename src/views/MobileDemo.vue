@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { Camera, Clipboard, Download, FileUp, FolderOpen, Send, Settings, Shuffle, Zap } from '@lucide/vue';
+import { Camera, Clipboard, Download, FileUp, FolderOpen, Pause, Play, Send, Settings, Shuffle, Zap } from '@lucide/vue';
 
 import CopyButton from '@/components/CopyButton.vue';
 import DemoQr from '@/components/DemoQr.vue';
@@ -29,7 +29,18 @@ const tabs = [
   { id: 'settings' as const, label: 'Settings', icon: Settings },
 ];
 
-const connections = [
+interface Connection {
+  peer: string;
+  mode: string;
+  direction: string;
+  speed: string;
+  eta: string;
+  totalSize: string;
+  progress: number;
+  paused: boolean;
+}
+
+const connections = ref<Connection[]>([
   {
     peer: '192.168.1.24:53190',
     mode: 'LAN',
@@ -38,6 +49,7 @@ const connections = [
     eta: '00:18',
     totalSize: '1.8 GB',
     progress: 72,
+    paused: false,
   },
   {
     peer: 'relay.envoix.dev:443',
@@ -47,6 +59,7 @@ const connections = [
     eta: '01:06',
     totalSize: '860 MB',
     progress: 38,
+    paused: false,
   },
   {
     peer: 'p2p:12D3KooW7f',
@@ -56,6 +69,7 @@ const connections = [
     eta: '00:31',
     totalSize: '1.1 GB',
     progress: 58,
+    paused: false,
   },
   {
     peer: '10.0.0.42:49422',
@@ -65,8 +79,16 @@ const connections = [
     eta: '00:09',
     totalSize: '640 MB',
     progress: 86,
+    paused: false,
   },
-];
+]);
+
+function togglePause(peer: string) {
+  const conn = connections.value.find((c) => c.peer === peer);
+  if (conn) {
+    conn.paused = !conn.paused;
+  }
+}
 
 const statusText = computed(() => {
   if (activeTab.value === 'transfer') {
@@ -142,12 +164,23 @@ function onFilePick(event: Event) {
               </div>
               <span class="mode-pill">{{ connection.mode }}</span>
             </div>
-            <div class="progress-track" :aria-label="`${connection.progress}% complete`">
-              <span :style="{ width: `${connection.progress}%` }"></span>
+            <div class="progress-row">
+              <div class="progress-track" :aria-label="`${connection.progress}% complete`">
+                <span :style="{ width: `${connection.progress}%` }"></span>
+              </div>
+              <button
+                class="pause-btn"
+                type="button"
+                @click="togglePause(connection.peer)"
+                :aria-label="connection.paused ? 'Resume' : 'Pause'"
+              >
+                <Play v-if="connection.paused" :size="14" />
+                <Pause v-else :size="14" />
+              </button>
             </div>
             <div class="transfer-meta">
               <span>{{ connection.speed }}</span>
-              <span>{{ connection.eta }} ETA</span>
+              <span>{{ connection.paused ? 'Paused' : connection.eta + ' ETA' }}</span>
               <span>{{ connection.totalSize }}</span>
             </div>
           </article>

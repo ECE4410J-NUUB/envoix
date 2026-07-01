@@ -437,6 +437,29 @@ input:focus {
   font-weight: 750;
 }
 
+.progress-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.pause-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  transition: background 0.15s;
+}
+
+.pause-btn:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
 .progress-track {
   height: 8px;
   overflow: hidden;
