@@ -97,6 +97,33 @@ where
     Err(last.expect("at least one attempt failed"))
 }
 
+/// Run the room pairing but abandon it - closing the rendezvous endpoint - if
+/// cancellation is requested. `join_room` blocks until the broker matches a
+/// partner (up to the room TTL) and that wait does not otherwise watch the
+/// cancel token, so a Ctrl-C while waiting for a partner would hang; this lets
+/// it exit promptly and cleanly instead. `rdz` is also closed on a pairing
+/// error so it never drops without a graceful close.
+async fn pair_or_cancel<T>(
+    rdz: &Endpoint,
+    broker: &EndpointAddr,
+    room_id: &str,
+    password: &str,
+    mine: &T,
+    cancel: &TransferCancelToken,
+) -> Result<RoomPairing<T>, SessionError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let result = tokio::select! {
+        result = pair_in_room_retrying(rdz, broker, room_id, password, mine) => result,
+        _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+    };
+    if result.is_err() {
+        rdz.close().await;
+    }
+    result
+}
+
 /// Override the pairing config with the token derived from the room pairing.
 fn with_room_token(config: SessionConfig, token: String) -> SessionConfig {
     SessionConfig {
@@ -149,7 +176,15 @@ pub async fn receive_file_via_room_with_cancel(
     let my_addr = ready_endpoint_addr(&bound, config.relay.is_some()).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
-    let pairing = pair_in_room_retrying(&rdz, &broker, room_id, password, &my_addr).await?;
+    let pairing = match pair_or_cancel(&rdz, &broker, room_id, password, &my_addr, &cancel).await {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            // Pairing was cancelled or failed; close our data listener too so it
+            // does not drop without a graceful close.
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
@@ -205,7 +240,7 @@ pub async fn send_file_via_room_with_cancel(
     // valid endpoint address works as a placeholder.
     let placeholder = rdz.addr();
 
-    let pairing = pair_in_room_retrying(&rdz, &broker, room_id, password, &placeholder).await?;
+    let pairing = pair_or_cancel(&rdz, &broker, room_id, password, &placeholder, &cancel).await?;
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;

@@ -422,11 +422,27 @@ where
                     "failed to listen for interrupt signal: {error}"
                 ))
             })?;
-            eprintln!("interrupt received; notifying peer and shutting down...");
+            eprintln!("interrupt received; shutting down (Ctrl-C again to force)...");
             cancel.cancel();
-            operation.await
+            // Give the operation a moment to observe the cancel and shut down
+            // cleanly (e.g. notify the peer mid-transfer). But some phases - like
+            // waiting in a room for a partner - don't watch the token, so never
+            // block forever: a second Ctrl-C or a short grace period forces exit.
+            tokio::select! {
+                result = &mut operation => result,
+                _ = tokio::signal::ctrl_c() => Err(interrupted_error()),
+                _ = tokio::time::sleep(SHUTDOWN_GRACE) => Err(interrupted_error()),
+            }
         }
     }
+}
+
+/// How long a first Ctrl-C waits for a clean shutdown before forcing exit.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// Error used when an interrupt forces exit before the operation finished.
+fn interrupted_error() -> envoix_client::PublicError {
+    envoix_client::PublicError::Transfer("interrupted before completion".into())
 }
 
 fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
