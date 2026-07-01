@@ -1,5 +1,5 @@
-//! Rendezvous server binary: bind an iroh endpoint, print its endpoint id (the
-//! address clients hard-code), and serve room pairing until terminated.
+//! Rendezvous server binary: bind an iroh endpoint, print a usable rendezvous
+//! address (`<endpoint-id>@<ip:port>`), and serve room pairing until terminated.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,10 @@ use envoix_rendezvous_iroh::{build_endpoint, relay_mode_from_url, serve_endpoint
     about = "Envoix room rendezvous (iroh node)"
 )]
 struct Cli {
-    /// UDP address to bind the iroh endpoint to.
-    #[arg(long, default_value = "0.0.0.0:0")]
+    /// UDP address to bind the iroh endpoint to. Defaults to a fixed port so the
+    /// advertised `<endpoint-id>@<ip:port>` stays stable across restarts; use a
+    /// random `:0` port only for throwaway or relay-only setups.
+    #[arg(long, default_value = "0.0.0.0:8445")]
     bind: SocketAddr,
     /// File holding the server's persistent secret key (created with owner-only
     /// permissions if missing), so the endpoint id stays stable across restarts.
@@ -42,8 +44,21 @@ async fn main() -> Result<()> {
         .with_context(|| format!("secret key {}", cli.secret_key.display()))?;
     let relay = relay_mode_from_url(cli.relay.as_deref())?;
     let endpoint = build_endpoint(cli.bind, secret_key, relay).await?;
-    tracing::info!(endpoint_id = %endpoint.id(), "rendezvous server listening");
+    tracing::info!(endpoint_id = %endpoint.id(), bind = %cli.bind, "rendezvous server listening");
     println!("rendezvous endpoint id: {}", endpoint.id());
+    println!("listening on {}", cli.bind);
+    // Print a ready-to-use --rendezvous value. When bound to an unspecified
+    // address (0.0.0.0/::) the reachable host is unknown to the process, so show
+    // the (now fixed) port and let the operator fill in the public IP.
+    if cli.bind.ip().is_unspecified() {
+        println!(
+            "connect with: --rendezvous {}@<this-host-ip>:{}",
+            endpoint.id(),
+            cli.bind.port()
+        );
+    } else {
+        println!("connect with: --rendezvous {}@{}", endpoint.id(), cli.bind);
+    }
 
     serve_endpoint(endpoint, Arc::new(RoomRegistry::new())).await
 }
